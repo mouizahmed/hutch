@@ -1,6 +1,5 @@
 #!/bin/sh
-# Refuse any commit that includes files under internal/ (the private docs repo).
-if git diff --cached --name-only | grep -Eq '^internal(/|$)'; then
-  echo "pre-commit: internal/ is the private docs repo and must never be committed here." >&2
+if git diff --cached --name-only | grep -Eq '^private(/|$)'; then
+  echo "pre-commit: private/ is the private docs repo and must never be committed here." >&2
   exit 1
 fi

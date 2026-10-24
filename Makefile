@@ -1,0 +1,26 @@
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -s -w -X github.com/mouizahmed/hutch/internal/version.Version=$(VERSION)
+
+.PHONY: build linux test vet vuln check clean
+
+build:
+	go build -trimpath -ldflags '$(LDFLAGS)' -o bin/ ./cmd/...
+
+# hutch-guest must be static to run in any guest image.
+linux:
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/linux-amd64/ ./cmd/hutchd ./cmd/hutch-guest
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/linux-arm64/ ./cmd/hutchd ./cmd/hutch-guest
+
+test:
+	go test ./...
+
+vet:
+	go vet ./...
+
+vuln:
+	go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+
+check: vet test vuln
+
+clean:
+	rm -rf bin dist
