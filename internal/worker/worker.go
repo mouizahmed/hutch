@@ -53,6 +53,8 @@ type Box struct {
 	// boot); the next diff snapshot is applied on top of a copy of it.
 	BaseMem string `json:"base_mem,omitempty"`
 	Idle    Idle   `json:"idle"`
+	// Watch lists files whose hashes guest status reports: credentials agents refresh.
+	Watch []string `json:"watch,omitempty"`
 }
 
 // Idle is a box's idle policy; zero values mean the defaults.

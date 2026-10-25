@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -78,6 +79,11 @@ CREATE TABLE IF NOT EXISTS user_layer (
 	version INTEGER NOT NULL,
 	content BLOB NOT NULL,
 	updated TIMESTAMP NOT NULL
+);
+-- The logins each box was granted, for pushing refreshed credentials to it.
+CREATE TABLE IF NOT EXISTS box_credentials (
+	box_id      TEXT PRIMARY KEY REFERENCES boxes(id) ON DELETE CASCADE,
+	credentials TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS configs (
 	name    TEXT PRIMARY KEY,
@@ -445,4 +451,24 @@ func (s *store) putLayerPart(part string, base int64, content []byte) (int64, bo
 func (s *store) deleteLayerPart(part string) error {
 	_, err := s.db.Exec(`DELETE FROM user_layer WHERE part = ?`, part)
 	return err
+}
+
+func (s *store) setBoxCredentials(box string, creds []string) error {
+	data, _ := json.Marshal(creds)
+	_, err := s.db.Exec(`INSERT INTO box_credentials (box_id, credentials) VALUES (?, ?)
+		ON CONFLICT(box_id) DO UPDATE SET credentials = excluded.credentials`, box, string(data))
+	return err
+}
+
+func (s *store) boxCredentials(box string) ([]string, error) {
+	var data string
+	err := s.db.QueryRow(`SELECT credentials FROM box_credentials WHERE box_id = ?`, box).Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var creds []string
+	return creds, json.Unmarshal([]byte(data), &creds)
 }

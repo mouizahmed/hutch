@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -356,7 +357,9 @@ func (w *Worker) Exec(ctx context.Context, id string, e guestproto.Exec, stdout,
 	return c.Exec(ctx, e, stdout, stderr)
 }
 
-func (w *Worker) WriteFiles(ctx context.Context, id string, f guestproto.Files) error {
+// WriteFiles writes files into a running box and adds watch to the files its
+// status reports hashes of.
+func (w *Worker) WriteFiles(ctx context.Context, id string, f guestproto.Files, watch []string) error {
 	b, err := w.load(id)
 	if err != nil {
 		return err
@@ -364,7 +367,28 @@ func (w *Worker) WriteFiles(ctx context.Context, id string, f guestproto.Files) 
 	if b.State != Running {
 		return fmt.Errorf("box %q is %s", id, b.State)
 	}
-	return (&guestproto.Client{UDSPath: w.vsockPath(id)}).Files(ctx, f)
+	if len(f.Files) > 0 {
+		if err := (&guestproto.Client{UDSPath: w.vsockPath(id)}).Files(ctx, f); err != nil {
+			return err
+		}
+	}
+	if len(watch) == 0 {
+		return nil
+	}
+	unlock, err := w.lock(id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if b, err = w.load(id); err != nil {
+		return err
+	}
+	for _, p := range watch {
+		if !slices.Contains(b.Watch, p) {
+			b.Watch = append(b.Watch, p)
+		}
+	}
+	return w.save(b)
 }
 
 // DialPort opens a byte stream to a TCP port on a running box's loopback.
@@ -409,7 +433,11 @@ func (w *Worker) CPUTime(b *Box) (time.Duration, error) {
 }
 
 func (w *Worker) GuestStatus(ctx context.Context, id string) (guestproto.Status, error) {
-	return (&guestproto.Client{UDSPath: w.vsockPath(id)}).Status(ctx)
+	b, err := w.load(id)
+	if err != nil {
+		return guestproto.Status{}, err
+	}
+	return (&guestproto.Client{UDSPath: w.vsockPath(id)}).Status(ctx, b.Watch...)
 }
 
 // Alive reports whether a running box's Firecracker process still exists.

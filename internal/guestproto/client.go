@@ -137,9 +137,13 @@ func (c *Client) Exec(ctx context.Context, e Exec, stdout, stderr io.Writer) (in
 	return code, err
 }
 
-func (c *Client) Status(ctx context.Context) (Status, error) {
+func (c *Client) Status(ctx context.Context, watch ...string) (Status, error) {
 	var st Status
-	err := c.call(ctx, Request{Type: TypeStatus}, func(r Response) (bool, error) {
+	req := Request{Type: TypeStatus}
+	if len(watch) > 0 {
+		req.Status = &StatusParams{Watch: watch}
+	}
+	err := c.call(ctx, req, func(r Response) (bool, error) {
 		if r.Status != nil {
 			st = *r.Status
 		}

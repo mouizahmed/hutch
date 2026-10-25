@@ -172,7 +172,11 @@ func (s *Server) onBoxWorker(method string) rpc.Handler {
 		if err != nil {
 			return nil, err
 		}
-		return s.callForBox(ctx, w, method, p)
+		nb, err := s.callForBox(ctx, w, method, p)
+		if err == nil && method == api.BoxWake {
+			s.refreshCredentials(ctx, w, p.ID)
+		}
+		return nb, err
 	}
 }
 
@@ -216,6 +220,7 @@ func (s *Server) awake(ctx context.Context, id string) (*workerConn, error) {
 		if _, err := s.callForBox(ctx, w, api.BoxWake, api.IDParams{ID: id}); err != nil {
 			return nil, fmt.Errorf("wake %s: %w", id, err)
 		}
+		s.refreshCredentials(ctx, w, id)
 	}
 	return w, nil
 }

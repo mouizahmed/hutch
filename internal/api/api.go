@@ -189,6 +189,7 @@ type CaptureParams struct {
 type FilesParams struct {
 	ID    string           `json:"id"`
 	Files guestproto.Files `json:"files"`
+	Watch []string         `json:"watch,omitempty"` // report hashes of these files from now on
 }
 
 // DialParams opens a stream to a port on a box's loopback: after a guestproto "ok"
@@ -225,9 +226,10 @@ type Report struct {
 }
 
 type BoxReport struct {
-	Box        Box           `json:"box"`
-	Threads    []ThreadState `json:"threads,omitempty"`
-	LastActive time.Time     `json:"last_active"`
+	Box        Box               `json:"box"`
+	Threads    []ThreadState     `json:"threads,omitempty"`
+	LastActive time.Time         `json:"last_active"`
+	Files      map[string]string `json:"files,omitempty"` // hashes of watched files
 }
 
 type ThreadState struct {

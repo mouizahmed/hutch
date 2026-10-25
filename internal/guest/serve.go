@@ -70,7 +70,11 @@ func handle(ctx context.Context, conn net.Conn) {
 	}
 
 	if req.Type == guestproto.TypeStatus {
-		st, err := status()
+		var watch []string
+		if req.Status != nil {
+			watch = req.Status.Watch
+		}
+		st, err := status(watch)
 		r := &responder{conn: conn}
 		if err != nil {
 			r.fail(err)

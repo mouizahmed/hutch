@@ -269,7 +269,7 @@ func handlers(w *worker.Worker, name string, m *monitor) rpc.Mux {
 			if err := rpc.Decode(params, &p); err != nil {
 				return nil, err
 			}
-			return nil, w.WriteFiles(ctx, p.ID, p.Files)
+			return nil, w.WriteFiles(ctx, p.ID, p.Files, p.Watch)
 		},
 		api.BoxStatus: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
 			var p api.IDParams

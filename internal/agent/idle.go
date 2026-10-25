@@ -144,6 +144,7 @@ func (m *monitor) checkBox(ctx context.Context, b *worker.Box) (api.BoxReport, b
 		r.LastActive = now
 		return r, false
 	}
+	r.Files = st.Files
 	if st.Clients > 0 || st.Sessions > 0 {
 		a.lastActive = now
 	}

@@ -26,13 +26,20 @@ const (
 )
 
 type Request struct {
-	Type    string   `json:"type"`
-	Version int      `json:"version"`
-	Restore *Restore `json:"restore,omitempty"`
-	Exec    *Exec    `json:"exec,omitempty"`
-	PTY     *PTY     `json:"pty,omitempty"`
-	Files   *Files   `json:"files,omitempty"`
-	Dial    *Dial    `json:"dial,omitempty"`
+	Type    string        `json:"type"`
+	Version int           `json:"version"`
+	Restore *Restore      `json:"restore,omitempty"`
+	Exec    *Exec         `json:"exec,omitempty"`
+	PTY     *PTY          `json:"pty,omitempty"`
+	Files   *Files        `json:"files,omitempty"`
+	Dial    *Dial         `json:"dial,omitempty"`
+	Status  *StatusParams `json:"status,omitempty"`
+}
+
+// StatusParams asks for hashes of files the host watches for changes (credentials
+// an agent refreshes). Older guests ignore it.
+type StatusParams struct {
+	Watch []string `json:"watch,omitempty"`
 }
 
 // Files writes files atomically, owned by User (default dev).
@@ -111,6 +118,8 @@ type Status struct {
 	Clients  int            `json:"clients"`  // attached tmux clients, any session
 	Sessions int            `json:"sessions"` // open exec and terminal sessions
 	Ports    []ListenPort   `json:"ports,omitempty"`
+	// Files maps each watched path that exists to the SHA-256 of its contents.
+	Files map[string]string `json:"files,omitempty"`
 }
 
 // ListenPort is a listening TCP socket in the guest.

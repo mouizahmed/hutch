@@ -4,6 +4,7 @@
 package agents
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -210,13 +211,16 @@ func (s Set) Argv(agent, cmd, prompt, autonomy string) ([]string, error) {
 }
 
 // JSONKeys returns a JSON object of only the given top-level keys of data, or nil
-// if none of them are present.
+// if none of them are present. The output is canonical (sorted, compact), so the
+// same values always give the same bytes however the file was formatted.
 func JSONKeys(data []byte, keys []string) ([]byte, error) {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(data, &m); err != nil {
+	var m map[string]any
+	d := json.NewDecoder(bytes.NewReader(data))
+	d.UseNumber()
+	if err := d.Decode(&m); err != nil {
 		return nil, err
 	}
-	out := map[string]json.RawMessage{}
+	out := map[string]any{}
 	for _, k := range keys {
 		if v, ok := m[k]; ok {
 			out[k] = v

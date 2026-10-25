@@ -39,6 +39,10 @@ type Server struct {
 	workers map[string]*workerConn
 	// threadStates holds the latest reported state of each thread, by box and number.
 	threadStates map[string]map[int]string
+	// fileHashes holds the last reported hashes of each box's watched credential
+	// files; syncing marks boxes whose changed credentials are being read.
+	fileHashes map[string]map[string]string
+	syncing    map[string]bool
 }
 
 type workerConn struct {
@@ -61,7 +65,8 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: cfg, store: st, ca: ca, workers: map[string]*workerConn{}, threadStates: map[string]map[int]string{}}, nil
+	return &Server{cfg: cfg, store: st, ca: ca, workers: map[string]*workerConn{}, threadStates: map[string]map[int]string{},
+		fileHashes: map[string]map[string]string{}, syncing: map[string]bool{}}, nil
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -291,6 +296,7 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 				s.mu.Lock()
 				s.threadStates[br.Box.ID] = states
 				s.mu.Unlock()
+				s.watchReport(br)
 			}
 			return nil, nil
 		},

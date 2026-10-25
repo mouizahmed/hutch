@@ -4,6 +4,8 @@ package guest
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"os/user"
@@ -20,7 +22,7 @@ var sessions atomic.Int64
 
 const threadSession = "hutch"
 
-func status() (guestproto.Status, error) {
+func status(watch []string) (guestproto.Status, error) {
 	st := guestproto.Status{Sessions: int(sessions.Load())}
 	out, err := tmuxAsDev("list-windows", "-t", threadSession, "-F", "#{window_index} #{pane_dead} #{window_activity}")
 	if err == nil {
@@ -38,7 +40,33 @@ func status() (guestproto.Status, error) {
 		st.Clients = len(strings.Fields(out))
 	}
 	st.Ports = listeningPorts()
+	st.Files = hashFiles(watch)
 	return st, nil
+}
+
+// hashFiles hashes the watched files that exist; "~/" means dev's home.
+func hashFiles(paths []string) map[string]string {
+	if len(paths) == 0 {
+		return nil
+	}
+	home := "/home/dev"
+	if u, err := user.Lookup("dev"); err == nil {
+		home = u.HomeDir
+	}
+	out := map[string]string{}
+	for _, p := range paths {
+		full := p
+		if rest, ok := strings.CutPrefix(p, "~/"); ok {
+			full = home + "/" + rest
+		}
+		data, err := os.ReadFile(full)
+		if err != nil {
+			continue
+		}
+		sum := sha256.Sum256(data)
+		out[p] = hex.EncodeToString(sum[:])
+	}
+	return out
 }
 
 // listeningPorts reads TCP sockets in LISTEN state from /proc/net/tcp{,6}.
