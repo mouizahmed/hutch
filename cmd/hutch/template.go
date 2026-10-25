@@ -82,7 +82,8 @@ func templateParams(repo *config.Repo, cfg *config.Config, needCommit bool) (api
 	if !needCommit {
 		return p, nil
 	}
-	if dirty, err := git(repo.Root, "status", "--porcelain", "--", ".hutch"); err != nil {
+	// hutch.toml is read here, not in the VM, so the project form may have just changed it.
+	if dirty, err := git(repo.Root, "status", "--porcelain", "--", ".hutch", ":!.hutch/hutch.toml"); err != nil {
 		return p, err
 	} else if dirty != "" {
 		return p, fmt.Errorf("commit and push .hutch/ first; a template is built from a commit:\n%s", dirty)
@@ -156,6 +157,7 @@ func initCommand() *cobra.Command {
 func templateCommands() *cobra.Command {
 	tmpl := &cobra.Command{Use: "template", Short: "Build and manage this project's template", GroupID: "projects"}
 
+	var buildFlags, snapFlags formFlags
 	build := &cobra.Command{
 		Use:   "build",
 		Short: "Run the committed recipe in a fresh VM and verify it",
@@ -163,6 +165,9 @@ func templateCommands() *cobra.Command {
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, _ []string) error {
 			repo, cfg, err := project(ctx, sess)
 			if err != nil {
+				return err
+			}
+			if cfg, err = confirmSettings(ctx, sess, repo, cfg, buildFlags, false); err != nil {
 				return err
 			}
 			p, err := templateParams(repo, cfg, true)
@@ -188,6 +193,9 @@ func templateCommands() *cobra.Command {
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, _ []string) error {
 			repo, cfg, err := project(ctx, sess)
 			if err != nil {
+				return err
+			}
+			if cfg, err = confirmSettings(ctx, sess, repo, cfg, snapFlags, false); err != nil {
 				return err
 			}
 			p, err := templateParams(repo, cfg, true)
@@ -260,6 +268,8 @@ func templateCommands() *cobra.Command {
 		}),
 	}
 
+	buildFlags.register(build.Flags())
+	snapFlags.register(snapshot.Flags())
 	tmpl.AddCommand(build, snapshot, shell, versions)
 	return tmpl
 }

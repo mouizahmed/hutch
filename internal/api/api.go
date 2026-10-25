@@ -39,6 +39,7 @@ const (
 	TemplateSnapshot = "template.snapshot"
 	TemplateList     = "template.list"
 	TemplateBox      = "template.box"
+	ProjectConfirm   = "project.confirm"
 	SecretsGet       = "secrets.get"
 	SecretsPut       = "secrets.put"
 
@@ -125,8 +126,25 @@ const (
 
 // Project is a repository Hutch builds templates for. Slug names its boxes.
 type Project struct {
-	ID   string `json:"id"`
-	Slug string `json:"slug"`
+	ID    string `json:"id"`
+	Slug  string `json:"slug"`
+	Peaks *Peaks `json:"peaks,omitempty"` // measured in the latest template build
+	// Confirmed identifies the project settings last confirmed in the project form.
+	Confirmed string `json:"confirmed,omitempty"`
+}
+
+type ConfirmParams struct {
+	Project  string `json:"project"`
+	Settings string `json:"settings"`
+}
+
+// Peaks is the most memory and CPU a template build used, and the box it ran in.
+type Peaks struct {
+	MemMiB  int       `json:"mem_mib"`
+	CPUs    float64   `json:"cpus"` // busy vCPUs
+	OfVCPUs int       `json:"of_vcpus"`
+	OfMiB   int       `json:"of_mib"`
+	At      time.Time `json:"at"`
 }
 
 // Template is one frozen template version of a project.

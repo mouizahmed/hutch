@@ -124,6 +124,8 @@ var migrations = []string{
 	`ALTER TABLE threads ADD COLUMN renamed INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE box_meta ADD COLUMN secrets TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE templates ADD COLUMN secrets TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE projects ADD COLUMN peaks TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE projects ADD COLUMN confirmed TEXT NOT NULL DEFAULT ''`,
 }
 
 func openStore(path string) (*store, error) {
@@ -398,11 +400,27 @@ func (s *store) meta(box string) (boxMeta, error) {
 
 func (s *store) project(id string) (api.Project, error) {
 	p := api.Project{ID: id}
-	err := s.db.QueryRow(`SELECT slug FROM projects WHERE id = ?`, id).Scan(&p.Slug)
+	var peaks string
+	err := s.db.QueryRow(`SELECT slug, peaks, confirmed FROM projects WHERE id = ?`, id).Scan(&p.Slug, &peaks, &p.Confirmed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, fmt.Errorf("no project %s on this server (run hutch init)", id)
 	}
+	if err == nil && peaks != "" {
+		p.Peaks = &api.Peaks{}
+		err = json.Unmarshal([]byte(peaks), p.Peaks)
+	}
 	return p, err
+}
+
+func (s *store) setConfirmed(id, settings string) error {
+	_, err := s.db.Exec(`UPDATE projects SET confirmed = ? WHERE id = ?`, settings, id)
+	return err
+}
+
+func (s *store) setPeaks(id string, p api.Peaks) error {
+	data, _ := json.Marshal(p)
+	_, err := s.db.Exec(`UPDATE projects SET peaks = ? WHERE id = ?`, string(data), id)
+	return err
 }
 
 // addProject registers a project under the first free slug from base, base-2, ...

@@ -39,6 +39,7 @@ func (s *Server) apiMux() rpc.Mux {
 		api.TemplateSnapshot: s.templateSnapshot,
 		api.TemplateList:     s.templateList,
 		api.TemplateBox:      s.templateBox,
+		api.ProjectConfirm:   s.projectConfirm,
 		api.SecretsGet:       s.secretsGet,
 		api.SecretsPut:       s.secretsPut,
 		api.ConfigPut:        s.configPut,

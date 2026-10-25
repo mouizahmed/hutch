@@ -9,6 +9,7 @@ import (
 	"io"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +30,14 @@ func (s *Server) projectInit(ctx context.Context, params json.RawMessage, _ *rpc
 		return nil, err
 	}
 	return s.store.addProject(p.Project, slugFor(p.Project))
+}
+
+func (s *Server) projectConfirm(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+	var p api.ConfirmParams
+	if err := rpc.Decode(params, &p); err != nil {
+		return nil, err
+	}
+	return nil, s.store.setConfirmed(p.Project, p.Settings)
 }
 
 var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
@@ -117,6 +126,11 @@ func (s *Server) build(ctx context.Context, proj api.Project, p api.TemplatePara
 		}
 	}
 
+	sampleCtx, stopSampling := context.WithCancel(ctx)
+	peaks := make(chan api.Peaks, 1)
+	go func() { peaks <- s.samplePeaks(sampleCtx, w, id) }()
+	defer stopSampling()
+
 	step(stdout, "setup.sh (as root)")
 	if err := s.run(ctx, w, id, api.ExecParams{User: "root", Dir: workspace, Env: []string{"DEBIAN_FRONTEND=noninteractive"},
 		Argv: []string{"bash", "-eo", "pipefail", ".hutch/setup.sh"}}, stdout, stderr); err != nil {
@@ -131,6 +145,12 @@ func (s *Server) build(ctx context.Context, proj api.Project, p api.TemplatePara
 	if err := s.run(ctx, w, id, api.ExecParams{Dir: workspace, Argv: []string{"bash", "-eo", "pipefail", ".hutch/verify.sh"}}, stdout, stderr); err != nil {
 		return fail(err)
 	}
+	stopSampling()
+	pk := <-peaks
+	pk.OfVCPUs, pk.OfMiB, pk.At = p.VCPUs, p.MemMiB, time.Now().UTC()
+	s.store.setPeaks(proj.ID, pk)
+	fmt.Fprintf(stdout, "\nPeak use: %.1f GB memory, %.1f vCPUs (of %d vCPU, %.0f GB)\n", float64(pk.MemMiB)/1024, pk.CPUs, p.VCPUs, float64(p.MemMiB)/1024)
+
 	// Whatever verify.sh left running would be running in every box.
 	s.run(ctx, w, id, api.ExecParams{User: "root", Argv: []string{"pkill", "-KILL", "-u", "dev"}}, io.Discard, io.Discard)
 
@@ -418,4 +438,47 @@ func (s *Server) removeBox(ctx context.Context, id string) error {
 	}
 	s.store.event(id, api.BoxRm, "removed")
 	return s.store.deleteBox(id)
+}
+
+// samplePeaks reads the guest's memory and CPU use every two seconds until ctx ends.
+func (s *Server) samplePeaks(ctx context.Context, w *workerConn, box string) api.Peaks {
+	var peak api.Peaks
+	var lastBusy, lastTotal, cores float64
+	for {
+		var out bytes.Buffer
+		err := s.run(ctx, w, box, api.ExecParams{Argv: []string{"sh", "-c", "grep -E '^(MemTotal|MemAvailable):' /proc/meminfo; head -1 /proc/stat; nproc"}}, &out, io.Discard)
+		if err == nil {
+			var total, avail int
+			for _, line := range strings.Split(out.String(), "\n") {
+				f := strings.Fields(line)
+				switch {
+				case len(f) >= 2 && f[0] == "MemTotal:":
+					total, _ = strconv.Atoi(f[1])
+				case len(f) >= 2 && f[0] == "MemAvailable:":
+					avail, _ = strconv.Atoi(f[1])
+				case len(f) > 5 && f[0] == "cpu":
+					var sum float64
+					for _, v := range f[1:] {
+						n, _ := strconv.ParseFloat(v, 64)
+						sum += n
+					}
+					idle, _ := strconv.ParseFloat(f[4], 64)
+					iowait, _ := strconv.ParseFloat(f[5], 64)
+					busy := sum - idle - iowait
+					if lastTotal > 0 && sum > lastTotal && cores > 0 {
+						peak.CPUs = max(peak.CPUs, cores*(busy-lastBusy)/(sum-lastTotal))
+					}
+					lastBusy, lastTotal = busy, sum
+				case len(f) == 1:
+					cores, _ = strconv.ParseFloat(f[0], 64)
+				}
+			}
+			peak.MemMiB = max(peak.MemMiB, (total-avail)/1024)
+		}
+		select {
+		case <-ctx.Done():
+			return peak
+		case <-time.After(2 * time.Second):
+		}
+	}
 }

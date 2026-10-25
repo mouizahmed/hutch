@@ -408,12 +408,26 @@ func configCommands() *cobra.Command {
 	setLayer.register(set)
 
 	var editFlags layerFlags
+	var projectFlags formFlags
 	edit := &cobra.Command{
 		Use:   "edit",
-		Short: "Edit one layer in your editor",
+		Short: "Edit one layer in your editor (--project opens the project form)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			layer := editFlags.layer(nil)
+			if layer == config.Project {
+				sess, err := connect()
+				if err != nil {
+					return err
+				}
+				defer sess.Close()
+				repo, cfg, err := project(cmd.Context(), sess)
+				if err != nil {
+					return err
+				}
+				_, err = confirmSettings(cmd.Context(), sess, repo, cfg, projectFlags, true)
+				return err
+			}
 			change := func(text []byte) ([]byte, error) { return editInEditor(text, layer, layer.String()+" config") }
 			// The user config is edited before connecting, so a broken one can be fixed.
 			if layer == config.User {
@@ -440,6 +454,7 @@ func configCommands() *cobra.Command {
 		},
 	}
 	editFlags.register(edit)
+	projectFlags.register(edit.Flags())
 
 	explain := &cobra.Command{
 		Use:   "explain",

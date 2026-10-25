@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -133,7 +134,12 @@ func Set(text []byte, path []string, raw any) ([]byte, error) {
 			return check(join(lines))
 		}
 		if hasPrefix(path, l.key) {
-			return nil, fmt.Errorf("%s is set as an inline table on line %d; edit the file instead", FormatPath(l.key), i+1)
+			text, err := setInline(l, path[len(l.key):], raw)
+			if err != nil {
+				return nil, fmt.Errorf("%s on line %d: %w", FormatPath(l.key), i+1, err)
+			}
+			lines[i].text = text
+			return check(join(lines))
 		}
 	}
 
@@ -182,6 +188,85 @@ func Set(text []byte, path []string, raw any) ([]byte, error) {
 	}
 	lines = slices.Insert(lines, end+1, line{text: FormatPath(path) + " = " + literal(raw)})
 	return check(join(lines))
+}
+
+// setInline sets rest inside a one-line inline table, keeping the line's comment.
+func setInline(l line, rest []string, raw any) (string, error) {
+	eq := keyEnd(l.text)
+	value, comment := splitComment(l.text[eq+1:])
+	value = strings.TrimSpace(value)
+	if strings.Contains(l.text, "\n") || !strings.HasPrefix(value, "{") {
+		return "", errors.New("not a one-line inline table; edit the file instead")
+	}
+	var m map[string]any
+	if _, err := toml.Decode("v = "+value, &m); err != nil {
+		return "", err
+	}
+	t, _ := m["v"].(map[string]any)
+	cur := t
+	for _, k := range rest[:len(rest)-1] {
+		next, ok := cur[k].(map[string]any)
+		if !ok {
+			next = map[string]any{}
+			cur[k] = next
+		}
+		cur = next
+	}
+	cur[rest[len(rest)-1]] = raw
+	out := l.text[:eq+1] + " " + inline(t)
+	if comment != "" {
+		out += "   " + comment
+	}
+	return out, nil
+}
+
+func inline(m map[string]any) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		if sub, ok := m[k].(map[string]any); ok {
+			parts[i] = FormatPath([]string{k}) + " = " + inline(sub)
+		} else {
+			parts[i] = FormatPath([]string{k}) + " = " + literal(m[k])
+		}
+	}
+	return "{ " + strings.Join(parts, ", ") + " }"
+}
+
+// splitComment splits a value from a trailing "# comment" outside strings.
+func splitComment(s string) (value, comment string) {
+	inQuote := false
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '\\' && inQuote:
+			i++
+		case c == '"':
+			inQuote = !inQuote
+		case c == '#' && !inQuote:
+			return s[:i], strings.TrimSpace(s[i:])
+		}
+	}
+	return s, ""
+}
+
+// Comment returns the trailing comment on the line that sets path (or the inline
+// table holding it), without the "#": where an agent writes its reason.
+func Comment(text []byte, path []string) string {
+	lines, err := scan(text)
+	if err != nil {
+		return ""
+	}
+	for _, l := range lines {
+		if l.key != nil && hasPrefix(path, l.key) {
+			_, c := splitComment(l.text[keyEnd(l.text)+1:])
+			return strings.TrimSpace(strings.TrimPrefix(c, "#"))
+		}
+	}
+	return ""
 }
 
 // Remove deletes every key under prefix, and tables under it.

@@ -136,6 +136,21 @@ autonomy = "full"
 	}
 }
 
+// The setup prompt has agents write size as an inline table with a reason.
+func TestEditInlineTable(t *testing.T) {
+	text := []byte("version = 1\nsize = { cpu = 4, memory = \"8G\" }   # Next.js + Postgres\n")
+	if c := Comment(text, []string{"size", "memory"}); c != "Next.js + Postgres" {
+		t.Errorf("comment %q", c)
+	}
+	out, err := Set(text, []string{"size", "memory"}, "16G")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "version = 1\nsize = { cpu = 4, memory = \"16G\" }   # Next.js + Postgres\n"; string(out) != want {
+		t.Fatalf("got %q", out)
+	}
+}
+
 func TestNormalizeRemote(t *testing.T) {
 	for _, url := range []string{"git@github.com:me/app.git", "https://github.com/me/app", "ssh://git@GitHub.com/me/app.git/"} {
 		if got := NormalizeRemote(url); got != "github.com/me/app" {
