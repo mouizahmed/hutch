@@ -98,6 +98,8 @@ var Keys = []*Key{
 	{Path: "template.quiet_timeout", Kind: Duration, Default: "2m", Min: "1s", Max: "1h", Layers: project,
 		Doc: "how long a snapshot waits for queued systemd jobs and transient units to finish"},
 
+	{Path: "retention.template_versions", Kind: Int, Default: int64(2), Min: "1", Max: "100", Layers: server,
+		Doc: "template versions kept per project, besides those boxes were forked from"},
 	{Path: "worker.memory_margin", Kind: Percent, Default: "10%", Min: "0%", Max: "50%", Layers: server,
 		Doc: "RAM held back for the host on every worker"},
 	{Path: "idle.check_interval", Kind: Duration, Default: "15s", Min: "1s", Max: "5m", Layers: server,

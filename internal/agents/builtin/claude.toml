@@ -15,6 +15,9 @@ config = [
   "~/.claude/skills/",
   "~/.claude/agents/",
   "~/.claude/commands/",
+  "~/.claude/plugins/installed_plugins.json",
+  "~/.claude/plugins/known_marketplaces.json",
+  "~/.claude/plugins/cache/",
   { file = "~/.claude.json", keys = ["mcpServers"] },
 ]
 mcp        = { file = "~/.claude.json", key = "mcpServers", format = "claude" }

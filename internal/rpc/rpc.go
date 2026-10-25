@@ -47,7 +47,7 @@ type Out struct {
 func (o *Out) send(f Frame) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	return wire.Write(o.conn, f)
+	return wire.WriteMax(o.conn, f, wire.MaxRPCFrame)
 }
 
 func (o *Out) Stdout(b []byte) error { return o.send(Frame{Type: FrameStdout, Data: b}) }
@@ -98,7 +98,7 @@ func Serve(ctx context.Context, sess *yamux.Session, mux Mux, streams Streams) e
 func handle(ctx context.Context, conn net.Conn, mux Mux, streams Streams) {
 	defer conn.Close()
 	var req Request
-	if err := wire.Read(conn, &req); err != nil {
+	if err := wire.ReadMax(conn, &req, wire.MaxRPCFrame); err != nil {
 		return
 	}
 	if sh, ok := streams[req.Method]; ok {
@@ -154,12 +154,12 @@ func Stream(ctx context.Context, sess *yamux.Session, method string, params any,
 	if err != nil {
 		return err
 	}
-	if err := wire.Write(conn, Request{Method: method, Params: p}); err != nil {
+	if err := wire.WriteMax(conn, Request{Method: method, Params: p}, wire.MaxRPCFrame); err != nil {
 		return err
 	}
 	for {
 		var f Frame
-		if err := wire.Read(conn, &f); err != nil {
+		if err := wire.ReadMax(conn, &f, wire.MaxRPCFrame); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -261,7 +261,7 @@ func Relay(ctx context.Context, to *yamux.Session, method string, params json.Ra
 
 // WriteError ends a stream with an error frame.
 func WriteError(conn net.Conn, err error) error {
-	return wire.Write(conn, Frame{Type: FrameError, Error: err.Error()})
+	return wire.WriteMax(conn, Frame{Type: FrameError, Error: err.Error()}, wire.MaxRPCFrame)
 }
 
 // OpenStream sends a request for a StreamHandler and returns the stream.
@@ -275,7 +275,7 @@ func OpenStream(ctx context.Context, sess *yamux.Session, method string, params 
 		conn.Close()
 		return nil, err
 	}
-	if err := wire.Write(conn, Request{Method: method, Params: p}); err != nil {
+	if err := wire.WriteMax(conn, Request{Method: method, Params: p}, wire.MaxRPCFrame); err != nil {
 		conn.Close()
 		return nil, err
 	}

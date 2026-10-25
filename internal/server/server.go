@@ -200,6 +200,7 @@ func (s *Server) handleWorkerConn(ctx context.Context, conn *tls.Conn) {
 	s.workers[id] = w
 	s.mu.Unlock()
 	log.Printf("worker %s (%s) connected: %s, %d boxes", id, info.Name, info.Class, len(info.Boxes))
+	go s.pruneAll(ctx)
 
 	<-sess.CloseChan()
 	s.mu.Lock()

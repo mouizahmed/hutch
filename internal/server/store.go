@@ -126,6 +126,7 @@ var migrations = []string{
 	`ALTER TABLE templates ADD COLUMN secrets TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE projects ADD COLUMN peaks TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE projects ADD COLUMN confirmed TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE box_meta ADD COLUMN version INTEGER NOT NULL DEFAULT 0`,
 }
 
 func openStore(path string) (*store, error) {
@@ -378,13 +379,14 @@ type boxMeta struct {
 	project, kind, commit string
 	verified              bool
 	secrets               string // digest of the project secrets a template box was built with
+	version               int    // the template version a box was forked from
 }
 
 func (s *store) putMeta(box string, m boxMeta) error {
-	_, err := s.db.Exec(`INSERT INTO box_meta (box_id, project_id, kind, commit_sha, verified, secrets) VALUES (?, ?, ?, ?, ?, ?)
+	_, err := s.db.Exec(`INSERT INTO box_meta (box_id, project_id, kind, commit_sha, verified, secrets, version) VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(box_id) DO UPDATE SET project_id = excluded.project_id, kind = excluded.kind,
-			commit_sha = excluded.commit_sha, verified = excluded.verified, secrets = excluded.secrets`,
-		box, m.project, m.kind, m.commit, m.verified, m.secrets)
+			commit_sha = excluded.commit_sha, verified = excluded.verified, secrets = excluded.secrets, version = excluded.version`,
+		box, m.project, m.kind, m.commit, m.verified, m.secrets, m.version)
 	return err
 }
 
@@ -569,4 +571,50 @@ func (s *store) putProjectSecrets(project, digest string, content []byte) error 
 		ON CONFLICT(project_id) DO UPDATE SET digest = excluded.digest, content = excluded.content, updated = excluded.updated`,
 		project, digest, content, time.Now().UTC())
 	return err
+}
+
+// versionsInUse returns the template versions a project's boxes were forked from,
+// and the commits of boxes forked before versions were recorded.
+func (s *store) versionsInUse(project string) (map[int]bool, map[string]bool, error) {
+	rows, err := s.db.Query(`SELECT version, commit_sha FROM box_meta WHERE project_id = ? AND kind != ?`, project, api.BoxVersion)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	versions, commits := map[int]bool{}, map[string]bool{}
+	for rows.Next() {
+		var v int
+		var c string
+		if err := rows.Scan(&v, &c); err != nil {
+			return nil, nil, err
+		}
+		if v > 0 {
+			versions[v] = true
+		} else if c != "" {
+			commits[c] = true
+		}
+	}
+	return versions, commits, rows.Err()
+}
+
+func (s *store) deleteTemplate(project string, version int) error {
+	_, err := s.db.Exec(`DELETE FROM templates WHERE project_id = ? AND version = ?`, project, version)
+	return err
+}
+
+func (s *store) projects() ([]string, error) {
+	rows, err := s.db.Query(`SELECT id FROM projects`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }

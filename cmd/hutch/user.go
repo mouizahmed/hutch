@@ -87,7 +87,8 @@ func collectLayer() (collected, error) {
 					}
 				}
 				f.Data = bytes.ReplaceAll(f.Data, []byte(home+"/"), []byte(boxHome+"/"))
-				for _, m := range notInBoxes.FindAll(f.Data, 3) {
+				// Only config files: docs and scripts mention macOS paths harmlessly.
+				for _, m := range configPaths(f) {
 					c.warnings = append(c.warnings, fmt.Sprintf("%s mentions %s, which won't exist in a box", f.Path, m))
 				}
 				total += len(f.Data)
@@ -122,6 +123,10 @@ func readLocal(home string, src agents.Source) ([]guestproto.File, error) {
 			}
 			if err != nil || !d.Type().IsRegular() {
 				return err
+			}
+			// Claude Code marks plugins in use by running processes here.
+			if strings.Contains(p, "/.in_use/") {
+				return nil
 			}
 			data, err := os.ReadFile(p)
 			if err != nil {
@@ -193,6 +198,13 @@ func splitSecrets(f guestproto.File, key string) (guestproto.File, *guestproto.F
 		return f, nil, err
 	}
 	return f, &guestproto.File{Path: f.Path, Mode: 0o600, Data: data, Merge: true}, nil
+}
+
+func configPaths(f guestproto.File) [][]byte {
+	if ext := filepath.Ext(f.Path); ext != ".json" && ext != ".toml" {
+		return nil
+	}
+	return notInBoxes.FindAll(f.Data, 3)
 }
 
 func fileKey(adapter string, f guestproto.File) string { return adapter + " " + f.Path }

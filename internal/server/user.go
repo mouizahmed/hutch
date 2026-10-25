@@ -164,10 +164,12 @@ func (s *Server) applyUserLayer(ctx context.Context, w *workerConn, box string, 
 			files = append(files, guestproto.File{Path: seed.File, Mode: 0o600, Data: data, Merge: true})
 		}
 	}
-	// Frames are limited to 4 MB. The last call also starts watching credentials.
+	// Guest frames are limited to 4 MB, and file data travels base64-encoded (a third
+	// larger), so batches stay under 2 MB of data. The last call also starts watching
+	// credentials.
 	for first := true; first || len(files) > 0; first = false {
 		n, size := 0, 0
-		for n < len(files) && (n == 0 || size+len(files[n].Data) < 3<<20) {
+		for n < len(files) && (n == 0 || size+len(files[n].Data) < 2<<20) {
 			size += len(files[n].Data)
 			n++
 		}

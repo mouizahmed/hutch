@@ -279,35 +279,44 @@ func (w *Worker) Sleep(ctx context.Context, id string) (*Box, error) {
 		return nil, fmt.Errorf("box %q is %s", id, b.State)
 	}
 	m := &vm{w: w, box: b, slot: slot(b.Slot), jail: w.jailRoot(id), api: firecracker.NewClient(filepath.Join(w.jailRoot(id), jailAPI))}
-	state, diff, err := m.snapshot(ctx)
-	if err != nil {
-		m.api.Resume(ctx)
-		return nil, err
-	}
-
 	prev := b.Generation
 	gen := w.genDir(id, prev+1)
-	if err := os.MkdirAll(gen, 0o755); err != nil {
+	// Until the new generation is complete, the VM is only paused: on any failure
+	// (a full disk, say) drop what was written and let it run on.
+	state, diff, err := m.snapshot(ctx)
+	fail := func(err error) (*Box, error) {
+		os.RemoveAll(gen)
+		os.Remove(filepath.Join(m.jail, jailSnap, "vmstate"))
+		os.Remove(filepath.Join(m.jail, jailSnap, "mem"))
+		if rerr := m.api.Resume(ctx); rerr != nil {
+			return nil, fmt.Errorf("%w; and resuming the VM failed: %v", err, rerr)
+		}
 		return nil, err
+	}
+	if err != nil {
+		return fail(err)
+	}
+	if err := os.MkdirAll(gen, 0o755); err != nil {
+		return fail(err)
 	}
 	mem := filepath.Join(gen, "mem")
 	if b.BaseMem != "" {
 		if err := clone(b.BaseMem, mem); err != nil {
-			return nil, err
+			return fail(err)
 		}
 		if err := applyDiff(mem, diff); err != nil {
-			return nil, err
+			return fail(err)
 		}
 	} else {
 		if err := os.Rename(diff, mem); err != nil {
-			return nil, err
+			return fail(err)
 		}
 		if err := applyDiff(mem, mem); err != nil {
-			return nil, err
+			return fail(err)
 		}
 	}
 	if err := os.Rename(state, filepath.Join(gen, "vmstate")); err != nil {
-		return nil, err
+		return fail(err)
 	}
 
 	w.killFirecracker(b)

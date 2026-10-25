@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"path"
 	"regexp"
 	"strconv"
@@ -255,6 +256,7 @@ func (s *Server) templateSnapshot(ctx context.Context, params json.RawMessage, o
 		return nil, err
 	}
 	fmt.Fprintf(stdout, "\nTemplate v%d = recipe @ %.12s\n", n, p.Commit)
+	s.pruneVersions(ctx, proj.ID)
 	return t, nil
 }
 
@@ -334,7 +336,7 @@ func (s *Server) templateBox(ctx context.Context, params json.RawMessage, out *r
 	if err != nil {
 		return nil, err
 	}
-	if err := s.store.putMeta(id, boxMeta{project: proj.ID, kind: api.BoxTemplate, commit: v.Commit}); err != nil {
+	if err := s.store.putMeta(id, boxMeta{project: proj.ID, kind: api.BoxTemplate, commit: v.Commit, version: v.Version}); err != nil {
 		return nil, err
 	}
 	if err := s.applyUserLayer(ctx, w, id, p.Credentials); err != nil {
@@ -368,7 +370,7 @@ func (s *Server) forkProject(ctx context.Context, p api.ForkParams, stdout, stde
 	if err != nil {
 		return b, err
 	}
-	if err := s.store.putMeta(b.ID, boxMeta{project: p.Project, commit: v.Commit}); err != nil {
+	if err := s.store.putMeta(b.ID, boxMeta{project: p.Project, commit: v.Commit, version: v.Version}); err != nil {
 		return b, err
 	}
 	if err := s.applyUserLayer(ctx, w, b.ID, p.Credentials); err != nil {
@@ -480,5 +482,50 @@ func (s *Server) samplePeaks(ctx context.Context, w *workerConn, box string) api
 			return peak
 		case <-time.After(2 * time.Second):
 		}
+	}
+}
+
+// pruneVersions removes a project's old template versions beyond the newest
+// retention.template_versions, keeping any a box was forked from. Forks share
+// nothing with a version that removing it would break (their files are reflinks
+// and hard links), but moves and handoffs later build on it.
+func (s *Server) pruneVersions(ctx context.Context, project string) {
+	cfg, err := s.settings()
+	if err != nil {
+		log.Printf("prune %s: %v", project, err)
+		return
+	}
+	versions, err := s.store.templates(project)
+	if err != nil {
+		log.Printf("prune %s: %v", project, err)
+		return
+	}
+	inUse, commits, err := s.store.versionsInUse(project)
+	if err != nil {
+		log.Printf("prune %s: %v", project, err)
+		return
+	}
+	keep := int(cfg.Int("retention.template_versions"))
+	for i, v := range versions {
+		if i < keep || inUse[v.Version] || commits[v.Commit] {
+			continue
+		}
+		if err := s.removeBox(ctx, v.Box); err != nil {
+			log.Printf("prune %s v%d: %v", project, v.Version, err)
+			continue
+		}
+		s.store.deleteTemplate(project, v.Version)
+		log.Printf("pruned template %s v%d", project, v.Version)
+	}
+}
+
+// pruneAll applies template retention to every project, as workers connect.
+func (s *Server) pruneAll(ctx context.Context) {
+	ids, err := s.store.projects()
+	if err != nil {
+		return
+	}
+	for _, id := range ids {
+		s.pruneVersions(ctx, id)
 	}
 }

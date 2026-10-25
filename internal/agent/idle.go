@@ -81,7 +81,9 @@ func (m *monitor) check(ctx context.Context, server *atomic.Pointer[yamux.Sessio
 			log.Printf("idle: %s inactive for %s, sleeping", b.ID, m.policy(b).Timeout)
 			slept, err := m.w.Sleep(ctx, b.ID)
 			if err != nil {
+				// Try again after another idle timeout, not at every check.
 				log.Printf("idle: sleep %s: %v", b.ID, err)
+				m.seen[b.ID].lastActive = time.Now()
 			} else {
 				r.Box = toAPI(m.w, slept)
 				r.Threads = nil

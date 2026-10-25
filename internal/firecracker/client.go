@@ -17,7 +17,10 @@ type Client struct {
 }
 
 func NewClient(socketPath string) *Client {
+	// No keep-alive: clients are short-lived, and Firecracker refuses connections
+	// beyond a small limit, so idle ones left open would lock hutchd out.
 	return &Client{http: &http.Client{Transport: &http.Transport{
+		DisableKeepAlives: true,
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", socketPath)
