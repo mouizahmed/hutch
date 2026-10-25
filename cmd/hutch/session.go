@@ -142,17 +142,43 @@ func terminal(ctx context.Context, sess *yamux.Session, box string, argv []strin
 
 // serialConsole connects this terminal to a running box's serial console.
 func serialConsole(ctx context.Context, sess *yamux.Session, box string) error {
-	banner := fmt.Sprintf("Connected to %s's serial console. Press Enter for a prompt, Ctrl-] to quit.", box)
+	banner := fmt.Sprintf("Connected to %s's serial console. Press Enter for a prompt; Enter ~ . quits.", box)
 	return connectTerminal(box, banner, func(int, int) (net.Conn, error) {
 		return rpc.OpenStream(ctx, sess, api.BoxSerial, api.ConsoleParams{ID: box})
 	})
 }
 
-// escapeKey (Ctrl-]) ends a serial console session, which has no exit of its own.
-const escapeKey = 0x1d
+// escape filters keystrokes for a serial console, which has no exit of its own: "~."
+// at the start of a line quits, as in ssh, and "~~" sends one "~". Hutch's local tmux
+// already binds Ctrl-] and Ctrl-\, so those can't be the escape.
+type escape struct {
+	lineStart, tilde bool
+}
+
+func (e *escape) filter(in []byte) (out []byte, quit bool) {
+	for _, b := range in {
+		switch {
+		case e.tilde:
+			e.tilde = false
+			if b == '.' {
+				return out, true
+			}
+			out = append(out, '~')
+			if b == '~' {
+				continue
+			}
+		case e.lineStart && b == '~':
+			e.tilde = true
+			continue
+		}
+		out = append(out, b)
+		e.lineStart = b == '\r' || b == '\n'
+	}
+	return out, false
+}
 
 // connectTerminal relays a terminal stream that speaks guestproto Input and Response
-// frames. A banner means a serial console: it is printed on connect and Ctrl-] quits.
+// frames. A banner means a serial console: it is printed on connect and "~." quits.
 func connectTerminal(box, banner string, open func(rows, cols int) (net.Conn, error)) error {
 	in, out := int(os.Stdin.Fd()), int(os.Stdout.Fd())
 	if !term.IsTerminal(in) || !term.IsTerminal(out) {
@@ -203,16 +229,18 @@ func connectTerminal(box, banner string, open func(rows, cols int) (net.Conn, er
 		}
 	}()
 	var quit atomic.Bool
+	esc := &escape{lineStart: true}
 	go func() {
 		buf := make([]byte, 32<<10)
 		for {
 			n, err := os.Stdin.Read(buf)
-			data := buf[:n]
-			if i := bytes.IndexByte(data, escapeKey); banner != "" && i >= 0 {
-				data = data[:i]
-				quit.Store(true)
+			data := append([]byte(nil), buf[:n]...)
+			if banner != "" {
+				var q bool
+				data, q = esc.filter(data)
+				quit.Store(q)
 			}
-			if len(data) > 0 && send(guestproto.Input{Type: guestproto.InputStdin, Data: append([]byte(nil), data...)}) != nil {
+			if len(data) > 0 && send(guestproto.Input{Type: guestproto.InputStdin, Data: data}) != nil {
 				return
 			}
 			if quit.Load() {
