@@ -44,8 +44,15 @@ func pushLoop(ctx context.Context) {
 		if err != nil || head == "" {
 			continue
 		}
-		if remote, _ := git("rev-parse", "-q", "--verify", "refs/remotes/origin/"+conf.Branch); remote == head {
+		remote, _ := git("rev-parse", "-q", "--verify", "refs/remotes/origin/"+conf.Branch)
+		if remote == head {
 			continue
+		}
+		// A branch with nothing new yet isn't worth creating on origin.
+		if remote == "" {
+			if on, _ := git("branch", "-r", "--contains", head); on != "" {
+				continue
+			}
 		}
 		last = time.Now()
 		st := &guestproto.Push{Branch: conf.Branch, Head: head, At: last.Unix()}
