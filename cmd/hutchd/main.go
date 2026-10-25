@@ -15,6 +15,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/mouizahmed/hutch/internal/agent"
 	"github.com/mouizahmed/hutch/internal/guestproto"
 	"github.com/mouizahmed/hutch/internal/version"
 	"github.com/mouizahmed/hutch/internal/worker"
@@ -30,6 +31,8 @@ commands:
   box exec <id> [--user NAME] -- <command> [args...]
   box console <id>                                       print the serial console log
   image import <name> <vmlinux> <rootfs.ext4>
+  enroll --server HOST:PORT --token TOKEN [--name NAME]   join a server
+  run [--name NAME]                                      serve the server's calls
   version
 `
 
@@ -62,6 +65,9 @@ func dispatch(ctx context.Context, root, fcVersion string, args []string) error 
 			return fmt.Errorf("usage: hutchd image import <name> <vmlinux> <rootfs.ext4>")
 		}
 		return importImage(root, args[2], args[3], args[4])
+	}
+	if args[0] == "enroll" || args[0] == "run" {
+		return daemon(ctx, root, fcVersion, args)
 	}
 	if len(args) < 2 || args[0] != "box" {
 		flag.Usage()
@@ -203,4 +209,30 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return os.Rename(dst+".tmp", dst)
+}
+
+func daemon(ctx context.Context, root, fcVersion string, args []string) error {
+	id := agent.Identity{Dir: filepath.Join(root, "identity")}
+	fs := flag.NewFlagSet(args[0], flag.ExitOnError)
+	host, _ := os.Hostname()
+	name := fs.String("name", host, "worker name shown by the server")
+	serverAddr := fs.String("server", "", "server address, host:port")
+	token := fs.String("token", "", "join token from `hutch server token`")
+	fs.Parse(args[1:])
+	if args[0] == "enroll" {
+		if *serverAddr == "" || *token == "" {
+			return fmt.Errorf("usage: hutchd enroll --server HOST:PORT --token TOKEN [--name NAME]")
+		}
+		wid, err := agent.Enroll(ctx, id, *serverAddr, *token, *name)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("enrolled as %s\n", wid)
+		return nil
+	}
+	w, err := worker.New(root, fcVersion)
+	if err != nil {
+		return err
+	}
+	return agent.Run(ctx, id, w, *name)
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/mdlayher/vsock"
 	"github.com/mouizahmed/hutch/internal/guestproto"
 	"github.com/mouizahmed/hutch/internal/version"
+	"github.com/mouizahmed/hutch/internal/wire"
 )
 
 func ListenAndServe(ctx context.Context) error {
@@ -44,7 +45,7 @@ type responder struct {
 func (r *responder) send(resp guestproto.Response) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return guestproto.Write(r.conn, resp)
+	return wire.Write(r.conn, resp)
 }
 
 func (r *responder) fail(err error) {
@@ -54,7 +55,7 @@ func (r *responder) fail(err error) {
 func handle(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	var req guestproto.Request
-	if err := guestproto.Read(conn, &req); err != nil {
+	if err := wire.Read(conn, &req); err != nil {
 		log.Printf("read request: %v", err)
 		return
 	}

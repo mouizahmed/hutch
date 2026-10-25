@@ -7,6 +7,8 @@ import (
 	"io"
 	"net"
 	"strings"
+
+	"github.com/mouizahmed/hutch/internal/wire"
 )
 
 // Client talks to hutch-guest through Firecracker's vsock Unix socket.
@@ -65,12 +67,12 @@ func (c *Client) call(ctx context.Context, req Request, handle func(Response) (d
 	defer stop()
 
 	req.Version = Version
-	if err := Write(conn, req); err != nil {
+	if err := wire.Write(conn, req); err != nil {
 		return err
 	}
 	for {
 		var resp Response
-		if err := Read(conn, &resp); err != nil {
+		if err := wire.Read(conn, &resp); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}

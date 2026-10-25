@@ -1,17 +1,8 @@
 package guestproto
 
-import (
-	"encoding/binary"
-	"encoding/json"
-	"fmt"
-	"io"
-)
-
 const (
 	Version = 1
 	Port    = 1024
-
-	maxFrame = 4 << 20
 )
 
 const (
@@ -57,37 +48,4 @@ type Response struct {
 	Error    string `json:"error,omitempty"`
 	Data     []byte `json:"data,omitempty"`
 	ExitCode int    `json:"exit_code,omitempty"`
-}
-
-func Write(w io.Writer, v any) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	if len(b) > maxFrame {
-		return fmt.Errorf("frame of %d bytes exceeds %d", len(b), maxFrame)
-	}
-	var hdr [4]byte
-	binary.BigEndian.PutUint32(hdr[:], uint32(len(b)))
-	if _, err := w.Write(hdr[:]); err != nil {
-		return err
-	}
-	_, err = w.Write(b)
-	return err
-}
-
-func Read(r io.Reader, v any) error {
-	var hdr [4]byte
-	if _, err := io.ReadFull(r, hdr[:]); err != nil {
-		return err
-	}
-	n := binary.BigEndian.Uint32(hdr[:])
-	if n > maxFrame {
-		return fmt.Errorf("frame of %d bytes exceeds %d", n, maxFrame)
-	}
-	b := make([]byte, n)
-	if _, err := io.ReadFull(r, b); err != nil {
-		return err
-	}
-	return json.Unmarshal(b, v)
 }
