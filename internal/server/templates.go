@@ -111,6 +111,10 @@ func (s *Server) build(ctx context.Context, proj api.Project, p api.TemplatePara
 		return fail(err)
 	}
 
+	if err := s.installAgents(ctx, w, id, stdout, stderr); err != nil {
+		return fail(err)
+	}
+
 	step(stdout, "verify.sh (as dev)")
 	if err := s.run(ctx, w, id, api.ExecParams{Dir: workspace, Argv: []string{"bash", "-eo", "pipefail", ".hutch/verify.sh"}}, stdout, stderr); err != nil {
 		return fail(err)
@@ -140,6 +144,9 @@ func (s *Server) bootTemplate(ctx context.Context, proj api.Project, p api.Templ
 	}
 	if err := s.store.putMeta(id, boxMeta{project: proj.ID, kind: api.BoxTemplate}); err != nil {
 		return b, nil, err
+	}
+	if err := s.applyUserLayer(ctx, w, id, p.Credentials); err != nil {
+		return b, w, err
 	}
 	step(stdout, "clone %s", p.CloneURL)
 	if err := s.run(ctx, w, id, api.ExecParams{Argv: []string{"git", "clone", "-q", p.CloneURL, workspace}}, stdout, stderr); err != nil {
@@ -283,7 +290,10 @@ func (s *Server) templateBox(ctx context.Context, params json.RawMessage, out *r
 	if err != nil {
 		return nil, err
 	}
-	return b, s.store.putMeta(id, boxMeta{project: proj.ID, kind: api.BoxTemplate, commit: v.Commit})
+	if err := s.store.putMeta(id, boxMeta{project: proj.ID, kind: api.BoxTemplate, commit: v.Commit}); err != nil {
+		return nil, err
+	}
+	return b, s.applyUserLayer(ctx, w, id, p.Credentials)
 }
 
 // forkProject creates a box from the project's newest template version and checks
@@ -311,6 +321,9 @@ func (s *Server) forkProject(ctx context.Context, p api.ForkParams, stdout, stde
 		return b, err
 	}
 	if err := s.store.putMeta(b.ID, boxMeta{project: p.Project, commit: v.Commit}); err != nil {
+		return b, err
+	}
+	if err := s.applyUserLayer(ctx, w, b.ID, p.Credentials); err != nil {
 		return b, err
 	}
 	base := "origin/HEAD"

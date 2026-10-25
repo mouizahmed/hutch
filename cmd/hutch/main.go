@@ -42,7 +42,7 @@ func main() {
 	root.AddCommand(sessionCommands()...)
 	root.AddCommand(threadCommands()...)
 	root.AddCommand(setupCommands()...)
-	root.AddCommand(configCommands(), initCommand(), templateCommands(), sizesCommand())
+	root.AddCommand(configCommands(), initCommand(), templateCommands(), sizesCommand(), userCommands(), loginCommand())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	err := root.ExecuteContext(ctx)

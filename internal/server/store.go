@@ -72,6 +72,13 @@ CREATE TABLE IF NOT EXISTS box_meta (
 	commit_sha TEXT NOT NULL DEFAULT '',
 	verified   INTEGER NOT NULL DEFAULT 0
 );
+-- The user layer: "config" and one "credentials/<adapter>[/mcp]" part per login.
+CREATE TABLE IF NOT EXISTS user_layer (
+	part    TEXT PRIMARY KEY,
+	version INTEGER NOT NULL,
+	content BLOB NOT NULL,
+	updated TIMESTAMP NOT NULL
+);
 CREATE TABLE IF NOT EXISTS configs (
 	name    TEXT PRIMARY KEY,
 	version INTEGER NOT NULL,
@@ -375,4 +382,67 @@ func (s *store) templates(project string) ([]api.Template, error) {
 		ts = append(ts, t)
 	}
 	return ts, rows.Err()
+}
+
+type layerPart struct {
+	version int64
+	content []byte
+	updated time.Time
+}
+
+func (s *store) layerPart(part string) (layerPart, error) {
+	var p layerPart
+	err := s.db.QueryRow(`SELECT version, content, updated FROM user_layer WHERE part = ?`, part).Scan(&p.version, &p.content, &p.updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return p, nil
+	}
+	return p, err
+}
+
+// layerParts lists the parts whose names start with prefix.
+func (s *store) layerParts(prefix string) (map[string]layerPart, error) {
+	rows, err := s.db.Query(`SELECT part, version, content, updated FROM user_layer WHERE part LIKE ? || '%'`, prefix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]layerPart{}
+	for rows.Next() {
+		var name string
+		var p layerPart
+		if err := rows.Scan(&name, &p.version, &p.content, &p.updated); err != nil {
+			return nil, err
+		}
+		out[name] = p
+	}
+	return out, rows.Err()
+}
+
+// putLayerPart writes a part if it is still at base (base < 0: unconditionally).
+func (s *store) putLayerPart(part string, base int64, content []byte) (int64, bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, false, err
+	}
+	defer tx.Rollback()
+	var cur int64
+	err = tx.QueryRow(`SELECT version FROM user_layer WHERE part = ?`, part).Scan(&cur)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, false, err
+	}
+	if base >= 0 && cur != base {
+		return cur, true, nil
+	}
+	_, err = tx.Exec(`INSERT INTO user_layer (part, version, content, updated) VALUES (?, ?, ?, ?)
+		ON CONFLICT(part) DO UPDATE SET version = excluded.version, content = excluded.content, updated = excluded.updated`,
+		part, cur+1, content, time.Now().UTC())
+	if err != nil {
+		return 0, false, err
+	}
+	return cur + 1, false, tx.Commit()
+}
+
+func (s *store) deleteLayerPart(part string) error {
+	_, err := s.db.Exec(`DELETE FROM user_layer WHERE part = ?`, part)
+	return err
 }

@@ -1,0 +1,333 @@
+package server
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/BurntSushi/toml"
+
+	"github.com/mouizahmed/hutch/internal/agents"
+	"github.com/mouizahmed/hutch/internal/api"
+	"github.com/mouizahmed/hutch/internal/guestproto"
+	"github.com/mouizahmed/hutch/internal/rpc"
+)
+
+const credentialsPrefix = "credentials/"
+
+func (s *Server) userLayer() (api.UserLayer, int64, error) {
+	var l api.UserLayer
+	p, err := s.store.layerPart("config")
+	if err != nil || p.version == 0 {
+		return l, p.version, err
+	}
+	return l, p.version, json.Unmarshal(p.content, &l)
+}
+
+// adapters is the built-in adapters overridden by the user's own.
+func (s *Server) adapters() (agents.Set, error) {
+	l, _, err := s.userLayer()
+	if err != nil {
+		return nil, err
+	}
+	return agents.Load(l.Adapters)
+}
+
+func (s *Server) credentials() ([]api.Credentials, error) {
+	parts, err := s.store.layerParts(credentialsPrefix)
+	if err != nil {
+		return nil, err
+	}
+	var out []api.Credentials
+	for name, p := range parts {
+		c := api.Credentials{Part: strings.TrimPrefix(name, credentialsPrefix), Version: p.version, Updated: p.updated}
+		if err := json.Unmarshal(p.content, &c.Files); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	slices.SortFunc(out, func(a, b api.Credentials) int { return strings.Compare(a.Part, b.Part) })
+	return out, nil
+}
+
+func (s *Server) userGet(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any, error) {
+	l, v, err := s.userLayer()
+	if err != nil {
+		return nil, err
+	}
+	creds, err := s.credentials()
+	if err != nil {
+		return nil, err
+	}
+	for i := range creds {
+		for j := range creds[i].Files {
+			creds[i].Files[j].Data = nil
+		}
+	}
+	return api.UserState{Version: v, Layer: l, Credentials: creds}, nil
+}
+
+func (s *Server) userPutConfig(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+	var p api.UserPutConfigParams
+	if err := rpc.Decode(params, &p); err != nil {
+		return nil, err
+	}
+	if _, err := agents.Load(p.Layer.Adapters); err != nil {
+		return nil, err
+	}
+	data, err := json.Marshal(p.Layer)
+	if err != nil {
+		return nil, err
+	}
+	v, conflict, err := s.store.putLayerPart("config", p.BaseVersion, data)
+	if err != nil {
+		return nil, err
+	}
+	if conflict {
+		return nil, errors.New("the user layer changed since you looked; run hutch user sync again")
+	}
+	existing, err := s.store.layerParts(credentialsPrefix)
+	if err != nil {
+		return nil, err
+	}
+	for name := range existing {
+		if a, ok := strings.CutSuffix(strings.TrimPrefix(name, credentialsPrefix), "/mcp"); ok && p.Secrets[a] == nil {
+			s.store.deleteLayerPart(name)
+		}
+	}
+	for a, files := range p.Secrets {
+		data, _ := json.Marshal(files)
+		if _, _, err := s.store.putLayerPart(credentialsPrefix+a+"/mcp", -1, data); err != nil {
+			return nil, err
+		}
+	}
+	return api.UserState{Version: v, Layer: p.Layer}, nil
+}
+
+// granted reports whether a box with these credentials grants gets adapter a's logins.
+func granted(creds []string, a string) bool {
+	return slices.Contains(creds, "*") || slices.Contains(creds, a)
+}
+
+// applyUserLayer writes the user layer into a running box: config, the granted
+// credentials, then each agent's first-run seeds, then git identity and gh's git
+// credential helper.
+func (s *Server) applyUserLayer(ctx context.Context, w *workerConn, box string, creds []string) error {
+	l, _, err := s.userLayer()
+	if err != nil {
+		return err
+	}
+	set, err := agents.Load(l.Adapters)
+	if err != nil {
+		return err
+	}
+	stored, err := s.credentials()
+	if err != nil {
+		return err
+	}
+	var files []guestproto.File
+	for _, a := range set.Sorted() {
+		files = append(files, l.Files[a.Name]...)
+	}
+	hasGH := false
+	for _, c := range stored {
+		a, _, _ := strings.Cut(c.Part, "/")
+		if granted(creds, a) {
+			files = append(files, c.Files...)
+			hasGH = hasGH || c.Part == "gh"
+		}
+	}
+	for _, a := range set.Sorted() {
+		for _, seed := range a.Seed {
+			data, err := seedData(seed)
+			if err != nil {
+				return fmt.Errorf("adapter %s: seed %s: %w", a.Name, seed.File, err)
+			}
+			files = append(files, guestproto.File{Path: seed.File, Mode: 0o600, Data: data, Merge: true})
+		}
+	}
+	// Frames are limited to 4 MB.
+	for len(files) > 0 {
+		n, size := 0, 0
+		for n < len(files) && (n == 0 || size+len(files[n].Data) < 3<<20) {
+			size += len(files[n].Data)
+			n++
+		}
+		err := rpc.Call(ctx, w.sess, api.BoxFiles, api.FilesParams{ID: box, Files: guestproto.Files{Files: files[:n]}}, nil)
+		if err != nil && strings.Contains(err.Error(), "unsupported request type") {
+			// A box from before the user layer keeps what it has.
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("write user layer: %w", err)
+		}
+		files = files[n:]
+	}
+	var script []string
+	if l.GitName != "" {
+		script = append(script, `git config --global user.name "$1"`)
+	}
+	if l.GitEmail != "" {
+		script = append(script, `git config --global user.email "$2"`)
+	}
+	if hasGH {
+		script = append(script, "gh auth setup-git")
+	}
+	if len(script) == 0 {
+		return nil
+	}
+	return s.run(ctx, w, box, api.ExecParams{Argv: []string{"sh", "-ec", strings.Join(script, "\n"), "sh", l.GitName, l.GitEmail}}, io.Discard, io.Discard)
+}
+
+// seedData encodes a seed for merging: JSON or TOML by the file's extension.
+func seedData(seed agents.Seed) ([]byte, error) {
+	switch {
+	case strings.HasSuffix(seed.File, ".json"):
+		return json.Marshal(seed.Merge)
+	case strings.HasSuffix(seed.File, ".toml"):
+		var b bytes.Buffer
+		err := toml.NewEncoder(&b).Encode(seed.Merge)
+		return b.Bytes(), err
+	}
+	return nil, errors.New("seeds must be .json or .toml files")
+}
+
+// installAgents runs every agent adapter's install command and the user's
+// user-setup.sh in a template box, as dev.
+func (s *Server) installAgents(ctx context.Context, w *workerConn, box string, stdout, stderr io.Writer) error {
+	l, _, err := s.userLayer()
+	if err != nil {
+		return err
+	}
+	set, err := agents.Load(l.Adapters)
+	if err != nil {
+		return err
+	}
+	for _, a := range set.Sorted() {
+		if a.Install == "" || !a.Agent() {
+			continue
+		}
+		step(stdout, "install %s", a.Name)
+		if err := s.run(ctx, w, box, api.ExecParams{Argv: []string{"bash", "-eo", "pipefail", "-c", a.Install}}, stdout, stderr); err != nil {
+			return fmt.Errorf("install %s: %w", a.Name, err)
+		}
+	}
+	if l.UserSetup != "" {
+		step(stdout, "user-setup.sh (as dev)")
+		if err := s.run(ctx, w, box, api.ExecParams{Argv: []string{"bash", "-eo", "pipefail", "-c", l.UserSetup}}, stdout, stderr); err != nil {
+			return fmt.Errorf("user-setup.sh: %w", err)
+		}
+	}
+	return nil
+}
+
+// userLoginBox starts a scratch box from the base image with the requested agents
+// installed, for `hutch login` to run their logins in.
+func (s *Server) userLoginBox(ctx context.Context, params json.RawMessage, out *rpc.Out) (any, error) {
+	var p api.LoginParams
+	if err := rpc.Decode(params, &p); err != nil {
+		return nil, err
+	}
+	set, err := s.adapters()
+	if err != nil {
+		return nil, err
+	}
+	stdout, stderr := out.Writers()
+	w, err := s.placement("")
+	if err != nil {
+		return nil, err
+	}
+	suffix := make([]byte, 3)
+	rand.Read(suffix)
+	id := "login-" + hex.EncodeToString(suffix)
+	step(stdout, "boot %s", id)
+	b, err := s.callForBox(ctx, w, api.BoxBoot, api.BootParams{ID: id, Image: baseImage, VCPUs: 2, MemMiB: 4096,
+		Idle: api.Idle{Timeout: time.Hour}})
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range p.Adapters {
+		a := set[name]
+		if a == nil || a.Login == "" {
+			s.removeBox(ctx, id)
+			return nil, fmt.Errorf("no login for %q", name)
+		}
+		if a.Install != "" {
+			step(stdout, "install %s", name)
+			if err := s.run(ctx, w, id, api.ExecParams{Argv: []string{"bash", "-eo", "pipefail", "-c", a.Install}}, stdout, stderr); err != nil {
+				s.removeBox(ctx, id)
+				return nil, err
+			}
+		}
+	}
+	return b, nil
+}
+
+// userCapture copies an adapter's credential files from a box into the user layer.
+func (s *Server) userCapture(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+	var p api.CaptureParams
+	if err := rpc.Decode(params, &p); err != nil {
+		return nil, err
+	}
+	set, err := s.adapters()
+	if err != nil {
+		return nil, err
+	}
+	a := set[p.Adapter]
+	if a == nil {
+		return nil, fmt.Errorf("no adapter %q", p.Adapter)
+	}
+	w, err := s.awake(ctx, p.Box)
+	if err != nil {
+		return nil, err
+	}
+	files, err := s.readSources(ctx, w, p.Box, a.Credentials)
+	if err != nil {
+		return nil, err
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("%s left no credentials in the box; did the login finish?", p.Adapter)
+	}
+	data, _ := json.Marshal(files)
+	v, _, err := s.store.putLayerPart(credentialsPrefix+p.Adapter, -1, data)
+	if err != nil {
+		return nil, err
+	}
+	return api.Credentials{Part: p.Adapter, Version: v, Updated: time.Now().UTC()}, nil
+}
+
+// readSources reads adapter sources from a box; missing files are skipped.
+func (s *Server) readSources(ctx context.Context, w *workerConn, box string, sources []agents.Source) ([]guestproto.File, error) {
+	var files []guestproto.File
+	for _, src := range sources {
+		var data bytes.Buffer
+		err := s.run(ctx, w, box, api.ExecParams{Argv: []string{"sh", "-c", `f="$HOME/${1#\~/}"; [ ! -f "$f" ] || cat -- "$f"`, "sh", src.File}}, &data, io.Discard)
+		if err != nil {
+			return nil, err
+		}
+		if data.Len() == 0 {
+			continue
+		}
+		f := guestproto.File{Path: src.File, Mode: 0o600, Data: data.Bytes()}
+		if len(src.Keys) > 0 {
+			subset, err := agents.JSONKeys(data.Bytes(), src.Keys)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", src.File, err)
+			}
+			if subset == nil {
+				continue
+			}
+			f.Data, f.Merge = subset, true
+		}
+		files = append(files, f)
+	}
+	return files, nil
+}

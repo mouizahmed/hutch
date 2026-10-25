@@ -1,0 +1,4 @@
+# A login, not an agent: GitHub access for git and gh in every box.
+name        = "gh"
+login       = "gh auth login --hostname github.com --git-protocol https --web"
+credentials = ["~/.config/gh/hosts.yml"]

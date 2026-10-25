@@ -38,7 +38,14 @@ func (s *Server) threadNew(ctx context.Context, params json.RawMessage, _ *rpc.O
 	if p.Agent == "" && p.Cmd == "" {
 		p.Agent = "claude"
 	}
-	argv, err := agents.Argv(p.Agent, p.Cmd, p.Prompt)
+	set, err := s.adapters()
+	if err != nil {
+		return nil, err
+	}
+	if p.Autonomy == "" {
+		p.Autonomy = "full"
+	}
+	argv, err := set.Argv(p.Agent, p.Cmd, p.Prompt, p.Autonomy)
 	if err != nil {
 		return nil, err
 	}

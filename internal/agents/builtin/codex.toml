@@ -1,0 +1,15 @@
+name        = "codex"
+install     = "sudo npm install -g @openai/codex"
+start       = "codex {prompt}"
+autonomy    = { full = ["--dangerously-bypass-approvals-and-sandbox"], ask = [] }
+resume      = "codex resume {session_id}"
+login       = "codex login"
+sessions    = "~/.codex/sessions/**/*.jsonl"
+credentials = ["~/.codex/auth.json"]
+config      = ["~/.codex/config.toml", "~/.codex/AGENTS.md"]
+mcp         = { file = "~/.codex/config.toml", key = "mcp_servers", format = "codex" }
+transcript  = "codex"
+
+[[seed]]
+file  = "~/.codex/config.toml"
+merge = { tui = { screen_reader_detection_done = true }, projects = { "/workspace" = { trust_level = "trusted" } } }

@@ -67,6 +67,7 @@ func templateParams(repo *config.Repo, cfg *config.Config, needCommit bool) (api
 		MemMiB:       int(cfg.Size("size.memory") >> 20),
 		DiskBytes:    cfg.Size("disk.size"),
 		Idle:         api.Idle{Timeout: cfg.Duration("idle_timeout"), CPUThreshold: cfg.Percent("idle.cpu_threshold")},
+		Credentials:  cfg.List("credentials"),
 		BuildTimeout: cfg.Duration("template.build_timeout"),
 		QuietTimeout: cfg.Duration("template.quiet_timeout"),
 	}

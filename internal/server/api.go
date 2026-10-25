@@ -26,6 +26,10 @@ func (s *Server) apiMux() rpc.Mux {
 		api.ThreadNew:        s.threadNew,
 		api.ThreadSend:       s.threadSend,
 		api.ConfigGet:        s.configGet,
+		api.UserGet:          s.userGet,
+		api.UserPutConfig:    s.userPutConfig,
+		api.UserLoginBox:     s.userLoginBox,
+		api.UserCapture:      s.userCapture,
 		api.ProjectInit:      s.projectInit,
 		api.TemplateBuild:    s.templateBuild,
 		api.TemplateSnapshot: s.templateSnapshot,
@@ -136,7 +140,11 @@ func (s *Server) boxFork(ctx context.Context, params json.RawMessage, out *rpc.O
 	if err != nil {
 		return nil, err
 	}
-	return s.callForBox(ctx, w, api.BoxFork, p)
+	b, err := s.callForBox(ctx, w, api.BoxFork, p)
+	if err != nil {
+		return nil, err
+	}
+	return b, s.applyUserLayer(ctx, w, b.ID, p.Credentials)
 }
 
 func (s *Server) workerFor(id string) (*workerConn, error) {

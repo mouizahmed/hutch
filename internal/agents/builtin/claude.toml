@@ -1,0 +1,30 @@
+name        = "claude"
+install     = "curl -fsSL https://claude.ai/install.sh | bash"
+start       = "claude {prompt}"
+autonomy    = { full = ["--dangerously-skip-permissions"], ask = [] }
+resume      = "claude --resume {session_id}"
+login       = "claude auth login"
+sessions    = "~/.claude/projects/**/*.jsonl"
+credentials = [
+  "~/.claude/.credentials.json",
+  { file = "~/.claude.json", keys = ["oauthAccount", "userID"] },
+]
+config = [
+  "~/.claude/CLAUDE.md",
+  "~/.claude/settings.json",
+  "~/.claude/skills/",
+  "~/.claude/agents/",
+  "~/.claude/commands/",
+  { file = "~/.claude.json", keys = ["mcpServers"] },
+]
+mcp        = { file = "~/.claude.json", key = "mcpServers", format = "claude" }
+transcript = "claude"
+
+# First-run prompts a box would otherwise stop at.
+[[seed]]
+file  = "~/.claude.json"
+merge = { hasCompletedOnboarding = true, projects = { "/workspace" = { hasTrustDialogAccepted = true } } }
+
+[[seed]]
+file  = "~/.claude/settings.json"
+merge = { skipDangerousModePermissionPrompt = true }

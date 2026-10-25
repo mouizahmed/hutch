@@ -25,6 +25,11 @@ const (
 	BoxStatus  = "box.status"
 	BoxDial    = "box.dial"
 
+	UserGet       = "user.get"
+	UserPutConfig = "user.put_config"
+	UserLoginBox  = "user.login_box"
+	UserCapture   = "user.capture"
+
 	ProjectInit      = "project.init"
 	TemplateBuild    = "template.build"
 	TemplateSnapshot = "template.snapshot"
@@ -132,12 +137,53 @@ type TemplateParams struct {
 	MemMiB       int           `json:"mem_mib"`
 	DiskBytes    int64         `json:"disk_bytes"`
 	Idle         Idle          `json:"idle"`
+	Credentials  []string      `json:"credentials,omitempty"`
 	BuildTimeout time.Duration `json:"build_timeout"`
 	QuietTimeout time.Duration `json:"quiet_timeout"`
 }
 
 type ProjectParams struct {
 	Project string `json:"project"`
+}
+
+// UserLayer is the part of the user layer synced from a laptop: no secrets.
+type UserLayer struct {
+	Adapters  map[string]string            `json:"adapters,omitempty"` // user adapter files, by file name
+	Files     map[string][]guestproto.File `json:"files,omitempty"`    // config files, by adapter
+	GitName   string                       `json:"git_name,omitempty"`
+	GitEmail  string                       `json:"git_email,omitempty"`
+	UserSetup string                       `json:"user_setup,omitempty"` // ~/.config/hutch/user-setup.sh
+}
+
+// Credentials are one adapter's captured login files, or with a "/mcp" suffix the
+// secrets split out of its MCP config.
+type Credentials struct {
+	Part    string            `json:"part"`
+	Version int64             `json:"version"`
+	Files   []guestproto.File `json:"files,omitempty"`
+	Updated time.Time         `json:"updated"`
+}
+
+type UserState struct {
+	Version     int64         `json:"version"`
+	Layer       UserLayer     `json:"layer"`
+	Credentials []Credentials `json:"credentials"` // files without data
+}
+
+type UserPutConfigParams struct {
+	BaseVersion int64     `json:"base_version"`
+	Layer       UserLayer `json:"layer"`
+	// MCP secrets split out of config, by adapter; they replace each adapter's "/mcp" part.
+	Secrets map[string][]guestproto.File `json:"secrets,omitempty"`
+}
+
+type LoginParams struct {
+	Adapters []string `json:"adapters"`
+}
+
+type CaptureParams struct {
+	Box     string `json:"box"`
+	Adapter string `json:"adapter"`
 }
 
 type FilesParams struct {
@@ -191,10 +237,11 @@ type ThreadState struct {
 }
 
 type ThreadParams struct {
-	Box    string `json:"box"`
-	Agent  string `json:"agent,omitempty"`
-	Cmd    string `json:"cmd,omitempty"`
-	Prompt string `json:"prompt,omitempty"`
+	Box      string `json:"box"`
+	Agent    string `json:"agent,omitempty"`
+	Cmd      string `json:"cmd,omitempty"`
+	Prompt   string `json:"prompt,omitempty"`
+	Autonomy string `json:"autonomy,omitempty"` // full or ask
 }
 
 type SendParams struct {
@@ -233,6 +280,8 @@ type ForkParams struct {
 	Base    string `json:"base,omitempty"`
 	ID      string `json:"id"`
 	Idle    Idle   `json:"idle"`
+	// Logins the box gets ("*": all), resolved from the project's grants.
+	Credentials []string `json:"credentials,omitempty"`
 }
 
 type IDParams struct {

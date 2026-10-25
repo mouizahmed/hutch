@@ -83,7 +83,7 @@ func boxCommands() []*cobra.Command {
 					return fmt.Errorf("%w\n  hutch console %s", err, name)
 				}
 			} else if from == "" && repo != nil {
-				p := api.ForkParams{Project: repo.ID, Base: cfg.String("base"), ID: name, Idle: idle}
+				p := api.ForkParams{Project: repo.ID, Base: cfg.String("base"), ID: name, Idle: idle, Credentials: cfg.List("credentials")}
 				if err := rpc.CallOutput(ctx, sess, api.BoxFork, p, &b, os.Stdout, os.Stderr); err != nil {
 					return err
 				}
@@ -91,7 +91,7 @@ func boxCommands() []*cobra.Command {
 				if from == "" {
 					from = "base"
 				}
-				if err := rpc.Call(ctx, sess, api.BoxFork, api.ForkParams{Source: from, ID: name, Idle: idle}, &b); err != nil {
+				if err := rpc.Call(ctx, sess, api.BoxFork, api.ForkParams{Source: from, ID: name, Idle: idle, Credentials: cfg.List("credentials")}, &b); err != nil {
 					return err
 				}
 			}
@@ -229,13 +229,13 @@ type agentFlags struct {
 }
 
 func (a *agentFlags) register(c *cobra.Command) {
-	c.Flags().StringVar(&a.agent, "agent", "", "agent to run: "+strings.Join(agents.Names(), ", ")+" (default: default_agent)")
+	c.Flags().StringVar(&a.agent, "agent", "", "agent to run: "+strings.Join(agents.Builtin().Names(), ", ")+" (default: default_agent)")
 	c.Flags().StringVar(&a.cmd, "cmd", "", "run any terminal command instead of an agent")
 	c.MarkFlagsMutuallyExclusive("agent", "cmd")
 }
 
 func startThread(ctx context.Context, sess *yamux.Session, cfg *config.Config, box string, a agentFlags, args []string) (api.Thread, error) {
-	p := api.ThreadParams{Box: box, Agent: a.agent, Cmd: a.cmd}
+	p := api.ThreadParams{Box: box, Agent: a.agent, Cmd: a.cmd, Autonomy: cfg.String("autonomy")}
 	if len(args) > 0 {
 		p.Prompt = args[0]
 	}
