@@ -32,7 +32,7 @@ type boxActivity struct {
 
 // monitor checks running boxes, puts idle ones to sleep, and reports to the server
 // when connected. It decides locally, so boxes still sleep while the server is down.
-func monitor(ctx context.Context, w *worker.Worker, cfg IdleConfig, server *atomic.Pointer[yamux.Session]) {
+func monitor(ctx context.Context, w *worker.Worker, cfg IdleConfig, server *atomic.Pointer[yamux.Session], kick <-chan struct{}) {
 	seen := map[string]*boxActivity{}
 	t := time.NewTicker(cfg.Interval)
 	defer t.Stop()
@@ -41,6 +41,7 @@ func monitor(ctx context.Context, w *worker.Worker, cfg IdleConfig, server *atom
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		case <-kick:
 		}
 		boxes, err := w.List()
 		if err != nil {

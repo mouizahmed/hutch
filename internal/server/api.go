@@ -206,7 +206,26 @@ func (s *Server) boxConsole(ctx context.Context, params json.RawMessage, out *rp
 }
 
 func (s *Server) apiStreams() rpc.Streams {
-	return rpc.Streams{api.BoxPTY: s.boxPTY}
+	return rpc.Streams{api.BoxPTY: s.boxPTY, api.BoxSerial: s.boxSerial}
+}
+
+// boxSerial does not wake the box: the serial console is for boxes whose guest is broken.
+func (s *Server) boxSerial(ctx context.Context, params json.RawMessage, conn net.Conn) error {
+	var p api.ConsoleParams
+	if err := rpc.Decode(params, &p); err != nil {
+		return err
+	}
+	w, err := s.workerFor(p.ID)
+	if err != nil {
+		return err
+	}
+	wc, err := rpc.OpenStream(ctx, w.sess, api.BoxSerial, p)
+	if err != nil {
+		return err
+	}
+	s.store.event(p.ID, api.BoxSerial, "")
+	rpc.Splice(conn, wc)
+	return nil
 }
 
 func (s *Server) boxPTY(ctx context.Context, params json.RawMessage, conn net.Conn) error {

@@ -125,13 +125,16 @@ func boxCommands() []*cobra.Command {
 	}
 	execCmd.Flags().StringVar(&user, "user", "dev", "user to run as")
 
-	var follow bool
+	var follow, interactive bool
 	console := &cobra.Command{
 		Use:     "console <box>",
 		Short:   "Show a box's serial console (works when the guest is broken)",
 		GroupID: "boxes",
 		Args:    cobra.ExactArgs(1),
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
+			if interactive {
+				return serialConsole(ctx, sess, args[0])
+			}
 			_, err := rpc.Exec(ctx, sess, api.BoxConsole, api.ConsoleParams{ID: args[0], Follow: follow}, os.Stdout, os.Stderr)
 			if ctx.Err() != nil {
 				return nil
@@ -140,6 +143,8 @@ func boxCommands() []*cobra.Command {
 		}),
 	}
 	console.Flags().BoolVarP(&follow, "follow", "f", false, "keep printing new output")
+	console.Flags().BoolVarP(&interactive, "interactive", "i", false, "type into the console of a running box (root shell)")
+	console.MarkFlagsMutuallyExclusive("follow", "interactive")
 
 	state := func(use, short, method string) *cobra.Command {
 		return &cobra.Command{

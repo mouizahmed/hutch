@@ -6,11 +6,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/mouizahmed/hutch/internal/firecracker"
 )
@@ -24,6 +27,7 @@ const (
 	jailState  = "/vmstate"
 	jailMem    = "/mem"
 	jailSnap   = "/snapshot"
+	jailLog    = "/firecracker.log"
 )
 
 type vm struct {
@@ -37,9 +41,11 @@ type vm struct {
 func (w *Worker) vsockPath(id string) string { return filepath.Join(w.jailRoot(id), jailVsock) }
 
 // startJailer prepares the chroot with hard links to the box's files and starts
-// Firecracker in it, detached, with the serial console going to console.log.
+// Firecracker in it, detached. The serial console goes to console.log and reads
+// input from the console.in FIFO; Firecracker's own log goes to firecracker.log.
 func (w *Worker) startJailer(ctx context.Context, b *Box, s slot, links map[string]string) (*vm, error) {
 	jail := w.jailRoot(b.ID)
+	w.saveFCLog(b.ID)
 	os.RemoveAll(filepath.Dir(jail))
 	uid := s.uid()
 	for _, d := range []string{jail, filepath.Join(jail, "run"), filepath.Join(jail, jailSnap)} {
@@ -58,6 +64,26 @@ func (w *Worker) startJailer(ctx context.Context, b *Box, s slot, links map[stri
 	if err := os.Chown(filepath.Join(w.boxDir(b.ID), "rootfs.ext4"), uid, uid); err != nil {
 		return nil, err
 	}
+	fcLog, err := os.OpenFile(filepath.Join(jail, jailLog), os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	fcLog.Close()
+	if err := os.Chown(filepath.Join(jail, jailLog), uid, uid); err != nil {
+		return nil, err
+	}
+
+	// Opened read-write so Firecracker never sees end of file between writers.
+	in := w.consoleInPath(b.ID)
+	os.Remove(in)
+	if err := unix.Mkfifo(in, 0o600); err != nil {
+		return nil, err
+	}
+	stdin, err := os.OpenFile(in, os.O_RDWR, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer stdin.Close()
 
 	console, err := os.OpenFile(w.ConsolePath(b.ID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -73,7 +99,8 @@ func (w *Worker) startJailer(ctx context.Context, b *Box, s slot, links map[stri
 		"--chroot-base-dir", filepath.Join(w.Root, "jail"),
 		"--netns", s.netnsPath(),
 		"--cgroup-version", "2",
-		"--", "--api-sock", jailAPI)
+		"--", "--api-sock", jailAPI, "--log-path", jailLog)
+	cmd.Stdin = stdin
 	cmd.Stdout = console
 	cmd.Stderr = console
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -155,8 +182,42 @@ func (w *Worker) killFirecracker(b *Box) {
 		}
 	}
 	b.PID = 0
+	w.saveFCLog(b.ID)
 	os.RemoveAll(filepath.Dir(w.jailRoot(b.ID)))
+	os.Remove(w.consoleInPath(b.ID))
 	os.Remove(filepath.Join("/sys/fs/cgroup/firecracker", b.ID))
+}
+
+// saveFCLog appends the log of the box's last Firecracker run, which lives in the
+// jail, to firecracker.log in the box directory.
+func (w *Worker) saveFCLog(id string) {
+	src, err := os.Open(filepath.Join(w.jailRoot(id), jailLog))
+	if err != nil {
+		return
+	}
+	defer src.Close()
+	dst, err := os.OpenFile(w.FCLogPath(id), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	defer dst.Close()
+	io.Copy(dst, src)
+}
+
+// ConsoleInput opens a running box's serial console input.
+func (w *Worker) ConsoleInput(id string) (*os.File, error) {
+	b, err := w.load(id)
+	if err != nil {
+		return nil, err
+	}
+	if !w.Alive(b) {
+		return nil, fmt.Errorf("box %q is not running", id)
+	}
+	f, err := os.OpenFile(w.consoleInPath(id), os.O_WRONLY|syscall.O_NONBLOCK, 0)
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENXIO) {
+		return nil, fmt.Errorf("box %q was started without console input; sleep and wake it first", id)
+	}
+	return f, err
 }
 
 func processAlive(pid int) bool {

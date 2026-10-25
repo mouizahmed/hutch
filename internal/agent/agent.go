@@ -114,9 +114,10 @@ func Run(ctx context.Context, id Identity, w *worker.Worker, name string, idle I
 	if err != nil {
 		return fmt.Errorf("not enrolled (run `hutchd enroll`): %w", err)
 	}
-	mux, streams := handlers(w, name), streamHandlers(w)
+	kick := make(chan struct{}, 1)
+	mux, streams := handlers(w, name, kick), streamHandlers(w)
 	var server atomic.Pointer[yamux.Session]
-	go monitor(ctx, w, idle, &server)
+	go monitor(ctx, w, idle, &server, kick)
 	backoff := time.Second
 	for ctx.Err() == nil {
 		start := time.Now()
@@ -196,12 +197,20 @@ func toAPI(w *worker.Worker, b *worker.Box) api.Box {
 		Generation: b.Generation, Class: b.Class, ReachIP: b.ReachIP(), Created: b.Created}
 }
 
-func handlers(w *worker.Worker, name string) rpc.Mux {
+// kick asks the monitor for a report now, so a started box shows its threads' states
+// without waiting for the next check.
+func handlers(w *worker.Worker, name string, kick chan<- struct{}) rpc.Mux {
 	box := func(f func(context.Context, json.RawMessage) (*worker.Box, error)) rpc.Handler {
 		return func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
 			b, err := f(ctx, params)
 			if err != nil {
 				return nil, err
+			}
+			if b.State == worker.Running {
+				select {
+				case kick <- struct{}{}:
+				default:
+				}
 			}
 			return toAPI(w, b), nil
 		}
@@ -255,7 +264,7 @@ func handlers(w *worker.Worker, name string) rpc.Mux {
 			if err := rpc.Decode(params, &p); err != nil {
 				return nil, err
 			}
-			return rpc.ExitCode(0), streamConsole(ctx, w.ConsolePath(p.ID), p.Follow, out)
+			return rpc.ExitCode(0), followFile(ctx, w.ConsolePath(p.ID), 0, p.Follow, nil, out.Stdout)
 		},
 		api.BoxExec: func(ctx context.Context, params json.RawMessage, out *rpc.Out) (any, error) {
 			var p api.ExecParams
@@ -294,20 +303,70 @@ func streamHandlers(w *worker.Worker) rpc.Streams {
 			rpc.Splice(conn, g)
 			return nil
 		},
+		// The serial console speaks the same frames as a terminal: Input in, Response out.
+		api.BoxSerial: func(ctx context.Context, params json.RawMessage, conn net.Conn) error {
+			var p api.ConsoleParams
+			if err := rpc.Decode(params, &p); err != nil {
+				return err
+			}
+			in, err := w.ConsoleInput(p.ID)
+			if err != nil {
+				return err
+			}
+			defer in.Close()
+			info, err := os.Stat(w.ConsolePath(p.ID))
+			if err != nil {
+				return err
+			}
+			if err := wire.Write(conn, guestproto.Response{Type: guestproto.RespOK}); err != nil {
+				return err
+			}
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			go func() {
+				defer cancel()
+				for {
+					var i guestproto.Input
+					if wire.Read(conn, &i) != nil {
+						return
+					}
+					if i.Type != guestproto.InputStdin {
+						continue
+					}
+					if _, err := in.Write(i.Data); err != nil {
+						return
+					}
+				}
+			}()
+			running := func() error {
+				if b, err := w.Get(p.ID); err != nil || !w.Alive(b) {
+					return fmt.Errorf("box %s stopped", p.ID)
+				}
+				return nil
+			}
+			return followFile(ctx, w.ConsolePath(p.ID), info.Size(), true, running, func(b []byte) error {
+				return wire.Write(conn, guestproto.Response{Type: guestproto.RespStdout, Data: b})
+			})
+		},
 	}
 }
 
-func streamConsole(ctx context.Context, path string, follow bool, out *rpc.Out) error {
+// followFile sends a file's contents from offset, then with follow keeps sending what
+// is appended until ctx ends or check fails.
+func followFile(ctx context.Context, path string, offset int64, follow bool, check func() error, emit func([]byte) error) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return err
+	}
 	buf := make([]byte, 32<<10)
 	for {
 		n, err := f.Read(buf)
 		if n > 0 {
-			if err := out.Stdout(buf[:n]); err != nil {
+			if err := emit(append([]byte(nil), buf[:n]...)); err != nil {
 				return err
 			}
 		}
@@ -319,6 +378,11 @@ func streamConsole(ctx context.Context, path string, follow bool, out *rpc.Out) 
 		}
 		if !follow {
 			return nil
+		}
+		if check != nil {
+			if err := check(); err != nil {
+				return err
+			}
 		}
 		select {
 		case <-ctx.Done():

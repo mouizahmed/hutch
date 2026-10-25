@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/hashicorp/yamux"
@@ -132,6 +134,26 @@ func mostRecent(shells []shellSession) shellSession {
 
 // terminal runs argv on a pseudo-terminal in the box, connected to this terminal.
 func terminal(ctx context.Context, sess *yamux.Session, box string, argv []string) error {
+	return connectTerminal(box, "", func(rows, cols int) (net.Conn, error) {
+		return rpc.OpenStream(ctx, sess, api.BoxPTY, api.PTYParams{ID: box, Argv: argv, User: "dev",
+			Term: os.Getenv("TERM"), Rows: rows, Cols: cols})
+	})
+}
+
+// serialConsole connects this terminal to a running box's serial console.
+func serialConsole(ctx context.Context, sess *yamux.Session, box string) error {
+	banner := fmt.Sprintf("Connected to %s's serial console. Press Enter for a prompt, Ctrl-] to quit.", box)
+	return connectTerminal(box, banner, func(int, int) (net.Conn, error) {
+		return rpc.OpenStream(ctx, sess, api.BoxSerial, api.ConsoleParams{ID: box})
+	})
+}
+
+// escapeKey (Ctrl-]) ends a serial console session, which has no exit of its own.
+const escapeKey = 0x1d
+
+// connectTerminal relays a terminal stream that speaks guestproto Input and Response
+// frames. A banner means a serial console: it is printed on connect and Ctrl-] quits.
+func connectTerminal(box, banner string, open func(rows, cols int) (net.Conn, error)) error {
 	in, out := int(os.Stdin.Fd()), int(os.Stdout.Fd())
 	if !term.IsTerminal(in) || !term.IsTerminal(out) {
 		return errors.New("needs an interactive terminal")
@@ -140,8 +162,7 @@ func terminal(ctx context.Context, sess *yamux.Session, box string, argv []strin
 	if err != nil {
 		return err
 	}
-	conn, err := rpc.OpenStream(ctx, sess, api.BoxPTY, api.PTYParams{ID: box, Argv: argv, User: "dev",
-		Term: os.Getenv("TERM"), Rows: rows, Cols: cols})
+	conn, err := open(rows, cols)
 	if err != nil {
 		return err
 	}
@@ -153,6 +174,9 @@ func terminal(ctx context.Context, sess *yamux.Session, box string, argv []strin
 	}
 	if first.Type == guestproto.RespError {
 		return errors.New(first.Error)
+	}
+	if banner != "" {
+		fmt.Fprintln(os.Stderr, banner)
 	}
 
 	old, err := term.MakeRaw(in)
@@ -178,11 +202,21 @@ func terminal(ctx context.Context, sess *yamux.Session, box string, argv []strin
 			}
 		}
 	}()
+	var quit atomic.Bool
 	go func() {
 		buf := make([]byte, 32<<10)
 		for {
 			n, err := os.Stdin.Read(buf)
-			if n > 0 && send(guestproto.Input{Type: guestproto.InputStdin, Data: append([]byte(nil), buf[:n]...)}) != nil {
+			data := buf[:n]
+			if i := bytes.IndexByte(data, escapeKey); banner != "" && i >= 0 {
+				data = data[:i]
+				quit.Store(true)
+			}
+			if len(data) > 0 && send(guestproto.Input{Type: guestproto.InputStdin, Data: append([]byte(nil), data...)}) != nil {
+				return
+			}
+			if quit.Load() {
+				conn.Close()
 				return
 			}
 			if err != nil {
@@ -195,6 +229,10 @@ func terminal(ctx context.Context, sess *yamux.Session, box string, argv []strin
 		var r guestproto.Response
 		if err := wire.Read(conn, &r); err != nil {
 			term.Restore(in, old)
+			if quit.Load() {
+				fmt.Fprintln(os.Stderr)
+				return nil
+			}
 			return fmt.Errorf("connection to %s lost: %w", box, err)
 		}
 		switch r.Type {

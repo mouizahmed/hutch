@@ -15,6 +15,7 @@ const (
 	BoxExec    = "box.exec"
 	BoxPTY     = "box.pty"
 	BoxConsole = "box.console"
+	BoxSerial  = "box.serial"
 
 	ThreadNew  = "thread.new"
 	ThreadSend = "thread.send"
