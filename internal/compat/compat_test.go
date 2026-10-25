@@ -118,13 +118,13 @@ func TestGuestCompat(t *testing.T) {
 			guestSock, hostSock := filepath.Join(dir, "g.sock"), filepath.Join(dir, "v.sock")
 
 			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
 			guest := exec.CommandContext(ctx, bin, "serve", "--listen", "unix:"+guestSock)
 			guest.Stderr = os.Stderr
 			if err := guest.Start(); err != nil {
+				cancel()
 				t.Fatal(err)
 			}
-			defer guest.Wait()
+			defer func() { cancel(); guest.Wait() }()
 			for i := 0; ; i++ {
 				if _, err := os.Stat(guestSock); err == nil {
 					break
