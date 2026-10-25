@@ -44,7 +44,7 @@ func main() {
 	root.AddCommand(gitCommands()...)
 	root.AddCommand(statusCommand())
 	root.AddCommand(setupCommands()...)
-	root.AddCommand(configCommands(), initCommand(), templateCommands(), sizesCommand(), userCommands(), loginCommand())
+	root.AddCommand(configCommands(), initCommand(), templateCommands(), projectCommands(), sizesCommand(), userCommands(), loginCommand())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	err := root.ExecuteContext(ctx)

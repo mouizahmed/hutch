@@ -529,3 +529,39 @@ func (s *Server) pruneAll(ctx context.Context) {
 		s.pruneVersions(ctx, id)
 	}
 }
+
+// projectRm removes a project's template box and versions and forgets it. Boxes
+// must be removed first: they hold work.
+func (s *Server) projectRm(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+	var p api.ProjectParams
+	if err := rpc.Decode(params, &p); err != nil {
+		return nil, err
+	}
+	proj, err := s.store.project(p.Project)
+	if err != nil {
+		return nil, err
+	}
+	boxes, err := s.store.boxes()
+	if err != nil {
+		return nil, err
+	}
+	var owned, work []string
+	for _, b := range boxes {
+		if b.Project != proj.ID {
+			continue
+		}
+		if b.Kind == "" {
+			work = append(work, b.ID)
+		}
+		owned = append(owned, b.ID)
+	}
+	if len(work) > 0 {
+		return nil, fmt.Errorf("remove its boxes first: %s", strings.Join(work, ", "))
+	}
+	for _, id := range owned {
+		if err := s.removeBox(ctx, id); err != nil {
+			return nil, err
+		}
+	}
+	return nil, s.store.deleteProject(proj.ID)
+}

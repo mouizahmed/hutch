@@ -618,3 +618,22 @@ func (s *store) projects() ([]string, error) {
 	}
 	return ids, rows.Err()
 }
+
+// deleteProject forgets a project and its templates and secrets.
+func (s *store) deleteProject(id string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, q := range []string{
+		`DELETE FROM templates WHERE project_id = ?`,
+		`DELETE FROM project_secrets WHERE project_id = ?`,
+		`DELETE FROM projects WHERE id = ?`,
+	} {
+		if _, err := tx.Exec(q, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}

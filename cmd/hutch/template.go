@@ -19,6 +19,7 @@ import (
 
 	"github.com/hashicorp/yamux"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/config"
@@ -152,6 +153,40 @@ func initCommand() *cobra.Command {
 			return nil
 		}),
 	}
+}
+
+func projectCommands() *cobra.Command {
+	proj := &cobra.Command{Use: "project", Short: "Manage projects on the server", GroupID: "projects"}
+	var yes bool
+	rm := &cobra.Command{
+		Use:   "rm [<project>]",
+		Short: "Remove a project's templates and secrets from the server (default: this repository)",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
+			id := ""
+			if len(args) == 1 {
+				id = args[0]
+			} else if repo, err := config.FindRepo("."); err != nil {
+				return err
+			} else if repo != nil {
+				id = repo.ID
+			}
+			if id == "" {
+				return errors.New("which project? hutch project rm <project>")
+			}
+			if !yes && !(term.IsTerminal(int(os.Stdin.Fd())) && confirm("Remove "+id+" and all its template versions from the server?")) {
+				return errors.New("not removed (pass --yes to skip the question)")
+			}
+			if err := rpc.Call(ctx, sess, api.ProjectRm, api.ProjectParams{Project: id}, nil); err != nil {
+				return err
+			}
+			fmt.Println(id, "removed")
+			return nil
+		}),
+	}
+	rm.Flags().BoolVar(&yes, "yes", false, "don't ask")
+	proj.AddCommand(rm)
+	return proj
 }
 
 func templateCommands() *cobra.Command {
