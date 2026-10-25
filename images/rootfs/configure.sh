@@ -69,6 +69,10 @@ ExecStart=
 ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud 115200,38400,9600 %I $TERM
 EOF
 
+# Calendar timers catch up right after every wake (the clock jumps forward), so they
+# would run in every restored box: no apt runs, scrubs, or news fetches behind agents.
+ch systemctl mask apt-daily.timer apt-daily-upgrade.timer motd-news.timer e2scrub_all.timer dpkg-db-backup.timer fstrim.timer >/dev/null 2>&1
+
 # The network comes from the kernel ip= argument.
 ch systemctl mask systemd-networkd-wait-online.service systemd-resolved.service >/dev/null 2>&1
 

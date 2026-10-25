@@ -201,23 +201,7 @@ func (w *Worker) guestRestore(ctx context.Context, b *Box, timeout time.Duration
 	}
 	seed := make([]byte, 32)
 	rand.Read(seed)
-	if err := c.Restore(ctx, guestproto.Restore{UnixNano: time.Now().UnixNano(), BoxID: b.ID, Hostname: b.ID, Seed: seed}); err != nil {
-		return err
-	}
-	// Wait until the guest has absorbed the restore; connections may fail meanwhile.
-	for {
-		attempt, cancelAttempt := context.WithTimeout(ctx, 2*time.Second)
-		h, err := c.Hello(attempt)
-		cancelAttempt()
-		if err == nil && !h.Settling {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("hutch-guest did not settle after restore: %w", ctx.Err())
-		case <-time.After(25 * time.Millisecond):
-		}
-	}
+	return c.Restore(ctx, guestproto.Restore{UnixNano: time.Now().UnixNano(), BoxID: b.ID, Hostname: b.ID, Seed: seed})
 }
 
 // Sleep snapshots a running box and stops its VM. The new memory file is the previous

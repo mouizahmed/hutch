@@ -157,16 +157,6 @@ func checkGuest(t *testing.T, c *guestproto.Client, ref string) {
 	if err := c.Restore(ctx, guestproto.Restore{BoxID: box, Hostname: "compat-box"}); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
-	for deadline := time.Now().Add(5 * time.Second); ; {
-		h, err := c.Hello(ctx)
-		if err == nil && !h.Settling {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("guest still settling after restore: %v", err)
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
 
 	var out, errb bytes.Buffer
 	code, err := c.Exec(ctx, guestproto.Exec{Argv: []string{"sh", "-c", "hostname; id -un; echo err >&2; exit 3"}, User: "dev"}, &out, &errb)

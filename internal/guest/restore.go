@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -90,25 +89,11 @@ func newSSHHostKeys() error {
 			return fmt.Errorf("%v: %s", err, out)
 		}
 	}
-	// A running sshd reloads its host keys on SIGHUP. Not via systemctl: the first
-	// systemctl call after a snapshot restore breaks vsock for about 100 ms.
+	// A running sshd reloads its host keys on SIGHUP.
 	if b, err := os.ReadFile("/run/sshd.pid"); err == nil {
 		if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
 			syscall.Kill(pid, syscall.SIGHUP)
 		}
 	}
 	return nil
-}
-
-// settling is true from a restore request until the guest has absorbed it.
-var settling atomic.Bool
-
-// settle makes the first contact with systemd after a restore happen now, while
-// hutchd waits, instead of in the middle of a user's command. That first contact
-// (by systemctl, tmux, or anything using D-Bus) breaks every vsock connection for
-// about 100 ms.
-func settle() {
-	defer settling.Store(false)
-	exec.Command("systemctl", "is-system-running").Run()
-	time.Sleep(300 * time.Millisecond)
 }

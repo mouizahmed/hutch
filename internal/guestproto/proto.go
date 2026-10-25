@@ -73,7 +73,6 @@ type Response struct {
 	Type     string  `json:"type"`
 	Version  int     `json:"version,omitempty"`
 	Guest    string  `json:"guest,omitempty"`
-	Settling bool    `json:"settling,omitempty"` // still absorbing a restore; see guest.settle
 	Error    string  `json:"error,omitempty"`
 	Data     []byte  `json:"data,omitempty"`
 	ExitCode int     `json:"exit_code,omitempty"`

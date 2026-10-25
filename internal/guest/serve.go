@@ -105,20 +105,17 @@ func handle(ctx context.Context, conn net.Conn) {
 	r := &responder{conn: conn}
 	switch req.Type {
 	case guestproto.TypeHello:
-		r.send(guestproto.Response{Type: guestproto.RespHello, Version: guestproto.Version, Guest: version.String(), Settling: settling.Load()})
+		r.send(guestproto.Response{Type: guestproto.RespHello, Version: guestproto.Version, Guest: version.String()})
 	case guestproto.TypeRestore:
 		if req.Restore == nil {
 			r.fail(fmt.Errorf("restore request without body"))
 			return
 		}
-		settling.Store(true)
 		if err := restore(*req.Restore); err != nil {
-			settling.Store(false)
 			r.fail(err)
 			return
 		}
 		r.send(guestproto.Response{Type: guestproto.RespOK})
-		go settle()
 	case guestproto.TypeExec:
 		if req.Exec == nil || len(req.Exec.Argv) == 0 {
 			r.fail(fmt.Errorf("exec request without a command"))

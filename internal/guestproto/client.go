@@ -18,8 +18,8 @@ type Client struct {
 }
 
 // Dial opens a raw connection to hutch-guest, retrying failed handshakes for up
-// to a second: the guest can refuse connections briefly after a restore, and no
-// request has been sent yet, so a retry is always safe.
+// to a second (for example while hutch-guest restarts); no request has been sent
+// yet, so a retry is always safe.
 func (c *Client) Dial(ctx context.Context) (net.Conn, error) {
 	deadline := time.Now().Add(time.Second)
 	for {
