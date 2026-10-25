@@ -90,6 +90,13 @@ CREATE TABLE IF NOT EXISTS box_git (
 	branch TEXT NOT NULL,
 	base   TEXT NOT NULL
 );
+-- Files from a project's .hutch/uploads.txt, encrypted with the server's secrets key.
+CREATE TABLE IF NOT EXISTS project_secrets (
+	project_id TEXT PRIMARY KEY REFERENCES projects(id),
+	digest     TEXT NOT NULL,
+	content    BLOB NOT NULL,
+	updated    TIMESTAMP NOT NULL
+);
 CREATE TABLE IF NOT EXISTS configs (
 	name    TEXT PRIMARY KEY,
 	version INTEGER NOT NULL,
@@ -115,6 +122,8 @@ var migrations = []string{
 	`ALTER TABLE threads ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE threads ADD COLUMN autonomy TEXT NOT NULL DEFAULT 'full'`,
 	`ALTER TABLE threads ADD COLUMN renamed INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE box_meta ADD COLUMN secrets TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE templates ADD COLUMN secrets TEXT NOT NULL DEFAULT ''`,
 }
 
 func openStore(path string) (*store, error) {
@@ -366,20 +375,21 @@ func (s *store) putConfig(name string, base int64, content string) (api.ConfigDo
 type boxMeta struct {
 	project, kind, commit string
 	verified              bool
+	secrets               string // digest of the project secrets a template box was built with
 }
 
 func (s *store) putMeta(box string, m boxMeta) error {
-	_, err := s.db.Exec(`INSERT INTO box_meta (box_id, project_id, kind, commit_sha, verified) VALUES (?, ?, ?, ?, ?)
+	_, err := s.db.Exec(`INSERT INTO box_meta (box_id, project_id, kind, commit_sha, verified, secrets) VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(box_id) DO UPDATE SET project_id = excluded.project_id, kind = excluded.kind,
-			commit_sha = excluded.commit_sha, verified = excluded.verified`,
-		box, m.project, m.kind, m.commit, m.verified)
+			commit_sha = excluded.commit_sha, verified = excluded.verified, secrets = excluded.secrets`,
+		box, m.project, m.kind, m.commit, m.verified, m.secrets)
 	return err
 }
 
 func (s *store) meta(box string) (boxMeta, error) {
 	var m boxMeta
-	err := s.db.QueryRow(`SELECT project_id, kind, commit_sha, verified FROM box_meta WHERE box_id = ?`, box).
-		Scan(&m.project, &m.kind, &m.commit, &m.verified)
+	err := s.db.QueryRow(`SELECT project_id, kind, commit_sha, verified, secrets FROM box_meta WHERE box_id = ?`, box).
+		Scan(&m.project, &m.kind, &m.commit, &m.verified, &m.secrets)
 	if errors.Is(err, sql.ErrNoRows) {
 		return m, nil
 	}
@@ -416,14 +426,14 @@ func (s *store) addProject(id, base string) (api.Project, error) {
 }
 
 func (s *store) addTemplate(t api.Template) error {
-	_, err := s.db.Exec(`INSERT INTO templates (project_id, version, commit_sha, box_id, vcpus, mem_mib, created) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		t.Project, t.Version, t.Commit, t.Box, t.VCPUs, t.MemMiB, t.Created)
+	_, err := s.db.Exec(`INSERT INTO templates (project_id, version, commit_sha, box_id, vcpus, mem_mib, created, secrets) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.Project, t.Version, t.Commit, t.Box, t.VCPUs, t.MemMiB, t.Created, t.Secrets)
 	return err
 }
 
 // templates lists a project's versions, newest first.
 func (s *store) templates(project string) ([]api.Template, error) {
-	rows, err := s.db.Query(`SELECT version, commit_sha, box_id, vcpus, mem_mib, created FROM templates WHERE project_id = ? ORDER BY version DESC`, project)
+	rows, err := s.db.Query(`SELECT version, commit_sha, box_id, vcpus, mem_mib, created, secrets FROM templates WHERE project_id = ? ORDER BY version DESC`, project)
 	if err != nil {
 		return nil, err
 	}
@@ -431,7 +441,7 @@ func (s *store) templates(project string) ([]api.Template, error) {
 	var ts []api.Template
 	for rows.Next() {
 		t := api.Template{Project: project}
-		if err := rows.Scan(&t.Version, &t.Commit, &t.Box, &t.VCPUs, &t.MemMiB, &t.Created); err != nil {
+		if err := rows.Scan(&t.Version, &t.Commit, &t.Box, &t.VCPUs, &t.MemMiB, &t.Created, &t.Secrets); err != nil {
 			return nil, err
 		}
 		ts = append(ts, t)
@@ -525,5 +535,20 @@ func (s *store) boxCredentials(box string) ([]string, error) {
 func (s *store) setBoxGit(box, branch, base string) error {
 	_, err := s.db.Exec(`INSERT INTO box_git (box_id, branch, base) VALUES (?, ?, ?)
 		ON CONFLICT(box_id) DO UPDATE SET branch = excluded.branch, base = excluded.base`, box, branch, base)
+	return err
+}
+
+func (s *store) projectSecrets(project string) (digest string, content []byte, err error) {
+	err = s.db.QueryRow(`SELECT digest, content FROM project_secrets WHERE project_id = ?`, project).Scan(&digest, &content)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil, nil
+	}
+	return digest, content, err
+}
+
+func (s *store) putProjectSecrets(project, digest string, content []byte) error {
+	_, err := s.db.Exec(`INSERT INTO project_secrets (project_id, digest, content, updated) VALUES (?, ?, ?, ?)
+		ON CONFLICT(project_id) DO UPDATE SET digest = excluded.digest, content = excluded.content, updated = excluded.updated`,
+		project, digest, content, time.Now().UTC())
 	return err
 }

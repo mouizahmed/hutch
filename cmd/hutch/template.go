@@ -22,6 +22,7 @@ import (
 
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/config"
+	"github.com/mouizahmed/hutch/internal/guestproto"
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
@@ -168,6 +169,9 @@ func templateCommands() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := syncSecrets(ctx, sess, repo); err != nil {
+				return err
+			}
 			var b api.Box
 			if err := rpc.CallOutput(ctx, sess, api.TemplateBuild, p, &b, os.Stdout, os.Stderr); err != nil {
 				return err
@@ -188,6 +192,9 @@ func templateCommands() *cobra.Command {
 			}
 			p, err := templateParams(repo, cfg, true)
 			if err != nil {
+				return err
+			}
+			if err := syncSecrets(ctx, sess, repo); err != nil {
 				return err
 			}
 			var t api.Template
@@ -288,6 +295,65 @@ func templateThread(ctx context.Context, sess *yamux.Session, cfg *config.Config
 	}
 	fmt.Printf("%s/%d %s started on the template box\n  hutch attach %s/%d\n", t.Box, t.N, t.Agent, t.Box, t.N)
 	return nil
+}
+
+// syncSecrets uploads the files .hutch/uploads.txt lists when they differ from the
+// project's stored copy. A file missing here is fine if the server has it: rebuilds
+// don't need the machine that uploaded it.
+func syncSecrets(ctx context.Context, sess *yamux.Session, repo *config.Repo) error {
+	var stored api.Secrets
+	if err := rpc.Call(ctx, sess, api.SecretsGet, api.ProjectParams{Project: repo.ID}, &stored); err != nil {
+		return err
+	}
+	list, err := os.ReadFile(filepath.Join(repo.Root, ".hutch", "uploads.txt"))
+	if errors.Is(err, os.ErrNotExist) {
+		if stored.Digest == "" || len(stored.Files) == 0 {
+			return nil
+		}
+		// No list means no secrets: don't put old ones into this build.
+		fmt.Println("No .hutch/uploads.txt; removing the stored project secrets.")
+		return rpc.Call(ctx, sess, api.SecretsPut, api.Secrets{Project: repo.ID}, nil)
+	}
+	if err != nil {
+		return err
+	}
+	var files []guestproto.File
+	var missing []string
+	for _, line := range strings.Split(string(list), "\n") {
+		p := strings.TrimSpace(line)
+		if p == "" || strings.HasPrefix(p, "#") {
+			continue
+		}
+		clean := filepath.ToSlash(filepath.Clean(p))
+		if filepath.IsAbs(p) || strings.HasPrefix(clean, "../") {
+			return fmt.Errorf("uploads.txt: %q must be a path inside the repository", p)
+		}
+		data, err := os.ReadFile(filepath.Join(repo.Root, clean))
+		if errors.Is(err, os.ErrNotExist) {
+			missing = append(missing, clean)
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		files = append(files, guestproto.File{Path: clean, Data: data})
+	}
+	if len(missing) > 0 {
+		if stored.Digest == "" {
+			return fmt.Errorf("uploads.txt lists files that aren't here: %s", strings.Join(missing, ", "))
+		}
+		fmt.Fprintf(os.Stderr, "Not here: %s; using the server's copy of the project secrets.\n", strings.Join(missing, ", "))
+		return nil
+	}
+	if api.SecretsDigest(files) == stored.Digest {
+		return nil
+	}
+	names := make([]string, len(files))
+	for i, f := range files {
+		names[i] = f.Path
+	}
+	fmt.Printf("Uploading project secrets: %s\n", strings.Join(names, ", "))
+	return rpc.Call(ctx, sess, api.SecretsPut, api.Secrets{Project: repo.ID, Files: files}, nil)
 }
 
 // checkAllow checks network.allow entries are host:port.

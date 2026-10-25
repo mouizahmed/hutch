@@ -2,6 +2,10 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"sort"
 	"time"
 
 	"github.com/mouizahmed/hutch/internal/guestproto"
@@ -35,6 +39,8 @@ const (
 	TemplateSnapshot = "template.snapshot"
 	TemplateList     = "template.list"
 	TemplateBox      = "template.box"
+	SecretsGet       = "secrets.get"
+	SecretsPut       = "secrets.put"
 
 	ThreadNew    = "thread.new"
 	ThreadSend   = "thread.send"
@@ -132,6 +138,14 @@ type Template struct {
 	VCPUs   int       `json:"vcpus"`
 	MemMiB  int       `json:"mem_mib"`
 	Created time.Time `json:"created"`
+	Secrets string    `json:"secrets,omitempty"` // digest of the project secrets it was built with
+}
+
+// Secrets are a project's uploads.txt files; Digest identifies their contents.
+type Secrets struct {
+	Project string            `json:"project"`
+	Digest  string            `json:"digest"`
+	Files   []guestproto.File `json:"files,omitempty"`
 }
 
 // TemplateParams describes a build: the recipe at Commit, cloned from CloneURL,
@@ -357,4 +371,16 @@ type EnrollResponse struct {
 	Cert     []byte `json:"cert"`
 	CA       []byte `json:"ca"`
 	Error    string `json:"error,omitempty"`
+}
+
+// SecretsDigest identifies a set of secret files by their paths and contents.
+func SecretsDigest(files []guestproto.File) string {
+	sorted := append([]guestproto.File(nil), files...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
+	h := sha256.New()
+	for _, f := range sorted {
+		fmt.Fprintf(h, "%s\x00%d\x00", f.Path, len(f.Data))
+		h.Write(f.Data)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }

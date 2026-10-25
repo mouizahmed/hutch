@@ -106,6 +106,17 @@ func (s *Server) build(ctx context.Context, proj api.Project, p api.TemplatePara
 		return fail(errors.New("the recipe needs .hutch/setup.sh and .hutch/verify.sh at that commit (hutch init writes a prompt to draft them)"))
 	}
 
+	secrets, digest, err := s.projectSecretFiles(proj.ID)
+	if err != nil {
+		return b, err
+	}
+	if len(secrets) > 0 {
+		step(stdout, "project secrets (%d files)", len(secrets))
+		if err := s.writeSecrets(ctx, w, id, secrets); err != nil {
+			return fail(err)
+		}
+	}
+
 	step(stdout, "setup.sh (as root)")
 	if err := s.run(ctx, w, id, api.ExecParams{User: "root", Dir: workspace, Env: []string{"DEBIAN_FRONTEND=noninteractive"},
 		Argv: []string{"bash", "-eo", "pipefail", ".hutch/setup.sh"}}, stdout, stderr); err != nil {
@@ -123,7 +134,7 @@ func (s *Server) build(ctx context.Context, proj api.Project, p api.TemplatePara
 	// Whatever verify.sh left running would be running in every box.
 	s.run(ctx, w, id, api.ExecParams{User: "root", Argv: []string{"pkill", "-KILL", "-u", "dev"}}, io.Discard, io.Discard)
 
-	if err := s.store.putMeta(id, boxMeta{project: proj.ID, kind: api.BoxTemplate, commit: p.Commit, verified: true}); err != nil {
+	if err := s.store.putMeta(id, boxMeta{project: proj.ID, kind: api.BoxTemplate, commit: p.Commit, verified: true, secrets: digest}); err != nil {
 		return b, err
 	}
 	fmt.Fprintf(stdout, "\nBuilt and verified %.12s in %s.\n", p.Commit, id)
@@ -172,7 +183,11 @@ func (s *Server) templateSnapshot(ctx context.Context, params json.RawMessage, o
 		return nil, err
 	}
 	b, _ := s.store.box(id)
-	if m.verified && m.commit == p.Commit && b.State == "running" {
+	digest, _, err := s.store.projectSecrets(proj.ID)
+	if err != nil {
+		return nil, err
+	}
+	if m.verified && m.commit == p.Commit && m.secrets == digest && b.State == "running" {
 		fmt.Fprintf(stdout, "Using the build of %.12s in %s.\n", p.Commit, id)
 	} else if _, err := s.build(ctx, proj, p, stdout, stderr); err != nil {
 		return nil, err
@@ -208,10 +223,14 @@ func (s *Server) templateSnapshot(ctx context.Context, params json.RawMessage, o
 	if err := s.store.deleteBox(id); err != nil {
 		return nil, err
 	}
-	if err := s.store.putMeta(vid, boxMeta{project: proj.ID, kind: api.BoxVersion, commit: p.Commit}); err != nil {
+	built, err := s.store.meta(id)
+	if err != nil {
 		return nil, err
 	}
-	t := api.Template{Project: proj.ID, Version: n, Commit: p.Commit, Box: vid, VCPUs: vb.VCPUs, MemMiB: vb.MemMiB, Created: time.Now().UTC()}
+	if err := s.store.putMeta(vid, boxMeta{project: proj.ID, kind: api.BoxVersion, commit: p.Commit, secrets: built.secrets}); err != nil {
+		return nil, err
+	}
+	t := api.Template{Project: proj.ID, Version: n, Commit: p.Commit, Box: vid, VCPUs: vb.VCPUs, MemMiB: vb.MemMiB, Created: time.Now().UTC(), Secrets: built.secrets}
 	if err := s.store.addTemplate(t); err != nil {
 		return nil, err
 	}
@@ -345,6 +364,22 @@ func (s *Server) forkProject(ctx context.Context, p api.ForkParams, stdout, stde
 		}
 	}
 	return b, nil
+}
+
+// writeSecrets puts project secrets into the checkout and keeps Git from ever
+// committing them, so an agent's "git add -A" can't push them.
+func (s *Server) writeSecrets(ctx context.Context, w *workerConn, box string, files []guestproto.File) error {
+	var exclude []string
+	out := make([]guestproto.File, len(files))
+	for i, f := range files {
+		out[i] = guestproto.File{Path: workspace + "/" + f.Path, Mode: 0o600, Data: f.Data}
+		exclude = append(exclude, "/"+f.Path)
+	}
+	if err := rpc.Call(ctx, w.sess, api.BoxFiles, api.FilesParams{ID: box, Files: guestproto.Files{Files: out}}, nil); err != nil {
+		return err
+	}
+	return s.run(ctx, w, box, api.ExecParams{Dir: workspace, Argv: append([]string{"sh", "-c",
+		`for p; do grep -qxF "$p" .git/info/exclude 2>/dev/null || echo "$p" >> .git/info/exclude; done`, "sh"}, exclude...)}, io.Discard, io.Discard)
 }
 
 // checkoutBranch puts a box's /workspace on its own branch, continuing it if it is
