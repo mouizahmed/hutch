@@ -1,0 +1,3 @@
+version = 1
+size = { cpu = 2, memory = "4G" }   # Go builds and unit tests; no services
+disk.size = "20G"                   # toolchain and module cache
