@@ -4,3 +4,4 @@
 # (they can't listen on a Unix socket).
 #
 # <commit>  <note>
+0dc2c5c836f7b1374ea534429c813b95417e7dce  first guest with the compat harness (protocol v1: hello, restore, exec, pty, status, settling)
