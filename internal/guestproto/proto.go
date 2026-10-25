@@ -1,5 +1,7 @@
 package guestproto
 
+import "time"
+
 const (
 	Version = 1
 	Port    = 1024
@@ -120,6 +122,25 @@ type Status struct {
 	Ports    []ListenPort   `json:"ports,omitempty"`
 	// Files maps each watched path that exists to the SHA-256 of its contents.
 	Files map[string]string `json:"files,omitempty"`
+	Push  *Push             `json:"push,omitempty"`
+}
+
+// PushConfig is where the guest pushes the box's branch after commits; the host
+// writes it to PushConfigPath when the box is created.
+type PushConfig struct {
+	Dir      string        `json:"dir"`
+	Branch   string        `json:"branch"`
+	Interval time.Duration `json:"interval"`
+}
+
+const PushConfigPath = "/var/lib/hutch-guest/push.json"
+
+// Push is the outcome of the guest's latest push of the box's branch.
+type Push struct {
+	Branch string `json:"branch"`
+	Head   string `json:"head"`            // the commit pushed or tried
+	Error  string `json:"error,omitempty"` // empty when origin has Head
+	At     int64  `json:"at"`              // unix seconds
 }
 
 // ListenPort is a listening TCP socket in the guest.

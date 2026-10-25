@@ -91,6 +91,8 @@ var Keys = []*Key{
 	{Path: "network.domains", Kind: List, Layers: project,
 		Doc: "domains boxes may reach when network.egress is allowlist"},
 
+	{Path: "git.push_interval", Kind: Duration, Default: "1m", Min: "10s", Max: "1h", Layers: project,
+		Doc: "a box pushes its branch at most this often after new commits"},
 	{Path: "template.build_timeout", Kind: Duration, Default: "1h", Min: "1m", Max: "24h", Layers: project,
 		Doc: "a template build that runs longer fails"},
 	{Path: "template.quiet_timeout", Kind: Duration, Default: "2m", Min: "1s", Max: "1h", Layers: project,

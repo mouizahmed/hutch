@@ -83,7 +83,8 @@ func boxCommands() []*cobra.Command {
 					return fmt.Errorf("%w\n  hutch console %s", err, name)
 				}
 			} else if from == "" && repo != nil {
-				p := api.ForkParams{Project: repo.ID, Base: cfg.String("base"), ID: name, Idle: idle, Credentials: cfg.List("credentials")}
+				p := api.ForkParams{Project: repo.ID, Base: cfg.String("base"), ID: name, Idle: idle, Credentials: cfg.List("credentials"),
+					PushInterval: cfg.Duration("git.push_interval")}
 				if err := rpc.CallOutput(ctx, sess, api.BoxFork, p, &b, os.Stdout, os.Stderr); err != nil {
 					return err
 				}
@@ -129,6 +130,10 @@ func boxCommands() []*cobra.Command {
 					continue
 				}
 				fmt.Fprintf(tw, "%s\t\t%s\t%d vCPU, %s\t%s\t%s\n", b.ID, b.State, b.VCPUs, mib(b.MemMiB), b.Worker, ago(b.Created))
+				if b.PushError != "" {
+					msg, _, _ := strings.Cut(b.PushError, "\n")
+					fmt.Fprintf(tw, "  ! push of %s failed: %s\t\t\t\t\t\n", b.Branch, msg)
+				}
 				for _, t := range b.Threads {
 					fmt.Fprintf(tw, "  %d  %s\t%s\t%s\t\t\t%s\n", t.N, t.Title, t.Agent, t.State, ago(t.Created))
 				}
@@ -201,11 +206,15 @@ func boxCommands() []*cobra.Command {
 		GroupID: "boxes",
 		Args:    cobra.ExactArgs(1),
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
+			b, err := findBox(ctx, sess, args[0])
+			if err != nil {
+				return err
+			}
 			if err := rpc.Call(ctx, sess, api.BoxRm, api.IDParams{ID: args[0]}, nil); err != nil {
 				return err
 			}
 			fmt.Println(args[0], "removed")
-			return nil
+			return cleanUpGit(b)
 		}),
 	}
 

@@ -43,6 +43,8 @@ type Server struct {
 	// files; syncing marks boxes whose changed credentials are being read.
 	fileHashes map[string]map[string]string
 	syncing    map[string]bool
+	// pushErrors holds each box's latest failed branch push.
+	pushErrors map[string]string
 }
 
 type workerConn struct {
@@ -66,7 +68,7 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	return &Server{cfg: cfg, store: st, ca: ca, workers: map[string]*workerConn{}, threadStates: map[string]map[int]string{},
-		fileHashes: map[string]map[string]string{}, syncing: map[string]bool{}}, nil
+		fileHashes: map[string]map[string]string{}, syncing: map[string]bool{}, pushErrors: map[string]string{}}, nil
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -295,6 +297,12 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 				}
 				s.mu.Lock()
 				s.threadStates[br.Box.ID] = states
+				if br.Push != nil {
+					if prev := s.pushErrors[br.Box.ID]; br.Push.Error != prev && br.Push.Error != "" {
+						s.store.event(br.Box.ID, "push", br.Push.Error)
+					}
+					s.pushErrors[br.Box.ID] = br.Push.Error
+				}
 				s.mu.Unlock()
 				s.watchReport(br)
 			}

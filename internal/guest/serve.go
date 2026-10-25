@@ -33,6 +33,7 @@ func ListenAndServe(ctx context.Context, listen string) error {
 		<-ctx.Done()
 		ln.Close()
 	}()
+	go pushLoop(ctx)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {

@@ -85,6 +85,11 @@ CREATE TABLE IF NOT EXISTS box_credentials (
 	box_id      TEXT PRIMARY KEY REFERENCES boxes(id) ON DELETE CASCADE,
 	credentials TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS box_git (
+	box_id TEXT PRIMARY KEY REFERENCES boxes(id) ON DELETE CASCADE,
+	branch TEXT NOT NULL,
+	base   TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS configs (
 	name    TEXT PRIMARY KEY,
 	version INTEGER NOT NULL,
@@ -185,8 +190,9 @@ func (s *store) deleteBox(id string) error {
 func (s *store) box(id string) (api.Box, error) {
 	var b api.Box
 	err := s.db.QueryRow(`SELECT id, worker_id, state, image, vcpus, mem_mib, generation, class, reach_ip, created,
-		COALESCE(m.project_id, ''), COALESCE(m.kind, '') FROM boxes LEFT JOIN box_meta m ON m.box_id = boxes.id WHERE id = ?`, id).
-		Scan(&b.ID, &b.Worker, &b.State, &b.Image, &b.VCPUs, &b.MemMiB, &b.Generation, &b.Class, &b.ReachIP, &b.Created, &b.Project, &b.Kind)
+		COALESCE(m.project_id, ''), COALESCE(m.kind, ''), COALESCE(g.branch, ''), COALESCE(g.base, '')
+		FROM boxes LEFT JOIN box_meta m ON m.box_id = boxes.id LEFT JOIN box_git g ON g.box_id = boxes.id WHERE id = ?`, id).
+		Scan(&b.ID, &b.Worker, &b.State, &b.Image, &b.VCPUs, &b.MemMiB, &b.Generation, &b.Class, &b.ReachIP, &b.Created, &b.Project, &b.Kind, &b.Branch, &b.Base)
 	if errors.Is(err, sql.ErrNoRows) {
 		return b, fmt.Errorf("no box %q", id)
 	}
@@ -195,7 +201,8 @@ func (s *store) box(id string) (api.Box, error) {
 
 func (s *store) boxes() ([]api.Box, error) {
 	rows, err := s.db.Query(`SELECT id, worker_id, state, image, vcpus, mem_mib, generation, class, reach_ip, created,
-		COALESCE(m.project_id, ''), COALESCE(m.kind, '') FROM boxes LEFT JOIN box_meta m ON m.box_id = boxes.id ORDER BY created`)
+		COALESCE(m.project_id, ''), COALESCE(m.kind, ''), COALESCE(g.branch, ''), COALESCE(g.base, '')
+		FROM boxes LEFT JOIN box_meta m ON m.box_id = boxes.id LEFT JOIN box_git g ON g.box_id = boxes.id ORDER BY created`)
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +210,7 @@ func (s *store) boxes() ([]api.Box, error) {
 	var bs []api.Box
 	for rows.Next() {
 		var b api.Box
-		if err := rows.Scan(&b.ID, &b.Worker, &b.State, &b.Image, &b.VCPUs, &b.MemMiB, &b.Generation, &b.Class, &b.ReachIP, &b.Created, &b.Project, &b.Kind); err != nil {
+		if err := rows.Scan(&b.ID, &b.Worker, &b.State, &b.Image, &b.VCPUs, &b.MemMiB, &b.Generation, &b.Class, &b.ReachIP, &b.Created, &b.Project, &b.Kind, &b.Branch, &b.Base); err != nil {
 			return nil, err
 		}
 		bs = append(bs, b)
@@ -471,4 +478,10 @@ func (s *store) boxCredentials(box string) ([]string, error) {
 	}
 	var creds []string
 	return creds, json.Unmarshal([]byte(data), &creds)
+}
+
+func (s *store) setBoxGit(box, branch, base string) error {
+	_, err := s.db.Exec(`INSERT INTO box_git (box_id, branch, base) VALUES (?, ?, ?)
+		ON CONFLICT(box_id) DO UPDATE SET branch = excluded.branch, base = excluded.base`, box, branch, base)
+	return err
 }

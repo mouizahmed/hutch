@@ -60,6 +60,7 @@ func (s *Server) boxList(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (an
 			}
 		}
 		boxes[i].Threads = ts
+		boxes[i].PushError = s.pushErrors[boxes[i].ID]
 	}
 	return boxes, nil
 }

@@ -101,6 +101,9 @@ type Box struct {
 	Threads    []Thread  `json:"threads,omitempty"`
 	Project    string    `json:"project,omitempty"`
 	Kind       string    `json:"kind,omitempty"` // BoxTemplate, BoxVersion, or empty for a box
+	Branch     string    `json:"branch,omitempty"`
+	Base       string    `json:"base,omitempty"`
+	PushError  string    `json:"push_error,omitempty"`
 }
 
 const (
@@ -230,6 +233,7 @@ type BoxReport struct {
 	Threads    []ThreadState     `json:"threads,omitempty"`
 	LastActive time.Time         `json:"last_active"`
 	Files      map[string]string `json:"files,omitempty"` // hashes of watched files
+	Push       *guestproto.Push  `json:"push,omitempty"`
 }
 
 type ThreadState struct {
@@ -283,7 +287,8 @@ type ForkParams struct {
 	ID      string `json:"id"`
 	Idle    Idle   `json:"idle"`
 	// Logins the box gets ("*": all), resolved from the project's grants.
-	Credentials []string `json:"credentials,omitempty"`
+	Credentials  []string      `json:"credentials,omitempty"`
+	PushInterval time.Duration `json:"push_interval,omitempty"`
 }
 
 type IDParams struct {

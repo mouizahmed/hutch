@@ -4,8 +4,10 @@ package guest
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"os/exec"
 	"os/user"
@@ -41,6 +43,7 @@ func status(watch []string) (guestproto.Status, error) {
 	}
 	st.Ports = listeningPorts()
 	st.Files = hashFiles(watch)
+	st.Push = pushState.Load()
 	return st, nil
 }
 
@@ -105,17 +108,29 @@ func listeningPorts() []guestproto.ListenPort {
 
 // tmuxAsDev queries the tmux server of user dev; an error usually means none is running.
 func tmuxAsDev(args ...string) (string, error) {
+	return asDev(context.Background(), "", "tmux", args...)
+}
+
+// asDev runs a command as user dev and returns its stdout; on failure the error
+// includes stderr.
+func asDev(ctx context.Context, dir, name string, args ...string) (string, error) {
 	u, err := user.Lookup("dev")
 	if err != nil {
 		return "", err
 	}
 	uid, _ := strconv.ParseUint(u.Uid, 10, 32)
 	gid, _ := strconv.ParseUint(u.Gid, 10, 32)
-	cmd := exec.Command(lookPath("tmux", u.HomeDir), args...)
-	cmd.Env = []string{userPath(u.HomeDir), "HOME=" + u.HomeDir}
+	cmd := exec.CommandContext(ctx, lookPath(name, u.HomeDir), args...)
+	cmd.Dir = dir
+	cmd.Env = []string{userPath(u.HomeDir), "HOME=" + u.HomeDir, "USER=dev"}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}}
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	err = cmd.Run()
-	return out.String(), err
+	var out, errb bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	if err := cmd.Run(); err != nil {
+		if msg := strings.TrimSpace(errb.String()); msg != "" {
+			return out.String(), fmt.Errorf("%s", msg)
+		}
+		return out.String(), err
+	}
+	return out.String(), nil
 }

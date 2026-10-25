@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mouizahmed/hutch/internal/api"
+	"github.com/mouizahmed/hutch/internal/guestproto"
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
@@ -326,13 +327,23 @@ func (s *Server) forkProject(ctx context.Context, p api.ForkParams, stdout, stde
 	if err := s.applyUserLayer(ctx, w, b.ID, p.Credentials); err != nil {
 		return b, err
 	}
-	base := "origin/HEAD"
-	if p.Base != "" {
-		base = "origin/" + p.Base
+	branch := "hutch/" + b.ID
+	var out bytes.Buffer
+	if err := s.run(ctx, w, b.ID, api.ExecParams{Dir: workspace, Argv: []string{"sh", "-ec", `git fetch -q origin
+base="${2:-$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's,^origin/,,')}"
+git checkout -q --no-track -B "$1" "origin/$base"
+echo "$base"`, "sh", branch, p.Base}}, &out, stderr); err != nil {
+		return b, fmt.Errorf("checkout: %w", err)
 	}
-	if err := s.run(ctx, w, b.ID, api.ExecParams{Dir: workspace, Argv: []string{"sh", "-c",
-		`git fetch -q origin && git checkout -q --no-track -B "hutch/$1" "$2"`, "sh", b.ID, base}}, stdout, stderr); err != nil {
-		return b, fmt.Errorf("checkout %s: %w", base, err)
+	base := strings.TrimSpace(out.String())
+	if err := s.store.setBoxGit(b.ID, branch, base); err != nil {
+		return b, err
+	}
+	b.Branch, b.Base = branch, base
+	conf, _ := json.Marshal(guestproto.PushConfig{Dir: workspace, Branch: branch, Interval: p.PushInterval})
+	if err := rpc.Call(ctx, w.sess, api.BoxFiles, api.FilesParams{ID: b.ID, Files: guestproto.Files{User: "root",
+		Files: []guestproto.File{{Path: guestproto.PushConfigPath, Mode: 0o644, Data: conf}}}}, nil); err != nil {
+		return b, fmt.Errorf("push config: %w", err)
 	}
 	if s.run(ctx, w, b.ID, api.ExecParams{Dir: workspace, Argv: []string{"test", "-f", ".hutch/on-create.sh"}}, io.Discard, io.Discard) == nil {
 		step(stdout, "on-create.sh")
