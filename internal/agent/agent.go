@@ -239,14 +239,14 @@ func handlers(w *worker.Worker, name string, m *monitor) rpc.Mux {
 			if err := rpc.Decode(params, &p); err != nil {
 				return nil, err
 			}
-			return w.Boot(ctx, p.ID, p.Image, p.VCPUs, p.MemMiB, p.DiskBytes, worker.Idle(p.Idle))
+			return w.Boot(ctx, p.ID, p.Image, p.VCPUs, p.MemMiB, p.DiskBytes, worker.Idle(p.Idle), p.Allow)
 		}),
 		api.BoxFork: box(func(ctx context.Context, params json.RawMessage) (*worker.Box, error) {
 			var p api.ForkParams
 			if err := rpc.Decode(params, &p); err != nil {
 				return nil, err
 			}
-			return w.Fork(ctx, p.Source, p.ID, worker.Idle(p.Idle))
+			return w.Fork(ctx, p.Source, p.ID, worker.Idle(p.Idle), p.Allow)
 		}),
 		api.WorkerSettings: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
 			var p api.WorkerSettingsParams

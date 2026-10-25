@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"text/template"
@@ -69,8 +71,12 @@ func templateParams(repo *config.Repo, cfg *config.Config, needCommit bool) (api
 		Idle:         api.Idle{Timeout: cfg.Duration("idle_timeout"), CPUThreshold: cfg.Percent("idle.cpu_threshold")},
 		Credentials:  cfg.List("credentials"),
 		PushInterval: cfg.Duration("git.push_interval"),
+		Allow:        cfg.List("network.allow"),
 		BuildTimeout: cfg.Duration("template.build_timeout"),
 		QuietTimeout: cfg.Duration("template.quiet_timeout"),
+	}
+	if err := checkAllow(p.Allow); err != nil {
+		return p, err
 	}
 	if !needCommit {
 		return p, nil
@@ -281,6 +287,17 @@ func templateThread(ctx context.Context, sess *yamux.Session, cfg *config.Config
 		return err
 	}
 	fmt.Printf("%s/%d %s started on the template box\n  hutch attach %s/%d\n", t.Box, t.N, t.Agent, t.Box, t.N)
+	return nil
+}
+
+// checkAllow checks network.allow entries are host:port.
+func checkAllow(allow []string) error {
+	for _, a := range allow {
+		host, port, err := net.SplitHostPort(a)
+		if n, perr := strconv.Atoi(port); err != nil || host == "" || perr != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("network.allow %q: want host:port", a)
+		}
+	}
 	return nil
 }
 

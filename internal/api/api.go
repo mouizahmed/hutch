@@ -146,6 +146,7 @@ type TemplateParams struct {
 	Idle         Idle          `json:"idle"`
 	Credentials  []string      `json:"credentials,omitempty"`
 	PushInterval time.Duration `json:"push_interval,omitempty"`
+	Allow        []string      `json:"allow,omitempty"`
 	BuildTimeout time.Duration `json:"build_timeout"`
 	QuietTimeout time.Duration `json:"quiet_timeout"`
 }
@@ -290,13 +291,14 @@ type Worker struct {
 }
 
 type BootParams struct {
-	ID        string `json:"id"`
-	Image     string `json:"image"`
-	VCPUs     int    `json:"vcpus"`
-	MemMiB    int    `json:"mem_mib"`
-	DiskBytes int64  `json:"disk_bytes,omitempty"`
-	Worker    string `json:"worker,omitempty"`
-	Idle      Idle   `json:"idle"`
+	ID        string   `json:"id"`
+	Image     string   `json:"image"`
+	VCPUs     int      `json:"vcpus"`
+	MemMiB    int      `json:"mem_mib"`
+	DiskBytes int64    `json:"disk_bytes,omitempty"`
+	Worker    string   `json:"worker,omitempty"`
+	Idle      Idle     `json:"idle"`
+	Allow     []string `json:"allow,omitempty"` // private host:port targets the box may reach
 }
 
 // ForkParams forks Source, or with Project the project's newest template version,
@@ -310,6 +312,7 @@ type ForkParams struct {
 	// Logins the box gets ("*": all), resolved from the project's grants.
 	Credentials  []string      `json:"credentials,omitempty"`
 	PushInterval time.Duration `json:"push_interval,omitempty"`
+	Allow        []string      `json:"allow,omitempty"`
 }
 
 type IDParams struct {

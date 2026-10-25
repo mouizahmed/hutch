@@ -139,7 +139,7 @@ func (s *Server) bootTemplate(ctx context.Context, proj api.Project, p api.Templ
 		return api.Box{}, nil, err
 	}
 	step(stdout, "boot %s (%d vCPU, %d MiB)", id, p.VCPUs, p.MemMiB)
-	b, err := s.callForBox(ctx, w, api.BoxBoot, api.BootParams{ID: id, Image: baseImage, VCPUs: p.VCPUs, MemMiB: p.MemMiB, DiskBytes: p.DiskBytes, Idle: p.Idle})
+	b, err := s.callForBox(ctx, w, api.BoxBoot, api.BootParams{ID: id, Image: baseImage, VCPUs: p.VCPUs, MemMiB: p.MemMiB, DiskBytes: p.DiskBytes, Idle: p.Idle, Allow: p.Allow})
 	if err != nil {
 		return b, nil, err
 	}
@@ -291,7 +291,7 @@ func (s *Server) templateBox(ctx context.Context, params json.RawMessage, out *r
 	if err != nil {
 		return nil, err
 	}
-	b, err := s.callForBox(ctx, w, api.BoxFork, api.ForkParams{Source: v.Box, ID: id, Idle: p.Idle})
+	b, err := s.callForBox(ctx, w, api.BoxFork, api.ForkParams{Source: v.Box, ID: id, Idle: p.Idle, Allow: p.Allow})
 	if err != nil {
 		return nil, err
 	}

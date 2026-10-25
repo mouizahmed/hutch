@@ -5,6 +5,8 @@ package worker
 import (
 	"bytes"
 	"fmt"
+	"log"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -95,7 +97,44 @@ func runInput(input, name string, args ...string) error {
 	return nil
 }
 
-func (s slot) setup(tapUID int) error {
+// Allowed targets can never be the slot networks (other boxes) or link-local.
+var neverAllowed = []string{"10.11.0.0/16", "10.12.0.0/16", "169.254.0.0/16"}
+
+// allowRules resolves host:port targets to ACCEPT rules; targets that don't resolve
+// or fall in neverAllowed are skipped with a log line, and the box starts anyway.
+func allowRules(allow []string) string {
+	var rules strings.Builder
+	for _, target := range allow {
+		host, port, err := net.SplitHostPort(target)
+		if err != nil {
+			log.Printf("network.allow %q: %v", target, err)
+			continue
+		}
+		ips, err := net.LookupIP(host)
+		if err != nil {
+			log.Printf("network.allow %q: %v", target, err)
+			continue
+		}
+		for _, ip := range ips {
+			if ip.To4() == nil || inRanges(ip, neverAllowed) {
+				continue
+			}
+			fmt.Fprintf(&rules, "-A FORWARD -i tap0 -d %s/32 -p tcp --dport %s -j ACCEPT\n", ip, port)
+		}
+	}
+	return rules.String()
+}
+
+func inRanges(ip net.IP, cidrs []string) bool {
+	for _, c := range cidrs {
+		if _, n, err := net.ParseCIDR(c); err == nil && n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s slot) setup(tapUID int, allow []string) error {
 	if _, err := os.Stat(s.netnsPath()); err == nil {
 		s.teardown()
 	}
@@ -125,6 +164,7 @@ COMMIT
 *filter
 -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 `, s.vethPeer(), guestIP, s.peerIP(), s.vethPeer(), s.ReachIP(), guestIP)
+	nsRules += allowRules(allow)
 	for _, cidr := range blocked {
 		nsRules += fmt.Sprintf("-A FORWARD -i tap0 -d %s -j DROP\n", cidr)
 	}

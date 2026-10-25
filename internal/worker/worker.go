@@ -55,6 +55,8 @@ type Box struct {
 	Idle    Idle   `json:"idle"`
 	// Watch lists files whose hashes guest status reports: credentials agents refresh.
 	Watch []string `json:"watch,omitempty"`
+	// Allow lists private targets (host:port) the box may reach despite the blocked ranges.
+	Allow []string `json:"allow,omitempty"`
 }
 
 // Idle is a box's idle policy; zero values mean the defaults.
@@ -165,7 +167,7 @@ func (w *Worker) List() ([]*Box, error) {
 
 // newNetwork picks a free slot and creates its netns under the lock, so concurrent
 // starts can't pick the same slot.
-func (w *Worker) newNetwork() (slot, error) {
+func (w *Worker) newNetwork(allow []string) (slot, error) {
 	unlock, err := w.lock("")
 	if err != nil {
 		return 0, err
@@ -186,7 +188,7 @@ func (w *Worker) newNetwork() (slot, error) {
 			if _, err := os.Stat(slot(s).netnsPath()); err == nil {
 				continue
 			}
-			return slot(s), slot(s).setup(slot(s).uid())
+			return slot(s), slot(s).setup(slot(s).uid(), allow)
 		}
 	}
 	return 0, errors.New("no free network slots")

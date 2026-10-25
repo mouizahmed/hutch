@@ -85,7 +85,10 @@ func boxCommands() []*cobra.Command {
 				}
 			} else if from == "" && repo != nil {
 				p := api.ForkParams{Project: repo.ID, Base: cfg.String("base"), ID: name, Idle: idle, Credentials: cfg.List("credentials"),
-					PushInterval: cfg.Duration("git.push_interval")}
+					PushInterval: cfg.Duration("git.push_interval"), Allow: cfg.List("network.allow")}
+				if err := checkAllow(p.Allow); err != nil {
+					return err
+				}
 				if err := rpc.CallOutput(ctx, sess, api.BoxFork, p, &b, os.Stdout, os.Stderr); err != nil {
 					return err
 				}

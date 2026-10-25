@@ -24,7 +24,7 @@ import (
 
 // Boot creates a box from an image and cold boots it. The image's disk is grown to
 // diskBytes when that is larger.
-func (w *Worker) Boot(ctx context.Context, id, image string, vcpus, memMiB int, diskBytes int64, idle Idle) (*Box, error) {
+func (w *Worker) Boot(ctx context.Context, id, image string, vcpus, memMiB int, diskBytes int64, idle Idle, allow []string) (*Box, error) {
 	if !validID.MatchString(id) {
 		return nil, fmt.Errorf("invalid box id %q", id)
 	}
@@ -39,7 +39,7 @@ func (w *Worker) Boot(ctx context.Context, id, image string, vcpus, memMiB int, 
 		}
 		return nil, err
 	}
-	b := &Box{ID: id, Image: image, VCPUs: vcpus, MemMiB: memMiB, FCVersion: w.FCVersion, Class: w.Class(), Created: time.Now().UTC(), Idle: idle}
+	b := &Box{ID: id, Image: image, VCPUs: vcpus, MemMiB: memMiB, FCVersion: w.FCVersion, Class: w.Class(), Created: time.Now().UTC(), Idle: idle, Allow: allow}
 	rootfs := filepath.Join(w.boxDir(id), "rootfs.ext4")
 	if err := clone(filepath.Join(w.imageDir(image), "rootfs.ext4"), rootfs); err != nil {
 		os.RemoveAll(w.boxDir(id))
@@ -114,7 +114,7 @@ func (w *Worker) Rename(id, newID string) (*Box, error) {
 
 // Fork creates a box from a sleeping box's latest snapshot: the disk is reflinked and
 // the memory file is shared copy-on-write until the new box writes to it.
-func (w *Worker) Fork(ctx context.Context, srcID, id string, idle Idle) (*Box, error) {
+func (w *Worker) Fork(ctx context.Context, srcID, id string, idle Idle, allow []string) (*Box, error) {
 	if !validID.MatchString(id) {
 		return nil, fmt.Errorf("invalid box id %q", id)
 	}
@@ -131,7 +131,7 @@ func (w *Worker) Fork(ctx context.Context, srcID, id string, idle Idle) (*Box, e
 	}
 	b, err := w.copyFromSnapshot(srcID, id)
 	if err == nil {
-		b.Idle = idle
+		b.Idle, b.Allow = idle, allow
 		err = w.start(ctx, b, map[string]string{
 			jailRootfs: filepath.Join(w.boxDir(id), "rootfs.ext4"),
 			jailState:  filepath.Join(w.boxDir(id), "base.vmstate"),
@@ -213,7 +213,7 @@ func (w *Worker) Wake(ctx context.Context, id string) (*Box, error) {
 // start sets up the network and jail, runs boot (cold boot or restore), then sends
 // hutch-guest the restore message. On failure everything it created is undone.
 func (w *Worker) start(ctx context.Context, b *Box, links map[string]string, boot func(*vm) error, guestTimeout time.Duration) error {
-	s, err := w.newNetwork()
+	s, err := w.newNetwork(b.Allow)
 	if err != nil {
 		return err
 	}
