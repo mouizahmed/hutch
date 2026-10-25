@@ -68,6 +68,7 @@ func templateParams(repo *config.Repo, cfg *config.Config, needCommit bool) (api
 		DiskBytes:    cfg.Size("disk.size"),
 		Idle:         api.Idle{Timeout: cfg.Duration("idle_timeout"), CPUThreshold: cfg.Percent("idle.cpu_threshold")},
 		Credentials:  cfg.List("credentials"),
+		PushInterval: cfg.Duration("git.push_interval"),
 		BuildTimeout: cfg.Duration("template.build_timeout"),
 		QuietTimeout: cfg.Duration("template.quiet_timeout"),
 	}
@@ -248,6 +249,39 @@ func templateCommands() *cobra.Command {
 
 	tmpl.AddCommand(build, snapshot, shell, versions)
 	return tmpl
+}
+
+// templatePrompt tells an agent on the template box what its changes are for.
+const templatePrompt = `You are in this project's template box. Hutch builds every box of the project from the recipe in .hutch/: setup.sh runs as root in a fresh VM, verify.sh must pass, and on-create.sh runs in each new box. Make this change in the recipe, try it here, and commit it on the current branch (hutch/template), which Hutch pushes. Anything changed outside the recipe is thrown away at the next build.
+
+`
+
+// templateThread starts a thread on the project's template box, starting the box if needed.
+func templateThread(ctx context.Context, sess *yamux.Session, cfg *config.Config, agent agentFlags, args []string) error {
+	repo, err := config.FindRepo(".")
+	if err != nil {
+		return err
+	}
+	if repo == nil {
+		return errors.New("not in a Git repository")
+	}
+	p, err := templateParams(repo, cfg, false)
+	if err != nil {
+		return err
+	}
+	var b api.Box
+	if err := rpc.CallOutput(ctx, sess, api.TemplateBox, p, &b, os.Stderr, os.Stderr); err != nil {
+		return err
+	}
+	if len(args) > 0 && agent.cmd == "" {
+		args = []string{templatePrompt + args[0]}
+	}
+	t, err := startThread(ctx, sess, cfg, b.ID, agent, args)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s/%d %s started on the template box\n  hutch attach %s/%d\n", t.Box, t.N, t.Agent, t.Box, t.N)
+	return nil
 }
 
 type boxSize struct{ cpu, memMiB int }

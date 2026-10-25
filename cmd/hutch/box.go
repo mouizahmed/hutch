@@ -285,6 +285,9 @@ func threadCommands() []*cobra.Command {
 			if err != nil {
 				return err
 			}
+			if args[0] == "template" {
+				return templateThread(ctx, sess, cfg, agent, args[1:])
+			}
 			t, err := startThread(ctx, sess, cfg, args[0], agent, args[1:])
 			if err != nil {
 				return err

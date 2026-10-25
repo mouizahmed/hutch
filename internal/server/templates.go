@@ -275,7 +275,11 @@ func (s *Server) templateBox(ctx context.Context, params json.RawMessage, out *r
 	}
 	stdout, stderr := out.Writers()
 	if len(versions) == 0 {
-		b, _, err := s.bootTemplate(ctx, proj, p, stdout, stderr)
+		b, w, err := s.bootTemplate(ctx, proj, p, stdout, stderr)
+		if err != nil {
+			return b, err
+		}
+		b.Branch, b.Base, err = s.checkoutBranch(ctx, w, id, "hutch/template", "", p.PushInterval, stderr)
 		return b, err
 	}
 	v := versions[0]
@@ -294,7 +298,11 @@ func (s *Server) templateBox(ctx context.Context, params json.RawMessage, out *r
 	if err := s.store.putMeta(id, boxMeta{project: proj.ID, kind: api.BoxTemplate, commit: v.Commit}); err != nil {
 		return nil, err
 	}
-	return b, s.applyUserLayer(ctx, w, id, p.Credentials)
+	if err := s.applyUserLayer(ctx, w, id, p.Credentials); err != nil {
+		return nil, err
+	}
+	b.Branch, b.Base, err = s.checkoutBranch(ctx, w, id, "hutch/template", "", p.PushInterval, stderr)
+	return b, err
 }
 
 // forkProject creates a box from the project's newest template version and checks
@@ -327,23 +335,8 @@ func (s *Server) forkProject(ctx context.Context, p api.ForkParams, stdout, stde
 	if err := s.applyUserLayer(ctx, w, b.ID, p.Credentials); err != nil {
 		return b, err
 	}
-	branch := "hutch/" + b.ID
-	var out bytes.Buffer
-	if err := s.run(ctx, w, b.ID, api.ExecParams{Dir: workspace, Argv: []string{"sh", "-ec", `git fetch -q origin
-base="${2:-$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's,^origin/,,')}"
-git checkout -q --no-track -B "$1" "origin/$base"
-echo "$base"`, "sh", branch, p.Base}}, &out, stderr); err != nil {
-		return b, fmt.Errorf("checkout: %w", err)
-	}
-	base := strings.TrimSpace(out.String())
-	if err := s.store.setBoxGit(b.ID, branch, base); err != nil {
+	if b.Branch, b.Base, err = s.checkoutBranch(ctx, w, b.ID, "hutch/"+b.ID, p.Base, p.PushInterval, stderr); err != nil {
 		return b, err
-	}
-	b.Branch, b.Base = branch, base
-	conf, _ := json.Marshal(guestproto.PushConfig{Dir: workspace, Branch: branch, Interval: p.PushInterval})
-	if err := rpc.Call(ctx, w.sess, api.BoxFiles, api.FilesParams{ID: b.ID, Files: guestproto.Files{User: "root",
-		Files: []guestproto.File{{Path: guestproto.PushConfigPath, Mode: 0o644, Data: conf}}}}, nil); err != nil {
-		return b, fmt.Errorf("push config: %w", err)
 	}
 	if s.run(ctx, w, b.ID, api.ExecParams{Dir: workspace, Argv: []string{"test", "-f", ".hutch/on-create.sh"}}, io.Discard, io.Discard) == nil {
 		step(stdout, "on-create.sh")
@@ -352,6 +345,31 @@ echo "$base"`, "sh", branch, p.Base}}, &out, stderr); err != nil {
 		}
 	}
 	return b, nil
+}
+
+// checkoutBranch puts a box's /workspace on its own branch, continuing it if it is
+// already on origin, else starting it from base (empty: the default branch), and
+// sets the guest to push it after commits. It returns the branch and base.
+func (s *Server) checkoutBranch(ctx context.Context, w *workerConn, box, branch, base string, interval time.Duration, stderr io.Writer) (string, string, error) {
+	var out bytes.Buffer
+	if err := s.run(ctx, w, box, api.ExecParams{Dir: workspace, Argv: []string{"sh", "-ec", `git fetch -q origin
+base="${2:-$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's,^origin/,,')}"
+from="origin/$base"
+git rev-parse -q --verify "refs/remotes/origin/$1" >/dev/null && from="origin/$1"
+git checkout -q --no-track -B "$1" "$from"
+echo "$base"`, "sh", branch, base}}, &out, stderr); err != nil {
+		return "", "", fmt.Errorf("checkout: %w", err)
+	}
+	base = strings.TrimSpace(out.String())
+	if err := s.store.setBoxGit(box, branch, base); err != nil {
+		return "", "", err
+	}
+	conf, _ := json.Marshal(guestproto.PushConfig{Dir: workspace, Branch: branch, Interval: interval})
+	if err := rpc.Call(ctx, w.sess, api.BoxFiles, api.FilesParams{ID: box, Files: guestproto.Files{User: "root",
+		Files: []guestproto.File{{Path: guestproto.PushConfigPath, Mode: 0o644, Data: conf}}}}, nil); err != nil {
+		return "", "", fmt.Errorf("push config: %w", err)
+	}
+	return branch, base, nil
 }
 
 // removeBox deletes a box on its worker and forgets it.

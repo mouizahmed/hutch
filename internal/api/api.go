@@ -145,6 +145,7 @@ type TemplateParams struct {
 	DiskBytes    int64         `json:"disk_bytes"`
 	Idle         Idle          `json:"idle"`
 	Credentials  []string      `json:"credentials,omitempty"`
+	PushInterval time.Duration `json:"push_interval,omitempty"`
 	BuildTimeout time.Duration `json:"build_timeout"`
 	QuietTimeout time.Duration `json:"quiet_timeout"`
 }
