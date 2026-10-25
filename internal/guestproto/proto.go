@@ -84,6 +84,13 @@ type Status struct {
 	Threads  []ThreadStatus `json:"threads"`
 	Clients  int            `json:"clients"`  // attached tmux clients, any session
 	Sessions int            `json:"sessions"` // open exec and terminal sessions
+	Ports    []ListenPort   `json:"ports,omitempty"`
+}
+
+// ListenPort is a listening TCP socket in the guest.
+type ListenPort struct {
+	Port     int  `json:"port"`
+	Loopback bool `json:"loopback"` // bound to 127.0.0.1 or ::1 only
 }
 
 type ThreadStatus struct {

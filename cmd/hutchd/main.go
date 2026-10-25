@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -30,6 +31,7 @@ commands:
   box ls
   box exec <id> [--user NAME] -- <command> [args...]
   box console <id>                                       print the serial console log
+  box status <id>                                        print what hutch-guest reports (threads, sessions, ports)
   image import <name> <vmlinux> <rootfs.ext4>
   enroll --server HOST:PORT --token TOKEN [--name NAME]   join a server
   run [--name NAME]                                      serve the server's calls
@@ -155,6 +157,18 @@ func dispatch(ctx context.Context, root, fcVersion string, args []string) error 
 			return err
 		}
 		os.Exit(code)
+	case "status":
+		id, err := oneArg(flag.NewFlagSet("status", flag.ExitOnError), rest, "box status <id>")
+		if err != nil {
+			return err
+		}
+		st, err := w.GuestStatus(ctx, id)
+		if err != nil {
+			return err
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(st)
 	case "console":
 		id, err := oneArg(flag.NewFlagSet("console", flag.ExitOnError), rest, "box console <id>")
 		if err != nil {

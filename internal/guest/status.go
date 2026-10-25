@@ -4,6 +4,7 @@ package guest
 
 import (
 	"bytes"
+	"os"
 	"os/exec"
 	"os/user"
 	"strconv"
@@ -36,7 +37,42 @@ func status() (guestproto.Status, error) {
 	if out, err := tmuxAsDev("list-clients", "-F", "#{client_name}"); err == nil {
 		st.Clients = len(strings.Fields(out))
 	}
+	st.Ports = listeningPorts()
 	return st, nil
+}
+
+// listeningPorts reads TCP sockets in LISTEN state from /proc/net/tcp{,6}.
+func listeningPorts() []guestproto.ListenPort {
+	seen := map[int]*guestproto.ListenPort{}
+	var ports []guestproto.ListenPort
+	for _, file := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n")[1:] {
+			f := strings.Fields(line)
+			if len(f) < 4 || f[3] != "0A" { // 0A = TCP_LISTEN
+				continue
+			}
+			addr, portHex, ok := strings.Cut(f[1], ":")
+			if !ok {
+				continue
+			}
+			port, err := strconv.ParseInt(portHex, 16, 32)
+			if err != nil {
+				continue
+			}
+			loopback := addr == "0100007F" || addr == "00000000000000000000000001000000"
+			if p := seen[int(port)]; p != nil {
+				p.Loopback = p.Loopback && loopback
+				continue
+			}
+			ports = append(ports, guestproto.ListenPort{Port: int(port), Loopback: loopback})
+			seen[int(port)] = &ports[len(ports)-1]
+		}
+	}
+	return ports
 }
 
 // tmuxAsDev queries the tmux server of user dev; an error usually means none is running.
