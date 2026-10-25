@@ -82,8 +82,11 @@ func newSSHHostKeys() error {
 	for _, f := range old {
 		os.Remove(f)
 	}
-	if out, err := exec.Command("ssh-keygen", "-A").CombinedOutput(); err != nil {
-		return fmt.Errorf("%v: %s", err, out)
+	for _, t := range []string{"ed25519", "ecdsa"} {
+		key := "/etc/ssh/ssh_host_" + t + "_key"
+		if out, err := exec.Command("ssh-keygen", "-q", "-t", t, "-N", "", "-f", key).CombinedOutput(); err != nil {
+			return fmt.Errorf("%v: %s", err, out)
+		}
 	}
 	if exec.Command("systemctl", "is-active", "--quiet", "ssh").Run() == nil {
 		if out, err := exec.Command("systemctl", "restart", "ssh").CombinedOutput(); err != nil {

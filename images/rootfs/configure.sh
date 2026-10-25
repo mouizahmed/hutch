@@ -47,10 +47,16 @@ install -m644 /build/hutch-guest.service "$r/etc/systemd/system/hutch-guest.serv
 ch systemctl enable hutch-guest.service >/dev/null 2>&1
 
 # Host keys are created on first boot; hutch-guest replaces them in every clone.
+# RSA is left out: generating it takes about a second, on every fork.
 rm -f "$r"/etc/ssh/ssh_host_*
+printf 'HostKey /etc/ssh/ssh_host_ed25519_key\nHostKey /etc/ssh/ssh_host_ecdsa_key\n' > "$r/etc/ssh/sshd_config.d/hostkeys.conf"
 mkdir -p "$r/etc/systemd/system/ssh.service.d"
-printf '[Service]\nExecStartPre=\nExecStartPre=/usr/bin/ssh-keygen -A\nExecStartPre=/usr/sbin/sshd -t\n' \
-  > "$r/etc/systemd/system/ssh.service.d/hostkeys.conf"
+cat > "$r/etc/systemd/system/ssh.service.d/hostkeys.conf" <<'EOF'
+[Service]
+ExecStartPre=
+ExecStartPre=/bin/sh -c 'for t in ed25519 ecdsa; do [ -f /etc/ssh/ssh_host_$${t}_key ] || ssh-keygen -q -t $$t -N "" -f /etc/ssh/ssh_host_$${t}_key; done'
+ExecStartPre=/usr/sbin/sshd -t
+EOF
 
 # Root on the serial console, reachable only through `hutch console --interactive`.
 mkdir -p "$r/etc/systemd/system/serial-getty@ttyS0.service.d"
