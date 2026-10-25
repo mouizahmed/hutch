@@ -18,9 +18,9 @@ import (
 
 // Worker manages boxes under Root (an XFS volume with reflink):
 //
-//	firecracker/<version>/{firecracker,jailer,rebase-snap}
+//	firecracker/<version>/{firecracker,jailer}
 //	images/<name>/{vmlinux,rootfs.ext4}
-//	boxes/<id>/{box.json,rootfs.ext4,base.mem,console.log,snapshots/<gen>/{vmstate,mem}}
+//	boxes/<id>/{box.json,rootfs.ext4,base.mem,console.log,console.in,firecracker.log,snapshots/<gen>/{vmstate,mem}}
 //	jail/firecracker/<id>/root/   jailer chroot while the box runs
 type Worker struct {
 	Root      string
@@ -62,7 +62,7 @@ func New(root, fcVersion string) (*Worker, error) {
 		return nil, err
 	}
 	w := &Worker{Root: root, FCVersion: fcVersion, vendor: vendor}
-	for _, f := range []string{"firecracker", "jailer", "rebase-snap"} {
+	for _, f := range []string{"firecracker", "jailer"} {
 		if _, err := os.Stat(w.fcBin(f)); err != nil {
 			return nil, fmt.Errorf("firecracker %s not installed: %w", fcVersion, err)
 		}
@@ -87,7 +87,11 @@ func (w *Worker) genDir(id string, gen int) string {
 	return filepath.Join(w.boxDir(id), "snapshots", fmt.Sprint(gen))
 }
 
-func (w *Worker) ConsolePath(id string) string { return filepath.Join(w.boxDir(id), "console.log") }
+func (w *Worker) ConsolePath(id string) string   { return filepath.Join(w.boxDir(id), "console.log") }
+func (w *Worker) FCLogPath(id string) string     { return filepath.Join(w.boxDir(id), "firecracker.log") }
+func (w *Worker) consoleInPath(id string) string { return filepath.Join(w.boxDir(id), "console.in") }
+
+func (w *Worker) Get(id string) (*Box, error) { return w.load(id) }
 
 func (w *Worker) load(id string) (*Box, error) {
 	b, err := os.ReadFile(filepath.Join(w.boxDir(id), "box.json"))

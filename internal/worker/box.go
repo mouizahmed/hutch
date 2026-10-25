@@ -205,7 +205,7 @@ func (w *Worker) guestRestore(ctx context.Context, b *Box, timeout time.Duration
 }
 
 // Sleep snapshots a running box and stops its VM. The new memory file is the previous
-// one with the diff applied, with zero pages punched out; older generations are removed.
+// one with the diff applied; older generations are removed.
 func (w *Worker) Sleep(ctx context.Context, id string) (*Box, error) {
 	unlock, err := w.lock(id)
 	if err != nil {
@@ -236,14 +236,16 @@ func (w *Worker) Sleep(ctx context.Context, id string) (*Box, error) {
 		if err := clone(b.BaseMem, mem); err != nil {
 			return nil, err
 		}
-		if err := run(w.fcBin("rebase-snap"), "--base-file", mem, "--diff-file", diff); err != nil {
+		if err := applyDiff(mem, diff); err != nil {
 			return nil, err
 		}
-	} else if err := os.Rename(diff, mem); err != nil {
-		return nil, err
-	}
-	if err := run("fallocate", "--dig-holes", mem); err != nil {
-		return nil, err
+	} else {
+		if err := os.Rename(diff, mem); err != nil {
+			return nil, err
+		}
+		if err := applyDiff(mem, mem); err != nil {
+			return nil, err
+		}
 	}
 	if err := os.Rename(state, filepath.Join(gen, "vmstate")); err != nil {
 		return nil, err
