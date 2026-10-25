@@ -1,0 +1,16 @@
+systemd-sysv
+udev
+dbus
+iproute2
+iputils-ping
+ca-certificates
+curl
+git
+tmux
+sudo
+openssh-server
+iptables
+kmod
+procps
+less
+xz-utils

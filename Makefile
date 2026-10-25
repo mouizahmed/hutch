@@ -1,7 +1,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X github.com/mouizahmed/hutch/internal/version.Version=$(VERSION)
 
-.PHONY: build linux test vet vuln check clean
+.PHONY: build linux test vet vuln check clean images kernel rootfs
 
 build:
 	go build -trimpath -ldflags '$(LDFLAGS)' -o bin/ ./cmd/...
@@ -21,6 +21,14 @@ vuln:
 	go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 
 check: vet test vuln
+
+images: kernel rootfs
+
+kernel:
+	images/kernel/build.sh dist/images
+
+rootfs: linux
+	images/rootfs/build.sh dist/images bin/linux-amd64/hutch-guest
 
 clean:
 	rm -rf bin dist

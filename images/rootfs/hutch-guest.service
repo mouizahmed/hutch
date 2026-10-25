@@ -1,0 +1,11 @@
+[Unit]
+Description=Hutch guest helper
+After=local-fs.target
+
+[Service]
+ExecStart=/usr/local/bin/hutch-guest serve
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
