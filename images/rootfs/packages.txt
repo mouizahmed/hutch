@@ -7,6 +7,7 @@ ca-certificates
 curl
 git
 tmux
+ncurses-term
 sudo
 openssh-server
 iptables

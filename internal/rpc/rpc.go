@@ -74,9 +74,15 @@ type Handler func(ctx context.Context, params json.RawMessage, out *Out) (any, e
 
 type Mux map[string]Handler
 
+// StreamHandler owns the stream after the request: both sides exchange their own
+// frames, as interactive sessions do.
+type StreamHandler func(ctx context.Context, params json.RawMessage, conn net.Conn) error
+
+type Streams map[string]StreamHandler
+
 // Serve accepts streams from a session and dispatches each to its handler until
 // the session closes.
-func Serve(ctx context.Context, sess *yamux.Session, mux Mux) error {
+func Serve(ctx context.Context, sess *yamux.Session, mux Mux, streams Streams) error {
 	for {
 		conn, err := sess.Accept()
 		if err != nil {
@@ -85,14 +91,20 @@ func Serve(ctx context.Context, sess *yamux.Session, mux Mux) error {
 			}
 			return err
 		}
-		go handle(ctx, conn, mux)
+		go handle(ctx, conn, mux, streams)
 	}
 }
 
-func handle(ctx context.Context, conn net.Conn, mux Mux) {
+func handle(ctx context.Context, conn net.Conn, mux Mux, streams Streams) {
 	defer conn.Close()
 	var req Request
 	if err := wire.Read(conn, &req); err != nil {
+		return
+	}
+	if sh, ok := streams[req.Method]; ok {
+		if err := sh(ctx, req.Params, conn); err != nil {
+			WriteError(conn, err)
+		}
 		return
 	}
 	ctx, cancel := context.WithCancel(ctx)
@@ -226,4 +238,38 @@ func Relay(ctx context.Context, to *yamux.Session, method string, params json.Ra
 		return ExitCode(*code), nil
 	}
 	return result, nil
+}
+
+// WriteError ends a stream with an error frame.
+func WriteError(conn net.Conn, err error) error {
+	return wire.Write(conn, Frame{Type: FrameError, Error: err.Error()})
+}
+
+// OpenStream sends a request for a StreamHandler and returns the stream.
+func OpenStream(ctx context.Context, sess *yamux.Session, method string, params any) (net.Conn, error) {
+	conn, err := sess.Open()
+	if err != nil {
+		return nil, err
+	}
+	p, err := json.Marshal(params)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if err := wire.Write(conn, Request{Method: method, Params: p}); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+// Splice copies bytes both ways until either side closes, then closes both.
+func Splice(a, b net.Conn) {
+	done := make(chan struct{}, 2)
+	go func() { io.Copy(a, b); done <- struct{}{} }()
+	go func() { io.Copy(b, a); done <- struct{}{} }()
+	<-done
+	a.Close()
+	b.Close()
+	<-done
 }

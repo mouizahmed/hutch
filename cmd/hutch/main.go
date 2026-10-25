@@ -2,96 +2,77 @@ package main
 
 import (
 	"context"
-	"flag"
+	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
-	"github.com/mouizahmed/hutch/internal/api"
+	"github.com/hashicorp/yamux"
+	"github.com/spf13/cobra"
+
 	"github.com/mouizahmed/hutch/internal/client"
-	"github.com/mouizahmed/hutch/internal/rpc"
+	"github.com/mouizahmed/hutch/internal/config"
 	"github.com/mouizahmed/hutch/internal/server"
 	"github.com/mouizahmed/hutch/internal/version"
 )
 
-const usage = `usage: hutch <command>
+var (
+	flagServer     string
+	flagServerData string
+)
 
-commands:
-  server run [--data DIR] [--listen ADDR] [--name NAME]...   run the control plane
-  server token [--data DIR]                                   create a worker join token
-  api [--data DIR]                                            stdio bridge used by ssh <server> hutch api
-  version
-`
+// exitError carries a remote command's exit code back to main.
+type exitError int
 
-type names []string
-
-func (n *names) String() string     { return strings.Join(*n, ",") }
-func (n *names) Set(v string) error { *n = append(*n, v); return nil }
+func (e exitError) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
 
 func main() {
-	flag.Usage = func() { fmt.Fprint(flag.CommandLine.Output(), usage) }
-	flag.Parse()
-	args := flag.Args()
-	if len(args) == 0 {
-		flag.Usage()
-		os.Exit(2)
+	root := &cobra.Command{
+		Use:           "hutch",
+		Short:         "Every coding agent gets its own computer",
+		Version:       version.String(),
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	root.PersistentFlags().StringVar(&flagServer, "server", "", "SSH target of the server (overrides config)")
+	root.PersistentFlags().StringVar(&flagServerData, "server-data", client.DefaultDataDir(), "data directory of a server on this machine")
+	root.PersistentFlags().MarkHidden("server-data")
 
-	var err error
+	root.AddGroup(&cobra.Group{ID: "boxes", Title: "Boxes:"}, &cobra.Group{ID: "setup", Title: "Setup:"})
+	root.AddCommand(boxCommands()...)
+	root.AddCommand(sessionCommands()...)
+	root.AddCommand(setupCommands()...)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	err := root.ExecuteContext(ctx)
+	stop()
+	var code exitError
 	switch {
-	case args[0] == "version" || args[0] == "--version":
-		fmt.Println("hutch", version.String())
-	case args[0] == "api":
-		fs := flag.NewFlagSet("api", flag.ExitOnError)
-		data := fs.String("data", client.DefaultDataDir(), "server data directory")
-		fs.Parse(args[1:])
-		err = client.Bridge(server.SocketPath(*data))
-	case len(args) > 1 && args[0] == "server" && args[1] == "run":
-		fs := flag.NewFlagSet("server run", flag.ExitOnError)
-		data := fs.String("data", client.DefaultDataDir(), "data directory")
-		listen := fs.String("listen", ":7443", "address workers connect to")
-		var ns names
-		fs.Var(&ns, "name", "hostname or IP workers use to reach this server (repeatable)")
-		fs.Parse(args[2:])
-		if len(ns) == 0 {
-			host, _ := os.Hostname()
-			ns = names{host, "localhost", "127.0.0.1"}
-		}
-		var s *server.Server
-		if s, err = server.New(server.Config{Dir: *data, Listen: *listen, Names: ns}); err == nil {
-			log.Printf("hutch server %s, data in %s", version.String(), *data)
-			err = s.Run(ctx)
-		}
-	case len(args) > 1 && args[0] == "server" && args[1] == "token":
-		fs := flag.NewFlagSet("server token", flag.ExitOnError)
-		data := fs.String("data", client.DefaultDataDir(), "server data directory")
-		fs.Parse(args[2:])
-		err = createToken(ctx, *data)
-	default:
-		flag.Usage()
-		os.Exit(2)
-	}
-	if err != nil {
+	case errors.As(err, &code):
+		os.Exit(int(code))
+	case err != nil:
 		fmt.Fprintln(os.Stderr, "hutch:", err)
 		os.Exit(1)
 	}
 }
 
-func createToken(ctx context.Context, dataDir string) error {
-	sess, err := client.Dial("", server.SocketPath(dataDir))
+// connect opens a session to the configured server.
+func connect() (*yamux.Session, error) {
+	target := flagServer
+	if target == "" {
+		cfg, err := config.Load()
+		if err != nil {
+			return nil, err
+		}
+		target = cfg.Server
+	}
+	sess, err := client.Dial(target, server.SocketPath(flagServerData))
 	if err != nil {
-		return fmt.Errorf("is the server running? %w", err)
+		if target == "" {
+			return nil, fmt.Errorf("no server configured in %s and none running here: %w", config.Path(), err)
+		}
+		return nil, fmt.Errorf("connect to %s: %w", target, err)
 	}
-	defer sess.Close()
-	var t api.Token
-	if err := rpc.Call(ctx, sess, api.TokenCreate, struct{}{}, &t); err != nil {
-		return err
-	}
-	fmt.Println(t.Token)
-	return nil
+	return sess, nil
 }

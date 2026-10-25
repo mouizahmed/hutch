@@ -102,7 +102,7 @@ func (s *Server) listenAPI(ctx context.Context) error {
 				return
 			}
 			defer sess.Close()
-			rpc.Serve(ctx, sess, mux)
+			rpc.Serve(ctx, sess, mux, s.apiStreams())
 		}()
 	}
 }

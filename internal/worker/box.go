@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -291,6 +292,18 @@ func (w *Worker) Exec(ctx context.Context, id string, e guestproto.Exec, stdout,
 	}
 	c := &guestproto.Client{UDSPath: w.vsockPath(id)}
 	return c.Exec(ctx, e, stdout, stderr)
+}
+
+// DialGuest opens a raw connection to a running box's hutch-guest.
+func (w *Worker) DialGuest(ctx context.Context, id string) (net.Conn, error) {
+	b, err := w.load(id)
+	if err != nil {
+		return nil, err
+	}
+	if b.State != Running {
+		return nil, fmt.Errorf("box %q is %s", id, b.State)
+	}
+	return (&guestproto.Client{UDSPath: w.vsockPath(id)}).Dial(ctx)
 }
 
 // Alive reports whether a running box's Firecracker process still exists.

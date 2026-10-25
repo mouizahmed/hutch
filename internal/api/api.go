@@ -6,13 +6,15 @@ import "time"
 // Methods the server serves to the CLI. The box.* methods are also served by
 // hutchd to the server, which forwards them to the box's worker.
 const (
-	BoxList  = "box.list"
-	BoxBoot  = "box.boot"
-	BoxFork  = "box.fork"
-	BoxSleep = "box.sleep"
-	BoxWake  = "box.wake"
-	BoxRm    = "box.rm"
-	BoxExec  = "box.exec"
+	BoxList    = "box.list"
+	BoxBoot    = "box.boot"
+	BoxFork    = "box.fork"
+	BoxSleep   = "box.sleep"
+	BoxWake    = "box.wake"
+	BoxRm      = "box.rm"
+	BoxExec    = "box.exec"
+	BoxPTY     = "box.pty"
+	BoxConsole = "box.console"
 
 	WorkerList  = "worker.list"
 	WorkerHello = "worker.hello"
@@ -63,6 +65,20 @@ type ExecParams struct {
 	ID   string   `json:"id"`
 	Argv []string `json:"argv"`
 	User string   `json:"user,omitempty"`
+}
+
+type PTYParams struct {
+	ID   string   `json:"id"`
+	Argv []string `json:"argv"`
+	User string   `json:"user,omitempty"`
+	Term string   `json:"term,omitempty"`
+	Rows int      `json:"rows"`
+	Cols int      `json:"cols"`
+}
+
+type ConsoleParams struct {
+	ID     string `json:"id"`
+	Follow bool   `json:"follow,omitempty"`
 }
 
 type Token struct {

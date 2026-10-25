@@ -9,6 +9,7 @@ const (
 	TypeHello   = "hello"
 	TypeRestore = "restore"
 	TypeExec    = "exec"
+	TypePTY     = "pty"
 )
 
 const (
@@ -25,6 +26,7 @@ type Request struct {
 	Version int      `json:"version"`
 	Restore *Restore `json:"restore,omitempty"`
 	Exec    *Exec    `json:"exec,omitempty"`
+	PTY     *PTY     `json:"pty,omitempty"`
 }
 
 type Restore struct {
@@ -39,6 +41,30 @@ type Exec struct {
 	User string   `json:"user,omitempty"`
 	Dir  string   `json:"dir,omitempty"`
 	Env  []string `json:"env,omitempty"`
+}
+
+// PTY starts a command on a pseudo-terminal. After the guest answers "ok", the
+// host sends Input frames and the guest sends "stdout" frames, then "exit".
+type PTY struct {
+	Argv []string `json:"argv"`
+	User string   `json:"user,omitempty"`
+	Dir  string   `json:"dir,omitempty"`
+	Env  []string `json:"env,omitempty"`
+	Term string   `json:"term,omitempty"`
+	Rows int      `json:"rows"`
+	Cols int      `json:"cols"`
+}
+
+const (
+	InputStdin  = "stdin"
+	InputResize = "resize"
+)
+
+type Input struct {
+	Type string `json:"type"`
+	Data []byte `json:"data,omitempty"`
+	Rows int    `json:"rows,omitempty"`
+	Cols int    `json:"cols,omitempty"`
 }
 
 type Response struct {

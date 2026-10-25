@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"strings"
 
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/rpc"
@@ -18,6 +20,7 @@ func (s *Server) apiMux() rpc.Mux {
 		api.BoxWake:     s.onBoxWorker(api.BoxWake),
 		api.BoxRm:       s.boxRm,
 		api.BoxExec:     s.boxExec,
+		api.BoxConsole:  s.boxConsole,
 		api.WorkerList:  s.workerList,
 		api.TokenCreate: s.tokenCreate,
 	}
@@ -131,8 +134,38 @@ func (s *Server) boxRm(ctx context.Context, params json.RawMessage, _ *rpc.Out) 
 	return nil, s.store.deleteBox(p.ID)
 }
 
+// awake returns the worker of a box, waking the box first if it is asleep.
+func (s *Server) awake(ctx context.Context, id string) (*workerConn, error) {
+	b, err := s.store.box(id)
+	if err != nil {
+		return nil, err
+	}
+	w, err := s.worker(b.Worker)
+	if err != nil {
+		return nil, err
+	}
+	if b.State == "asleep" {
+		if _, err := s.callForBox(ctx, w, api.BoxWake, api.IDParams{ID: id}); err != nil {
+			return nil, fmt.Errorf("wake %s: %w", id, err)
+		}
+	}
+	return w, nil
+}
+
 func (s *Server) boxExec(ctx context.Context, params json.RawMessage, out *rpc.Out) (any, error) {
 	var p api.ExecParams
+	if err := rpc.Decode(params, &p); err != nil {
+		return nil, err
+	}
+	w, err := s.awake(ctx, p.ID)
+	if err != nil {
+		return nil, err
+	}
+	return rpc.Relay(ctx, w.sess, api.BoxExec, params, out)
+}
+
+func (s *Server) boxConsole(ctx context.Context, params json.RawMessage, out *rpc.Out) (any, error) {
+	var p api.ConsoleParams
 	if err := rpc.Decode(params, &p); err != nil {
 		return nil, err
 	}
@@ -140,5 +173,27 @@ func (s *Server) boxExec(ctx context.Context, params json.RawMessage, out *rpc.O
 	if err != nil {
 		return nil, err
 	}
-	return rpc.Relay(ctx, w.sess, api.BoxExec, params, out)
+	return rpc.Relay(ctx, w.sess, api.BoxConsole, params, out)
+}
+
+func (s *Server) apiStreams() rpc.Streams {
+	return rpc.Streams{api.BoxPTY: s.boxPTY}
+}
+
+func (s *Server) boxPTY(ctx context.Context, params json.RawMessage, conn net.Conn) error {
+	var p api.PTYParams
+	if err := rpc.Decode(params, &p); err != nil {
+		return err
+	}
+	w, err := s.awake(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	wc, err := rpc.OpenStream(ctx, w.sess, api.BoxPTY, p)
+	if err != nil {
+		return err
+	}
+	s.store.event(p.ID, api.BoxPTY, strings.Join(p.Argv, " "))
+	rpc.Splice(conn, wc)
+	return nil
 }

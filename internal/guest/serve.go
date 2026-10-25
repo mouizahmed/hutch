@@ -60,6 +60,17 @@ func handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 
+	if req.Type == guestproto.TypePTY {
+		if req.PTY == nil || len(req.PTY.Argv) == 0 {
+			(&responder{conn: conn}).fail(fmt.Errorf("pty request without a command"))
+			return
+		}
+		if err := runPTY(conn, *req.PTY); err != nil {
+			(&responder{conn: conn}).fail(err)
+		}
+		return
+	}
+
 	// The host sends nothing after the request, so a read returning means it hung up.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()

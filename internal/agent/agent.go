@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -112,11 +113,11 @@ func Run(ctx context.Context, id Identity, w *worker.Worker, name string) error 
 	if err != nil {
 		return fmt.Errorf("not enrolled (run `hutchd enroll`): %w", err)
 	}
-	mux := handlers(w, name)
+	mux, streams := handlers(w, name), streamHandlers(w)
 	backoff := time.Second
 	for ctx.Err() == nil {
 		start := time.Now()
-		err := serveOnce(ctx, conf, addr, mux)
+		err := serveOnce(ctx, conf, addr, mux, streams)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -158,7 +159,7 @@ func (id Identity) tlsConfig() (*tls.Config, string, error) {
 	return &tls.Config{Certificates: []tls.Certificate{cert}, RootCAs: pool, ServerName: host, MinVersion: tls.VersionTLS13}, server, nil
 }
 
-func serveOnce(ctx context.Context, conf *tls.Config, addr string, mux rpc.Mux) error {
+func serveOnce(ctx context.Context, conf *tls.Config, addr string, mux rpc.Mux, streams rpc.Streams) error {
 	d := tls.Dialer{Config: conf, NetDialer: &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}}
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
@@ -175,7 +176,7 @@ func serveOnce(ctx context.Context, conf *tls.Config, addr string, mux rpc.Mux) 
 	defer sess.Close()
 	context.AfterFunc(ctx, func() { sess.Close() })
 	log.Printf("connected to server %s", addr)
-	if err := rpc.Serve(ctx, sess, mux); err != nil {
+	if err := rpc.Serve(ctx, sess, mux, streams); err != nil {
 		return err
 	}
 	return errors.New("connection closed")
@@ -244,6 +245,13 @@ func handlers(w *worker.Worker, name string) rpc.Mux {
 			}
 			return nil, w.Remove(p.ID)
 		},
+		api.BoxConsole: func(ctx context.Context, params json.RawMessage, out *rpc.Out) (any, error) {
+			var p api.ConsoleParams
+			if err := rpc.Decode(params, &p); err != nil {
+				return nil, err
+			}
+			return rpc.ExitCode(0), streamConsole(ctx, w.ConsolePath(p.ID), p.Follow, out)
+		},
 		api.BoxExec: func(ctx context.Context, params json.RawMessage, out *rpc.Out) (any, error) {
 			var p api.ExecParams
 			if err := rpc.Decode(params, &p); err != nil {
@@ -256,5 +264,61 @@ func handlers(w *worker.Worker, name string) rpc.Mux {
 			}
 			return rpc.ExitCode(code), nil
 		},
+	}
+}
+
+func streamHandlers(w *worker.Worker) rpc.Streams {
+	return rpc.Streams{
+		// The terminal stream passes straight through to hutch-guest, which speaks
+		// the PTY frames with the CLI end to end.
+		api.BoxPTY: func(ctx context.Context, params json.RawMessage, conn net.Conn) error {
+			var p api.PTYParams
+			if err := rpc.Decode(params, &p); err != nil {
+				return err
+			}
+			g, err := w.DialGuest(ctx, p.ID)
+			if err != nil {
+				return err
+			}
+			req := guestproto.Request{Type: guestproto.TypePTY, Version: guestproto.Version,
+				PTY: &guestproto.PTY{Argv: p.Argv, User: p.User, Term: p.Term, Rows: p.Rows, Cols: p.Cols}}
+			if err := wire.Write(g, req); err != nil {
+				g.Close()
+				return err
+			}
+			rpc.Splice(conn, g)
+			return nil
+		},
+	}
+}
+
+func streamConsole(ctx context.Context, path string, follow bool, out *rpc.Out) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := f.Read(buf)
+		if n > 0 {
+			if err := out.Stdout(buf[:n]); err != nil {
+				return err
+			}
+		}
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, io.EOF) {
+			return err
+		}
+		if !follow {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(200 * time.Millisecond):
+		}
 	}
 }

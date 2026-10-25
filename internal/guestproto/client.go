@@ -16,7 +16,8 @@ type Client struct {
 	UDSPath string
 }
 
-func (c *Client) dial(ctx context.Context) (net.Conn, error) {
+// Dial opens a raw connection to hutch-guest.
+func (c *Client) Dial(ctx context.Context) (net.Conn, error) {
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", c.UDSPath)
 	if err != nil {
@@ -58,7 +59,7 @@ func readLine(r io.Reader) (string, error) {
 }
 
 func (c *Client) call(ctx context.Context, req Request, handle func(Response) (done bool, err error)) error {
-	conn, err := c.dial(ctx)
+	conn, err := c.Dial(ctx)
 	if err != nil {
 		return err
 	}
