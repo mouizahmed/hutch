@@ -34,12 +34,20 @@ func tmuxAttach(session string) []string {
 
 func sessionCommands() []*cobra.Command {
 	attach := &cobra.Command{
-		Use:     "attach <box>",
-		Short:   "Attach to a box's agent session (wakes it if asleep)",
+		Use:     "attach <box>[/<thread>]",
+		Short:   "Attach to a box's threads (wakes it if asleep)",
 		GroupID: "boxes",
 		Args:    cobra.ExactArgs(1),
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
-			return terminal(ctx, sess, args[0], tmuxAttach(agentSession))
+			box, n, err := parseTarget(args[0])
+			if err != nil {
+				return err
+			}
+			argv := tmuxAttach(agentSession)
+			if n > 0 {
+				argv = []string{"tmux", "attach-session", "-t", fmt.Sprintf("%s:%d", agentSession, n)}
+			}
+			return terminal(ctx, sess, box, argv)
 		}),
 	}
 

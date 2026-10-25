@@ -35,6 +35,14 @@ CREATE TABLE IF NOT EXISTS boxes (
 	created    TIMESTAMP NOT NULL,
 	updated    TIMESTAMP NOT NULL
 );
+CREATE TABLE IF NOT EXISTS threads (
+	box_id  TEXT NOT NULL REFERENCES boxes(id) ON DELETE CASCADE,
+	n       INTEGER NOT NULL,
+	agent   TEXT NOT NULL,
+	title   TEXT NOT NULL,
+	created TIMESTAMP NOT NULL,
+	PRIMARY KEY (box_id, n)
+);
 CREATE TABLE IF NOT EXISTS tokens (
 	hash    TEXT PRIMARY KEY,
 	created TIMESTAMP NOT NULL,
@@ -201,4 +209,27 @@ func (s *store) syncWorkerBoxes(workerID string, boxes []api.Box) error {
 
 func (s *store) event(boxID, kind, msg string) {
 	s.db.Exec(`INSERT INTO events (ts, box_id, kind, message) VALUES (?, ?, ?, ?)`, time.Now().UTC(), boxID, kind, msg)
+}
+
+func (s *store) addThread(t api.Thread) error {
+	_, err := s.db.Exec(`INSERT INTO threads (box_id, n, agent, title, created) VALUES (?, ?, ?, ?, ?)`,
+		t.Box, t.N, t.Agent, t.Title, t.Created)
+	return err
+}
+
+func (s *store) threads() (map[string][]api.Thread, error) {
+	rows, err := s.db.Query(`SELECT box_id, n, agent, title, created FROM threads ORDER BY box_id, n`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	byBox := map[string][]api.Thread{}
+	for rows.Next() {
+		var t api.Thread
+		if err := rows.Scan(&t.Box, &t.N, &t.Agent, &t.Title, &t.Created); err != nil {
+			return nil, err
+		}
+		byBox[t.Box] = append(byBox[t.Box], t)
+	}
+	return byBox, rows.Err()
 }

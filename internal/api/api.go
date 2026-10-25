@@ -16,6 +16,9 @@ const (
 	BoxPTY     = "box.pty"
 	BoxConsole = "box.console"
 
+	ThreadNew  = "thread.new"
+	ThreadSend = "thread.send"
+
 	WorkerList  = "worker.list"
 	WorkerHello = "worker.hello"
 	TokenCreate = "token.create"
@@ -32,6 +35,29 @@ type Box struct {
 	Class      string    `json:"class"`
 	ReachIP    string    `json:"reach_ip,omitempty"`
 	Created    time.Time `json:"created"`
+	Threads    []Thread  `json:"threads,omitempty"`
+}
+
+// Thread is one agent session: a tmux window in the box's "hutch" session.
+type Thread struct {
+	Box     string    `json:"box"`
+	N       int       `json:"n"`
+	Agent   string    `json:"agent"`
+	Title   string    `json:"title"`
+	Created time.Time `json:"created"`
+}
+
+type ThreadParams struct {
+	Box    string `json:"box"`
+	Agent  string `json:"agent,omitempty"`
+	Cmd    string `json:"cmd,omitempty"`
+	Prompt string `json:"prompt,omitempty"`
+}
+
+type SendParams struct {
+	Box     string `json:"box"`
+	N       int    `json:"n"`
+	Message string `json:"message"`
 }
 
 type Worker struct {

@@ -36,12 +36,12 @@ func runPTY(conn net.Conn, p guestproto.PTY) error {
 		term = "xterm-256color"
 	}
 
-	cmd := exec.Command(p.Argv[0], p.Argv[1:]...)
+	cmd := exec.Command(lookPath(p.Argv[0], u.HomeDir), p.Argv[1:]...)
 	cmd.Dir = p.Dir
 	if cmd.Dir == "" {
 		cmd.Dir = u.HomeDir
 	}
-	cmd.Env = append([]string{defaultPath, "HOME=" + u.HomeDir, "USER=" + u.Username, "LOGNAME=" + u.Username,
+	cmd.Env = append([]string{userPath(u.HomeDir), "HOME=" + u.HomeDir, "USER=" + u.Username, "LOGNAME=" + u.Username,
 		"SHELL=/bin/bash", "TERM=" + term, "LANG=C.UTF-8"}, p.Env...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}}
 

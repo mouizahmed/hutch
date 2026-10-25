@@ -42,6 +42,9 @@ fetch https://github.com/astral-sh/uv/releases/download/0.13.0/uv-x86_64-unknown
 tar -xzf /tmp/uv.tar.gz -C /tmp
 install -m755 /tmp/uv-x86_64-unknown-linux-musl/uv /tmp/uv-x86_64-unknown-linux-musl/uvx "$r/usr/local/bin/"
 
+# Threads are tmux windows numbered from 1; a window stays after its agent exits.
+install -m644 /build/tmux.conf "$r/etc/tmux.conf"
+
 install -m755 /hutch-guest "$r/usr/local/bin/hutch-guest"
 install -m644 /build/hutch-guest.service "$r/etc/systemd/system/hutch-guest.service"
 ch systemctl enable hutch-guest.service >/dev/null 2>&1

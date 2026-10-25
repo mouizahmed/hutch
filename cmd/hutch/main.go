@@ -42,6 +42,7 @@ func main() {
 	root.AddGroup(&cobra.Group{ID: "boxes", Title: "Boxes:"}, &cobra.Group{ID: "setup", Title: "Setup:"})
 	root.AddCommand(boxCommands()...)
 	root.AddCommand(sessionCommands()...)
+	root.AddCommand(threadCommands()...)
 	root.AddCommand(setupCommands()...)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

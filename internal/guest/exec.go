@@ -7,16 +7,36 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 
 	"github.com/mouizahmed/hutch/internal/guestproto"
 )
 
-const defaultPath = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+// userPath puts ~/.local/bin first: agents such as Claude Code install there.
+func userPath(home string) string {
+	return "PATH=" + home + "/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+}
+
+// lookPath resolves a command against the user's PATH, not hutch-guest's own.
+func lookPath(name, home string) string {
+	if strings.Contains(name, "/") {
+		return name
+	}
+	for _, dir := range strings.Split(strings.TrimPrefix(userPath(home), "PATH="), ":") {
+		p := filepath.Join(dir, name)
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0 {
+			return p
+		}
+	}
+	return name
+}
 
 func execute(ctx context.Context, e guestproto.Exec, r *responder) (int, error) {
 	name := e.User
@@ -30,12 +50,12 @@ func execute(ctx context.Context, e guestproto.Exec, r *responder) (int, error) 
 	uid, _ := strconv.ParseUint(u.Uid, 10, 32)
 	gid, _ := strconv.ParseUint(u.Gid, 10, 32)
 
-	cmd := exec.CommandContext(ctx, e.Argv[0], e.Argv[1:]...)
+	cmd := exec.CommandContext(ctx, lookPath(e.Argv[0], u.HomeDir), e.Argv[1:]...)
 	cmd.Dir = e.Dir
 	if cmd.Dir == "" {
 		cmd.Dir = u.HomeDir
 	}
-	cmd.Env = append([]string{defaultPath, "HOME=" + u.HomeDir, "USER=" + u.Username, "LOGNAME=" + u.Username}, e.Env...)
+	cmd.Env = append([]string{userPath(u.HomeDir), "HOME=" + u.HomeDir, "USER=" + u.Username, "LOGNAME=" + u.Username}, e.Env...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)},
 		Setpgid:    true,

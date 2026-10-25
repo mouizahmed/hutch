@@ -21,13 +21,26 @@ func (s *Server) apiMux() rpc.Mux {
 		api.BoxRm:       s.boxRm,
 		api.BoxExec:     s.boxExec,
 		api.BoxConsole:  s.boxConsole,
+		api.ThreadNew:   s.threadNew,
+		api.ThreadSend:  s.threadSend,
 		api.WorkerList:  s.workerList,
 		api.TokenCreate: s.tokenCreate,
 	}
 }
 
 func (s *Server) boxList(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any, error) {
-	return s.store.boxes()
+	boxes, err := s.store.boxes()
+	if err != nil {
+		return nil, err
+	}
+	threads, err := s.store.threads()
+	if err != nil {
+		return nil, err
+	}
+	for i := range boxes {
+		boxes[i].Threads = threads[boxes[i].ID]
+	}
+	return boxes, nil
 }
 
 func (s *Server) workerList(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any, error) {

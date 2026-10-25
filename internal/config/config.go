@@ -16,6 +16,8 @@ type User struct {
 	// Server is the SSH target of the server, e.g. "me@home-server". Empty means a
 	// server running on this machine as the current user.
 	Server string `toml:"server"`
+	// DefaultAgent is used by `hutch new` and `hutch thread` without --agent or --cmd.
+	DefaultAgent string `toml:"default_agent"`
 }
 
 func Path() string {
