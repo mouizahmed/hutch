@@ -187,6 +187,25 @@ func Call(ctx context.Context, sess *yamux.Session, method string, params, resul
 	})
 }
 
+// CallOutput calls a method that streams output before its result.
+func CallOutput(ctx context.Context, sess *yamux.Session, method string, params, result any, stdout, stderr io.Writer) error {
+	return Stream(ctx, sess, method, params, func(f Frame) error {
+		switch f.Type {
+		case FrameStdout:
+			_, err := stdout.Write(f.Data)
+			return err
+		case FrameStderr:
+			_, err := stderr.Write(f.Data)
+			return err
+		case FrameResult:
+			if result != nil {
+				return json.Unmarshal(f.Result, result)
+			}
+		}
+		return nil
+	})
+}
+
 // Exec calls a method that streams output and ends with an exit code.
 func Exec(ctx context.Context, sess *yamux.Session, method string, params any, stdout, stderr io.Writer) (int, error) {
 	code := -1

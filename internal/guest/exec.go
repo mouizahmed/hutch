@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/mouizahmed/hutch/internal/guestproto"
 )
@@ -62,25 +63,39 @@ func execute(ctx context.Context, e guestproto.Exec, r *responder) (int, error) 
 	}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 
-	stdout, err := cmd.StdoutPipe()
+	// Plain pipes rather than StdoutPipe: background processes the command starts
+	// inherit them, and the call must still end when the command itself exits.
+	outR, outW, err := os.Pipe()
 	if err != nil {
 		return 0, err
 	}
-	stderr, err := cmd.StderrPipe()
+	errR, errW, err := os.Pipe()
 	if err != nil {
+		outR.Close()
+		outW.Close()
 		return 0, err
 	}
-	if err := cmd.Start(); err != nil {
+	defer outR.Close()
+	defer errR.Close()
+	cmd.Stdout, cmd.Stderr = outW, errW
+	err = cmd.Start()
+	outW.Close()
+	errW.Close()
+	if err != nil {
 		return 0, err
 	}
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go stream(&wg, stdout, guestproto.RespStdout, r)
-	go stream(&wg, stderr, guestproto.RespStderr, r)
+	go stream(&wg, outR, guestproto.RespStdout, r)
+	go stream(&wg, errR, guestproto.RespStderr, r)
+	err = cmd.Wait()
+	// Read what is already written, then stop if background processes keep the pipes open.
+	deadline := time.Now().Add(200 * time.Millisecond)
+	outR.SetReadDeadline(deadline)
+	errR.SetReadDeadline(deadline)
 	wg.Wait()
 
-	err = cmd.Wait()
 	var exitErr *exec.ExitError
 	switch {
 	case err == nil:

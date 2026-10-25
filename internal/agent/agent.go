@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -227,7 +228,7 @@ func handlers(w *worker.Worker, name string, m *monitor) rpc.Mux {
 			if err != nil {
 				return nil, err
 			}
-			info := api.Worker{Name: name, Class: w.Class(), Version: version.String()}
+			info := api.Worker{Name: name, Class: w.Class(), Version: version.String(), CPUs: runtime.NumCPU(), MemMiB: hostMemMiB()}
 			for _, b := range boxes {
 				info.Boxes = append(info.Boxes, toAPI(w, b))
 			}
@@ -238,7 +239,7 @@ func handlers(w *worker.Worker, name string, m *monitor) rpc.Mux {
 			if err := rpc.Decode(params, &p); err != nil {
 				return nil, err
 			}
-			return w.Boot(ctx, p.ID, p.Image, p.VCPUs, p.MemMiB, worker.Idle(p.Idle))
+			return w.Boot(ctx, p.ID, p.Image, p.VCPUs, p.MemMiB, p.DiskBytes, worker.Idle(p.Idle))
 		}),
 		api.BoxFork: box(func(ctx context.Context, params json.RawMessage) (*worker.Box, error) {
 			var p api.ForkParams
@@ -256,6 +257,13 @@ func handlers(w *worker.Worker, name string, m *monitor) rpc.Mux {
 			m.kick()
 			return nil, nil
 		},
+		api.BoxRename: box(func(ctx context.Context, params json.RawMessage) (*worker.Box, error) {
+			var p api.RenameParams
+			if err := rpc.Decode(params, &p); err != nil {
+				return nil, err
+			}
+			return w.Rename(p.ID, p.NewID)
+		}),
 		api.BoxSleep: byID(w.Sleep),
 		api.BoxWake:  byID(w.Wake),
 		api.BoxRm: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
@@ -278,13 +286,23 @@ func handlers(w *worker.Worker, name string, m *monitor) rpc.Mux {
 				return nil, err
 			}
 			stdout, stderr := out.Writers()
-			code, err := w.Exec(ctx, p.ID, guestproto.Exec{Argv: p.Argv, User: p.User}, stdout, stderr)
+			code, err := w.Exec(ctx, p.ID, guestproto.Exec{Argv: p.Argv, User: p.User, Dir: p.Dir, Env: p.Env}, stdout, stderr)
 			if err != nil {
 				return nil, err
 			}
 			return rpc.ExitCode(code), nil
 		},
 	}
+}
+
+func hostMemMiB() int {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	var kb int
+	fmt.Sscanf(strings.TrimPrefix(string(data), "MemTotal:"), "%d", &kb)
+	return kb / 1024
 }
 
 func streamHandlers(w *worker.Worker) rpc.Streams {

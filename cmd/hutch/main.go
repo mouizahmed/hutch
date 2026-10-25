@@ -36,12 +36,13 @@ func main() {
 	root.PersistentFlags().StringVar(&flagServerData, "server-data", client.DefaultDataDir(), "data directory of a server on this machine")
 	root.PersistentFlags().MarkHidden("server-data")
 
-	root.AddGroup(&cobra.Group{ID: "boxes", Title: "Boxes:"}, &cobra.Group{ID: "setup", Title: "Setup:"})
+	root.AddGroup(&cobra.Group{ID: "boxes", Title: "Boxes:"}, &cobra.Group{ID: "projects", Title: "Projects and templates:"},
+		&cobra.Group{ID: "setup", Title: "Setup:"})
 	root.AddCommand(boxCommands()...)
 	root.AddCommand(sessionCommands()...)
 	root.AddCommand(threadCommands()...)
 	root.AddCommand(setupCommands()...)
-	root.AddCommand(configCommands())
+	root.AddCommand(configCommands(), initCommand(), templateCommands(), sizesCommand())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	err := root.ExecuteContext(ctx)

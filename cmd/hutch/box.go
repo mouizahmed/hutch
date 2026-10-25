@@ -73,13 +73,27 @@ func boxCommands() []*cobra.Command {
 			idle := api.Idle{Timeout: cfg.Duration("idle_timeout"), CPUThreshold: cfg.Percent("idle.cpu_threshold")}
 			start := time.Now()
 			var b api.Box
+			repo, err := config.FindRepo(".")
+			if err != nil {
+				return err
+			}
 			if image != "" {
 				p := api.BootParams{ID: name, Image: image, VCPUs: cpus, MemMiB: memMiB, Idle: idle}
 				if err := rpc.Call(ctx, sess, api.BoxBoot, p, &b); err != nil {
 					return fmt.Errorf("%w\n  hutch console %s", err, name)
 				}
-			} else if err := rpc.Call(ctx, sess, api.BoxFork, api.ForkParams{Source: from, ID: name, Idle: idle}, &b); err != nil {
-				return err
+			} else if from == "" && repo != nil {
+				p := api.ForkParams{Project: repo.ID, Base: cfg.String("base"), ID: name, Idle: idle}
+				if err := rpc.CallOutput(ctx, sess, api.BoxFork, p, &b, os.Stdout, os.Stderr); err != nil {
+					return err
+				}
+			} else {
+				if from == "" {
+					from = "base"
+				}
+				if err := rpc.Call(ctx, sess, api.BoxFork, api.ForkParams{Source: from, ID: name, Idle: idle}, &b); err != nil {
+					return err
+				}
 			}
 			t, err := startThread(ctx, sess, cfg, b.ID, agent, args)
 			if err != nil {
@@ -92,7 +106,7 @@ func boxCommands() []*cobra.Command {
 	}
 	agent.register(newCmd)
 	newCmd.Flags().StringVar(&name, "name", "", "box name (default: generated, like quiet-fox)")
-	newCmd.Flags().StringVar(&from, "from", "base", "sleeping box to fork from")
+	newCmd.Flags().StringVar(&from, "from", "", "sleeping box to fork from (default: this project's template, else base)")
 	newCmd.Flags().StringVar(&image, "image", "", "cold boot from this worker image instead of forking")
 	newCmd.Flags().IntVar(&cpus, "cpus", 0, "vCPUs (with --image; default: size.cpu)")
 	newCmd.Flags().IntVar(&memMiB, "mem", 0, "memory in MiB (with --image; default: size.memory)")
@@ -111,6 +125,9 @@ func boxCommands() []*cobra.Command {
 			tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 			fmt.Fprintln(tw, "BOX / THREAD\tAGENT\tSTATE\tSIZE\tWORKER\tCREATED")
 			for _, b := range boxes {
+				if b.Kind == api.BoxVersion {
+					continue
+				}
 				fmt.Fprintf(tw, "%s\t\t%s\t%d vCPU, %s\t%s\t%s\n", b.ID, b.State, b.VCPUs, mib(b.MemMiB), b.Worker, ago(b.Created))
 				for _, t := range b.Threads {
 					fmt.Fprintf(tw, "  %d  %s\t%s\t%s\t\t\t%s\n", t.N, t.Title, t.Agent, t.State, ago(t.Created))

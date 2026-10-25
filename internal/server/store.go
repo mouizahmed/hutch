@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -47,6 +48,29 @@ CREATE TABLE IF NOT EXISTS tokens (
 	hash    TEXT PRIMARY KEY,
 	created TIMESTAMP NOT NULL,
 	used    TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS projects (
+	id      TEXT PRIMARY KEY,
+	slug    TEXT NOT NULL UNIQUE,
+	created TIMESTAMP NOT NULL
+);
+CREATE TABLE IF NOT EXISTS templates (
+	project_id TEXT NOT NULL REFERENCES projects(id),
+	version    INTEGER NOT NULL,
+	commit_sha TEXT NOT NULL,
+	box_id     TEXT NOT NULL,
+	vcpus      INTEGER NOT NULL,
+	mem_mib    INTEGER NOT NULL,
+	created    TIMESTAMP NOT NULL,
+	PRIMARY KEY (project_id, version)
+);
+-- What the server knows about a box beyond the worker's report.
+CREATE TABLE IF NOT EXISTS box_meta (
+	box_id     TEXT PRIMARY KEY REFERENCES boxes(id) ON DELETE CASCADE,
+	project_id TEXT NOT NULL,
+	kind       TEXT NOT NULL DEFAULT '',
+	commit_sha TEXT NOT NULL DEFAULT '',
+	verified   INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS configs (
 	name    TEXT PRIMARY KEY,
@@ -147,8 +171,9 @@ func (s *store) deleteBox(id string) error {
 
 func (s *store) box(id string) (api.Box, error) {
 	var b api.Box
-	err := s.db.QueryRow(`SELECT id, worker_id, state, image, vcpus, mem_mib, generation, class, reach_ip, created FROM boxes WHERE id = ?`, id).
-		Scan(&b.ID, &b.Worker, &b.State, &b.Image, &b.VCPUs, &b.MemMiB, &b.Generation, &b.Class, &b.ReachIP, &b.Created)
+	err := s.db.QueryRow(`SELECT id, worker_id, state, image, vcpus, mem_mib, generation, class, reach_ip, created,
+		COALESCE(m.project_id, ''), COALESCE(m.kind, '') FROM boxes LEFT JOIN box_meta m ON m.box_id = boxes.id WHERE id = ?`, id).
+		Scan(&b.ID, &b.Worker, &b.State, &b.Image, &b.VCPUs, &b.MemMiB, &b.Generation, &b.Class, &b.ReachIP, &b.Created, &b.Project, &b.Kind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return b, fmt.Errorf("no box %q", id)
 	}
@@ -156,7 +181,8 @@ func (s *store) box(id string) (api.Box, error) {
 }
 
 func (s *store) boxes() ([]api.Box, error) {
-	rows, err := s.db.Query(`SELECT id, worker_id, state, image, vcpus, mem_mib, generation, class, reach_ip, created FROM boxes ORDER BY created`)
+	rows, err := s.db.Query(`SELECT id, worker_id, state, image, vcpus, mem_mib, generation, class, reach_ip, created,
+		COALESCE(m.project_id, ''), COALESCE(m.kind, '') FROM boxes LEFT JOIN box_meta m ON m.box_id = boxes.id ORDER BY created`)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +190,7 @@ func (s *store) boxes() ([]api.Box, error) {
 	var bs []api.Box
 	for rows.Next() {
 		var b api.Box
-		if err := rows.Scan(&b.ID, &b.Worker, &b.State, &b.Image, &b.VCPUs, &b.MemMiB, &b.Generation, &b.Class, &b.ReachIP, &b.Created); err != nil {
+		if err := rows.Scan(&b.ID, &b.Worker, &b.State, &b.Image, &b.VCPUs, &b.MemMiB, &b.Generation, &b.Class, &b.ReachIP, &b.Created, &b.Project, &b.Kind); err != nil {
 			return nil, err
 		}
 		bs = append(bs, b)
@@ -273,4 +299,80 @@ func (s *store) putConfig(name string, base int64, content string) (api.ConfigDo
 		return cur, false, err
 	}
 	return next, false, tx.Commit()
+}
+
+type boxMeta struct {
+	project, kind, commit string
+	verified              bool
+}
+
+func (s *store) putMeta(box string, m boxMeta) error {
+	_, err := s.db.Exec(`INSERT INTO box_meta (box_id, project_id, kind, commit_sha, verified) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(box_id) DO UPDATE SET project_id = excluded.project_id, kind = excluded.kind,
+			commit_sha = excluded.commit_sha, verified = excluded.verified`,
+		box, m.project, m.kind, m.commit, m.verified)
+	return err
+}
+
+func (s *store) meta(box string) (boxMeta, error) {
+	var m boxMeta
+	err := s.db.QueryRow(`SELECT project_id, kind, commit_sha, verified FROM box_meta WHERE box_id = ?`, box).
+		Scan(&m.project, &m.kind, &m.commit, &m.verified)
+	if errors.Is(err, sql.ErrNoRows) {
+		return m, nil
+	}
+	return m, err
+}
+
+func (s *store) project(id string) (api.Project, error) {
+	p := api.Project{ID: id}
+	err := s.db.QueryRow(`SELECT slug FROM projects WHERE id = ?`, id).Scan(&p.Slug)
+	if errors.Is(err, sql.ErrNoRows) {
+		return p, fmt.Errorf("no project %s on this server (run hutch init)", id)
+	}
+	return p, err
+}
+
+// addProject registers a project under the first free slug from base, base-2, ...
+func (s *store) addProject(id, base string) (api.Project, error) {
+	if p, err := s.project(id); err == nil {
+		return p, nil
+	}
+	for n := 1; ; n++ {
+		slug := base
+		if n > 1 {
+			slug = fmt.Sprintf("%s-%d", base, n)
+		}
+		_, err := s.db.Exec(`INSERT INTO projects (id, slug, created) VALUES (?, ?, ?)`, id, slug, time.Now().UTC())
+		if err == nil {
+			return api.Project{ID: id, Slug: slug}, nil
+		}
+		if !strings.Contains(err.Error(), "UNIQUE") || n > 100 {
+			return api.Project{}, err
+		}
+	}
+}
+
+func (s *store) addTemplate(t api.Template) error {
+	_, err := s.db.Exec(`INSERT INTO templates (project_id, version, commit_sha, box_id, vcpus, mem_mib, created) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		t.Project, t.Version, t.Commit, t.Box, t.VCPUs, t.MemMiB, t.Created)
+	return err
+}
+
+// templates lists a project's versions, newest first.
+func (s *store) templates(project string) ([]api.Template, error) {
+	rows, err := s.db.Query(`SELECT version, commit_sha, box_id, vcpus, mem_mib, created FROM templates WHERE project_id = ? ORDER BY version DESC`, project)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ts []api.Template
+	for rows.Next() {
+		t := api.Template{Project: project}
+		if err := rows.Scan(&t.Version, &t.Commit, &t.Box, &t.VCPUs, &t.MemMiB, &t.Created); err != nil {
+			return nil, err
+		}
+		ts = append(ts, t)
+	}
+	return ts, rows.Err()
 }

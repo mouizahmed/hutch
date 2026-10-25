@@ -12,9 +12,12 @@ import (
 
 // Every box sees the same guest network; only the netns and veth addresses differ per slot.
 const (
-	guestIP   = "169.254.0.22"
-	tapIP     = "169.254.0.21"
-	guestMAC  = "02:FC:00:00:00:05"
+	guestIP  = "169.254.0.22"
+	tapIP    = "169.254.0.21"
+	guestMAC = "02:FC:00:00:00:05"
+	// The same in every netns: a restored guest still has the gateway's MAC from its
+	// snapshot in its ARP cache, and a new one would cut it off until that entry expires.
+	tapMAC    = "02:FC:00:00:00:01"
 	bootIPArg = "ip=" + guestIP + "::" + tapIP + ":255.255.255.252::eth0:off"
 	maxSlot   = 32766
 )
@@ -107,12 +110,13 @@ link set %[2]s up
 
 	nsLinks := fmt.Sprintf(`link set lo up
 tuntap add dev tap0 mode tap user %d
+link set tap0 address %s
 addr add %s/30 dev tap0
 link set tap0 up
 addr add %s/31 dev %s
 link set %s up
 route add default via %s
-`, tapUID, tapIP, s.peerIP(), s.vethPeer(), s.vethPeer(), s.hostIP())
+`, tapUID, tapMAC, tapIP, s.peerIP(), s.vethPeer(), s.vethPeer(), s.hostIP())
 
 	nsRules := fmt.Sprintf(`*nat
 -A POSTROUTING -o %s -s %s -j SNAT --to %s

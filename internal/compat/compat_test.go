@@ -164,6 +164,16 @@ func checkGuest(t *testing.T, c *guestproto.Client, ref string) {
 		t.Fatalf("exec: code=%d err=%v stdout=%q stderr=%q", code, err, out.String(), errb.String())
 	}
 
+	// A command that leaves a background process holding its output must still return.
+	if ref == "current" {
+		start := time.Now()
+		out.Reset()
+		code, err := c.Exec(ctx, guestproto.Exec{Argv: []string{"sh", "-c", "sleep 60 & echo started"}, User: "dev"}, &out, io.Discard)
+		if err != nil || code != 0 || out.String() != "started\n" || time.Since(start) > 5*time.Second {
+			t.Fatalf("exec with background process: code=%d err=%v stdout=%q after %s", code, err, out.String(), time.Since(start))
+		}
+	}
+
 	if err := checkPTY(ctx, c); err != nil {
 		t.Fatalf("pty: %v", err)
 	}

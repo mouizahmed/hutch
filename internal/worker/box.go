@@ -21,8 +21,9 @@ import (
 	"github.com/mouizahmed/hutch/internal/guestproto"
 )
 
-// Boot creates a box from an image and cold boots it.
-func (w *Worker) Boot(ctx context.Context, id, image string, vcpus, memMiB int, idle Idle) (*Box, error) {
+// Boot creates a box from an image and cold boots it. The image's disk is grown to
+// diskBytes when that is larger.
+func (w *Worker) Boot(ctx context.Context, id, image string, vcpus, memMiB int, diskBytes int64, idle Idle) (*Box, error) {
 	if !validID.MatchString(id) {
 		return nil, fmt.Errorf("invalid box id %q", id)
 	}
@@ -38,7 +39,12 @@ func (w *Worker) Boot(ctx context.Context, id, image string, vcpus, memMiB int, 
 		return nil, err
 	}
 	b := &Box{ID: id, Image: image, VCPUs: vcpus, MemMiB: memMiB, FCVersion: w.FCVersion, Class: w.Class(), Created: time.Now().UTC(), Idle: idle}
-	if err := clone(filepath.Join(w.imageDir(image), "rootfs.ext4"), filepath.Join(w.boxDir(id), "rootfs.ext4")); err != nil {
+	rootfs := filepath.Join(w.boxDir(id), "rootfs.ext4")
+	if err := clone(filepath.Join(w.imageDir(image), "rootfs.ext4"), rootfs); err != nil {
+		os.RemoveAll(w.boxDir(id))
+		return nil, err
+	}
+	if err := growDisk(rootfs, diskBytes); err != nil {
 		os.RemoveAll(w.boxDir(id))
 		return nil, err
 	}
@@ -51,6 +57,57 @@ func (w *Worker) Boot(ctx context.Context, id, image string, vcpus, memMiB int, 
 		w.save(b)
 		return b, fmt.Errorf("%w (box kept as failed; see its console)", err)
 	}
+	return b, nil
+}
+
+// growDisk extends a sparse ext4 image and its filesystem, offline.
+func growDisk(path string, size int64) error {
+	fi, err := os.Stat(path)
+	if err != nil || size <= fi.Size() {
+		return err
+	}
+	if err := os.Truncate(path, size); err != nil {
+		return err
+	}
+	if err := run("e2fsck", "-fp", path); err != nil {
+		return err
+	}
+	return run("resize2fs", "-f", path)
+}
+
+// Rename gives a sleeping box a new id; template versions are frozen this way.
+func (w *Worker) Rename(id, newID string) (*Box, error) {
+	if !validID.MatchString(newID) {
+		return nil, fmt.Errorf("invalid box id %q", newID)
+	}
+	unlock, err := w.lock(id)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	unlockNew, err := w.lock(newID)
+	if err != nil {
+		return nil, err
+	}
+	defer unlockNew()
+	b, err := w.load(id)
+	if err != nil {
+		return nil, err
+	}
+	if b.State != Asleep {
+		return nil, fmt.Errorf("box %q must be asleep to rename it", id)
+	}
+	if _, err := os.Stat(w.boxDir(newID)); err == nil {
+		return nil, fmt.Errorf("box %q already exists", newID)
+	}
+	if err := os.Rename(w.boxDir(id), w.boxDir(newID)); err != nil {
+		return nil, err
+	}
+	b.ID = newID
+	if err := w.save(b); err != nil {
+		return nil, err
+	}
+	os.Remove(filepath.Join(w.Root, "boxes", "."+id+".lock"))
 	return b, nil
 }
 

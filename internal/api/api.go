@@ -16,6 +16,13 @@ const (
 	BoxPTY     = "box.pty"
 	BoxConsole = "box.console"
 	BoxSerial  = "box.serial"
+	BoxRename  = "box.rename" // hutchd only
+
+	ProjectInit      = "project.init"
+	TemplateBuild    = "template.build"
+	TemplateSnapshot = "template.snapshot"
+	TemplateList     = "template.list"
+	TemplateBox      = "template.box"
 
 	ThreadNew  = "thread.new"
 	ThreadSend = "thread.send"
@@ -80,6 +87,55 @@ type Box struct {
 	ReachIP    string    `json:"reach_ip,omitempty"`
 	Created    time.Time `json:"created"`
 	Threads    []Thread  `json:"threads,omitempty"`
+	Project    string    `json:"project,omitempty"`
+	Kind       string    `json:"kind,omitempty"` // BoxTemplate, BoxVersion, or empty for a box
+}
+
+const (
+	// The template box of a project: where builds run and template threads work.
+	BoxTemplate = "template"
+	// A frozen template version: never woken, only forked.
+	BoxVersion = "version"
+)
+
+// Project is a repository Hutch builds templates for. Slug names its boxes.
+type Project struct {
+	ID   string `json:"id"`
+	Slug string `json:"slug"`
+}
+
+// Template is one frozen template version of a project.
+type Template struct {
+	Project string    `json:"project"`
+	Version int       `json:"version"`
+	Commit  string    `json:"commit"`
+	Box     string    `json:"box"`
+	VCPUs   int       `json:"vcpus"`
+	MemMiB  int       `json:"mem_mib"`
+	Created time.Time `json:"created"`
+}
+
+// TemplateParams describes a build: the recipe at Commit, cloned from CloneURL,
+// in a fresh VM of the project's size.
+type TemplateParams struct {
+	Project      string        `json:"project"`
+	CloneURL     string        `json:"clone_url"`
+	Commit       string        `json:"commit"`
+	VCPUs        int           `json:"vcpus"`
+	MemMiB       int           `json:"mem_mib"`
+	DiskBytes    int64         `json:"disk_bytes"`
+	Idle         Idle          `json:"idle"`
+	BuildTimeout time.Duration `json:"build_timeout"`
+	QuietTimeout time.Duration `json:"quiet_timeout"`
+}
+
+type ProjectParams struct {
+	Project string `json:"project"`
+}
+
+type RenameParams struct {
+	ID    string `json:"id"`
+	NewID string `json:"new_id"`
 }
 
 // Thread is one agent session: a tmux window in the box's "hutch" session.
@@ -135,22 +191,29 @@ type Worker struct {
 	Version  string    `json:"version"`
 	Online   bool      `json:"online"`
 	LastSeen time.Time `json:"last_seen"`
+	CPUs     int       `json:"cpus,omitempty"`
+	MemMiB   int       `json:"mem_mib,omitempty"`
 	Boxes    []Box     `json:"boxes,omitempty"`
 }
 
 type BootParams struct {
-	ID     string `json:"id"`
-	Image  string `json:"image"`
-	VCPUs  int    `json:"vcpus"`
-	MemMiB int    `json:"mem_mib"`
-	Worker string `json:"worker,omitempty"`
-	Idle   Idle   `json:"idle"`
+	ID        string `json:"id"`
+	Image     string `json:"image"`
+	VCPUs     int    `json:"vcpus"`
+	MemMiB    int    `json:"mem_mib"`
+	DiskBytes int64  `json:"disk_bytes,omitempty"`
+	Worker    string `json:"worker,omitempty"`
+	Idle      Idle   `json:"idle"`
 }
 
+// ForkParams forks Source, or with Project the project's newest template version,
+// then checks out Base (empty: the repo's default branch) on branch hutch/<id>.
 type ForkParams struct {
-	Source string `json:"source"`
-	ID     string `json:"id"`
-	Idle   Idle   `json:"idle"`
+	Source  string `json:"source,omitempty"`
+	Project string `json:"project,omitempty"`
+	Base    string `json:"base,omitempty"`
+	ID      string `json:"id"`
+	Idle    Idle   `json:"idle"`
 }
 
 type IDParams struct {
@@ -161,6 +224,8 @@ type ExecParams struct {
 	ID   string   `json:"id"`
 	Argv []string `json:"argv"`
 	User string   `json:"user,omitempty"`
+	Dir  string   `json:"dir,omitempty"`
+	Env  []string `json:"env,omitempty"`
 }
 
 type PTYParams struct {

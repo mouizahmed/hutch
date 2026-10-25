@@ -30,8 +30,14 @@ import (
 // session, shell-1, shell-2, ...
 const agentSession = "hutch"
 
-func tmuxAttach(session string) []string {
-	return []string{"tmux", "new-session", "-A", "-s", session}
+// tmuxAttach attaches to a shell session, creating it in dir. The box's tmux config
+// keeps windows open after their command exits, for threads; a shell should close.
+func tmuxAttach(session, dir string) []string {
+	argv := []string{"tmux", "new-session", "-A", "-s", session}
+	if dir != "" {
+		argv = append(argv, "-c", dir)
+	}
+	return append(argv, ";", "set-option", "-w", "remain-on-exit", "off")
 }
 
 func sessionCommands() []*cobra.Command {
@@ -45,7 +51,7 @@ func sessionCommands() []*cobra.Command {
 			if err != nil {
 				return err
 			}
-			argv := tmuxAttach(agentSession)
+			argv := []string{"tmux", "new-session", "-A", "-s", agentSession}
 			if n > 0 {
 				argv = []string{"tmux", "attach-session", "-t", fmt.Sprintf("%s:%d", agentSession, n)}
 			}
@@ -80,7 +86,7 @@ func sessionCommands() []*cobra.Command {
 			case len(shells) > 0:
 				name = mostRecent(shells).name
 			}
-			return terminal(ctx, sess, args[0], tmuxAttach(name))
+			return terminal(ctx, sess, args[0], tmuxAttach(name, "/workspace"))
 		}),
 	}
 	shell.Flags().BoolVar(&newShell, "new", false, "open a new shell")

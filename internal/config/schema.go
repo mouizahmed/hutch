@@ -91,6 +91,13 @@ var Keys = []*Key{
 	{Path: "network.domains", Kind: List, Layers: project,
 		Doc: "domains boxes may reach when network.egress is allowlist"},
 
+	{Path: "template.build_timeout", Kind: Duration, Default: "1h", Min: "1m", Max: "24h", Layers: project,
+		Doc: "a template build that runs longer fails"},
+	{Path: "template.quiet_timeout", Kind: Duration, Default: "2m", Min: "1s", Max: "1h", Layers: project,
+		Doc: "how long a snapshot waits for queued systemd jobs and transient units to finish"},
+
+	{Path: "worker.memory_margin", Kind: Percent, Default: "10%", Min: "0%", Max: "50%", Layers: server,
+		Doc: "RAM held back for the host on every worker"},
 	{Path: "idle.check_interval", Kind: Duration, Default: "15s", Min: "1s", Max: "5m", Layers: server,
 		Doc: "how often workers check boxes for activity"},
 	{Path: "threads.working_window", Kind: Duration, Default: "15s", Min: "1s", Max: "10m", Layers: server,

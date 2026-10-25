@@ -14,20 +14,25 @@ import (
 
 func (s *Server) apiMux() rpc.Mux {
 	return rpc.Mux{
-		api.BoxList:     s.boxList,
-		api.BoxBoot:     s.boxBoot,
-		api.BoxFork:     s.boxFork,
-		api.BoxSleep:    s.onBoxWorker(api.BoxSleep),
-		api.BoxWake:     s.onBoxWorker(api.BoxWake),
-		api.BoxRm:       s.boxRm,
-		api.BoxExec:     s.boxExec,
-		api.BoxConsole:  s.boxConsole,
-		api.ThreadNew:   s.threadNew,
-		api.ThreadSend:  s.threadSend,
-		api.ConfigGet:   s.configGet,
-		api.ConfigPut:   s.configPut,
-		api.WorkerList:  s.workerList,
-		api.TokenCreate: s.tokenCreate,
+		api.BoxList:          s.boxList,
+		api.BoxBoot:          s.boxBoot,
+		api.BoxFork:          s.boxFork,
+		api.BoxSleep:         s.onBoxWorker(api.BoxSleep),
+		api.BoxWake:          s.onBoxWorker(api.BoxWake),
+		api.BoxRm:            s.boxRm,
+		api.BoxExec:          s.boxExec,
+		api.BoxConsole:       s.boxConsole,
+		api.ThreadNew:        s.threadNew,
+		api.ThreadSend:       s.threadSend,
+		api.ConfigGet:        s.configGet,
+		api.ProjectInit:      s.projectInit,
+		api.TemplateBuild:    s.templateBuild,
+		api.TemplateSnapshot: s.templateSnapshot,
+		api.TemplateList:     s.templateList,
+		api.TemplateBox:      s.templateBox,
+		api.ConfigPut:        s.configPut,
+		api.WorkerList:       s.workerList,
+		api.TokenCreate:      s.tokenCreate,
 	}
 }
 
@@ -61,7 +66,9 @@ func (s *Server) workerList(ctx context.Context, _ json.RawMessage, _ *rpc.Out) 
 	}
 	s.mu.Lock()
 	for i := range ws {
-		_, ws[i].Online = s.workers[ws[i].ID]
+		if w := s.workers[ws[i].ID]; w != nil {
+			ws[i].Online, ws[i].CPUs, ws[i].MemMiB = true, w.info.CPUs, w.info.MemMiB
+		}
 	}
 	s.mu.Unlock()
 	return ws, nil
@@ -108,13 +115,17 @@ func (s *Server) boxBoot(ctx context.Context, params json.RawMessage, _ *rpc.Out
 	return b, nil
 }
 
-func (s *Server) boxFork(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+func (s *Server) boxFork(ctx context.Context, params json.RawMessage, out *rpc.Out) (any, error) {
 	var p api.ForkParams
 	if err := rpc.Decode(params, &p); err != nil {
 		return nil, err
 	}
 	if _, err := s.store.box(p.ID); err == nil {
 		return nil, fmt.Errorf("box %q already exists", p.ID)
+	}
+	if p.Project != "" {
+		stdout, stderr := out.Writers()
+		return s.forkProject(ctx, p, stdout, stderr)
 	}
 	src, err := s.store.box(p.Source)
 	if err != nil {
@@ -141,7 +152,14 @@ func (s *Server) onBoxWorker(method string) rpc.Handler {
 		if err := rpc.Decode(params, &p); err != nil {
 			return nil, err
 		}
-		w, err := s.workerFor(p.ID)
+		b, err := s.store.box(p.ID)
+		if err != nil {
+			return nil, err
+		}
+		if err := notVersion(b); err != nil {
+			return nil, err
+		}
+		w, err := s.worker(b.Worker)
 		if err != nil {
 			return nil, err
 		}
@@ -149,26 +167,36 @@ func (s *Server) onBoxWorker(method string) rpc.Handler {
 	}
 }
 
+// notVersion refuses to touch a template version: boxes fork from it as it is.
+func notVersion(b api.Box) error {
+	if b.Kind == api.BoxVersion {
+		return fmt.Errorf("%s is a frozen template version; use hutch template shell", b.ID)
+	}
+	return nil
+}
+
 func (s *Server) boxRm(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
 	var p api.IDParams
 	if err := rpc.Decode(params, &p); err != nil {
 		return nil, err
 	}
-	w, err := s.workerFor(p.ID)
+	b, err := s.store.box(p.ID)
 	if err != nil {
 		return nil, err
 	}
-	if err := rpc.Call(ctx, w.sess, api.BoxRm, p, nil); err != nil {
+	if err := notVersion(b); err != nil {
 		return nil, err
 	}
-	s.store.event(p.ID, api.BoxRm, "removed")
-	return nil, s.store.deleteBox(p.ID)
+	return nil, s.removeBox(ctx, p.ID)
 }
 
 // awake returns the worker of a box, waking the box first if it is asleep.
 func (s *Server) awake(ctx context.Context, id string) (*workerConn, error) {
 	b, err := s.store.box(id)
 	if err != nil {
+		return nil, err
+	}
+	if err := notVersion(b); err != nil {
 		return nil, err
 	}
 	w, err := s.worker(b.Worker)
