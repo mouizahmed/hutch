@@ -109,15 +109,15 @@ func Enroll(ctx context.Context, id Identity, serverAddr, token, name string) (s
 
 // Run keeps a connection to the server open and serves its calls, reconnecting
 // with backoff. Boxes keep running while the server is unreachable.
-func Run(ctx context.Context, id Identity, w *worker.Worker, name string, idle IdleConfig) error {
+func Run(ctx context.Context, id Identity, w *worker.Worker, name string) error {
 	conf, addr, err := id.tlsConfig()
 	if err != nil {
 		return fmt.Errorf("not enrolled (run `hutchd enroll`): %w", err)
 	}
-	kick := make(chan struct{}, 1)
-	mux, streams := handlers(w, name, kick), streamHandlers(w)
+	m := newMonitor(w)
+	mux, streams := handlers(w, name, m), streamHandlers(w)
 	var server atomic.Pointer[yamux.Session]
-	go monitor(ctx, w, idle, &server, kick)
+	go m.run(ctx, &server)
 	backoff := time.Second
 	for ctx.Err() == nil {
 		start := time.Now()
@@ -197,20 +197,17 @@ func toAPI(w *worker.Worker, b *worker.Box) api.Box {
 		Generation: b.Generation, Class: b.Class, ReachIP: b.ReachIP(), Created: b.Created}
 }
 
-// kick asks the monitor for a report now, so a started box shows its threads' states
-// without waiting for the next check.
-func handlers(w *worker.Worker, name string, kick chan<- struct{}) rpc.Mux {
+func handlers(w *worker.Worker, name string, m *monitor) rpc.Mux {
 	box := func(f func(context.Context, json.RawMessage) (*worker.Box, error)) rpc.Handler {
 		return func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
 			b, err := f(ctx, params)
 			if err != nil {
 				return nil, err
 			}
+			// Report now, so a started box shows its threads' states without
+			// waiting for the next check.
 			if b.State == worker.Running {
-				select {
-				case kick <- struct{}{}:
-				default:
-				}
+				m.kick()
 			}
 			return toAPI(w, b), nil
 		}
@@ -241,15 +238,24 @@ func handlers(w *worker.Worker, name string, kick chan<- struct{}) rpc.Mux {
 			if err := rpc.Decode(params, &p); err != nil {
 				return nil, err
 			}
-			return w.Boot(ctx, p.ID, p.Image, p.VCPUs, p.MemMiB)
+			return w.Boot(ctx, p.ID, p.Image, p.VCPUs, p.MemMiB, worker.Idle(p.Idle))
 		}),
 		api.BoxFork: box(func(ctx context.Context, params json.RawMessage) (*worker.Box, error) {
 			var p api.ForkParams
 			if err := rpc.Decode(params, &p); err != nil {
 				return nil, err
 			}
-			return w.Fork(ctx, p.Source, p.ID)
+			return w.Fork(ctx, p.Source, p.ID, worker.Idle(p.Idle))
 		}),
+		api.WorkerSettings: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+			var p api.WorkerSettingsParams
+			if err := rpc.Decode(params, &p); err != nil {
+				return nil, err
+			}
+			m.settings.Store(&p)
+			m.kick()
+			return nil, nil
+		},
 		api.BoxSleep: byID(w.Sleep),
 		api.BoxWake:  byID(w.Wake),
 		api.BoxRm: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {

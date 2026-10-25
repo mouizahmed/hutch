@@ -185,6 +185,7 @@ func (s *Server) handleWorkerConn(ctx context.Context, conn *tls.Conn) {
 	}
 	go rpc.Serve(ctx, sess, s.workerMux(id), nil)
 	w := &workerConn{id: id, sess: sess, info: info}
+	s.sendWorkerSettings(ctx, w)
 	s.mu.Lock()
 	if old := s.workers[id]; old != nil {
 		old.sess.Close()

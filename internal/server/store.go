@@ -48,6 +48,12 @@ CREATE TABLE IF NOT EXISTS tokens (
 	created TIMESTAMP NOT NULL,
 	used    TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS configs (
+	name    TEXT PRIMARY KEY,
+	version INTEGER NOT NULL,
+	content TEXT NOT NULL,
+	updated TIMESTAMP NOT NULL
+);
 CREATE TABLE IF NOT EXISTS events (
 	id      INTEGER PRIMARY KEY,
 	ts      TIMESTAMP NOT NULL,
@@ -232,4 +238,39 @@ func (s *store) threads() (map[string][]api.Thread, error) {
 		byBox[t.Box] = append(byBox[t.Box], t)
 	}
 	return byBox, rows.Err()
+}
+
+func (s *store) config(name string) (api.ConfigDoc, error) {
+	d := api.ConfigDoc{Name: name}
+	err := s.db.QueryRow(`SELECT version, content FROM configs WHERE name = ?`, name).Scan(&d.Version, &d.Content)
+	if errors.Is(err, sql.ErrNoRows) {
+		return d, nil
+	}
+	return d, err
+}
+
+// putConfig writes a document if it is still at base; otherwise it returns the
+// current one and conflict.
+func (s *store) putConfig(name string, base int64, content string) (api.ConfigDoc, bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return api.ConfigDoc{}, false, err
+	}
+	defer tx.Rollback()
+	cur := api.ConfigDoc{Name: name}
+	err = tx.QueryRow(`SELECT version, content FROM configs WHERE name = ?`, name).Scan(&cur.Version, &cur.Content)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return cur, false, err
+	}
+	if cur.Version != base {
+		return cur, true, nil
+	}
+	next := api.ConfigDoc{Name: name, Version: base + 1, Content: content}
+	_, err = tx.Exec(`INSERT INTO configs (name, version, content, updated) VALUES (?, ?, ?, ?)
+		ON CONFLICT(name) DO UPDATE SET version = excluded.version, content = excluded.content, updated = excluded.updated`,
+		name, next.Version, content, time.Now().UTC())
+	if err != nil {
+		return cur, false, err
+	}
+	return next, false, tx.Commit()
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/hashicorp/yamux"
 	"github.com/spf13/cobra"
@@ -17,10 +18,7 @@ import (
 	"github.com/mouizahmed/hutch/internal/version"
 )
 
-var (
-	flagServer     string
-	flagServerData string
-)
+var flagServerData string
 
 // exitError carries a remote command's exit code back to main.
 type exitError int
@@ -35,7 +33,6 @@ func main() {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.PersistentFlags().StringVar(&flagServer, "server", "", "SSH target of the server (overrides config)")
 	root.PersistentFlags().StringVar(&flagServerData, "server-data", client.DefaultDataDir(), "data directory of a server on this machine")
 	root.PersistentFlags().MarkHidden("server-data")
 
@@ -44,6 +41,7 @@ func main() {
 	root.AddCommand(sessionCommands()...)
 	root.AddCommand(threadCommands()...)
 	root.AddCommand(setupCommands()...)
+	root.AddCommand(configCommands())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	err := root.ExecuteContext(ctx)
@@ -58,22 +56,45 @@ func main() {
 	}
 }
 
-// connect opens a session to the configured server.
-func connect() (*yamux.Session, error) {
-	target := flagServer
-	if target == "" {
-		cfg, err := config.Load()
-		if err != nil {
-			return nil, err
-		}
-		target = cfg.Server
+// serverTarget is the server's SSH target: $HUTCH_SERVER, else the user config's
+// server key; empty means a server on this machine.
+func serverTarget() string {
+	if t := os.Getenv("HUTCH_SERVER"); t != "" {
+		return t
 	}
+	d, err := config.ReadFile(config.User, config.UserPath())
+	if err != nil {
+		return ""
+	}
+	return config.New(d).String("server")
+}
+
+func dial() (*yamux.Session, error) {
+	target := serverTarget()
 	sess, err := client.Dial(target, server.SocketPath(flagServerData))
 	if err != nil {
 		if target == "" {
-			return nil, fmt.Errorf("no server configured in %s and none running here: %w", config.Path(), err)
+			return nil, fmt.Errorf("no server configured in %s and none running here: %w", config.UserPath(), err)
 		}
 		return nil, fmt.Errorf("connect to %s: %w", target, err)
+	}
+	return sess, nil
+}
+
+// connect opens a session to the server and syncs the user config with it.
+func connect() (*yamux.Session, error) {
+	if _, err := config.ReadFile(config.User, config.UserPath()); err != nil {
+		return nil, fmt.Errorf("%w\n  fix it with: hutch config edit", err)
+	}
+	sess, err := dial()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := syncUserConfig(ctx, sess, serverTarget(), ""); err != nil {
+		sess.Close()
+		return nil, err
 	}
 	return sess, nil
 }

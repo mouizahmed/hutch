@@ -57,17 +57,31 @@ func boxCommands() []*cobra.Command {
 				}
 				name = names.New(taken)
 			}
+			cfg, err := loadConfig(ctx, sess)
+			if err != nil {
+				return err
+			}
+			if cfg, err = applyGrants(ctx, sess, cfg); err != nil {
+				return err
+			}
+			if cpus == 0 {
+				cpus = int(cfg.Int("size.cpu"))
+			}
+			if memMiB == 0 {
+				memMiB = int(cfg.Size("size.memory") >> 20)
+			}
+			idle := api.Idle{Timeout: cfg.Duration("idle_timeout"), CPUThreshold: cfg.Percent("idle.cpu_threshold")}
 			start := time.Now()
 			var b api.Box
 			if image != "" {
-				p := api.BootParams{ID: name, Image: image, VCPUs: cpus, MemMiB: memMiB}
+				p := api.BootParams{ID: name, Image: image, VCPUs: cpus, MemMiB: memMiB, Idle: idle}
 				if err := rpc.Call(ctx, sess, api.BoxBoot, p, &b); err != nil {
 					return fmt.Errorf("%w\n  hutch console %s", err, name)
 				}
-			} else if err := rpc.Call(ctx, sess, api.BoxFork, api.ForkParams{Source: from, ID: name}, &b); err != nil {
+			} else if err := rpc.Call(ctx, sess, api.BoxFork, api.ForkParams{Source: from, ID: name, Idle: idle}, &b); err != nil {
 				return err
 			}
-			t, err := startThread(ctx, sess, b.ID, agent, args)
+			t, err := startThread(ctx, sess, cfg, b.ID, agent, args)
 			if err != nil {
 				return fmt.Errorf("box %s created, but the thread failed: %w", b.ID, err)
 			}
@@ -80,8 +94,8 @@ func boxCommands() []*cobra.Command {
 	newCmd.Flags().StringVar(&name, "name", "", "box name (default: generated, like quiet-fox)")
 	newCmd.Flags().StringVar(&from, "from", "base", "sleeping box to fork from")
 	newCmd.Flags().StringVar(&image, "image", "", "cold boot from this worker image instead of forking")
-	newCmd.Flags().IntVar(&cpus, "cpus", 2, "vCPUs (with --image)")
-	newCmd.Flags().IntVar(&memMiB, "mem", 4096, "memory in MiB (with --image)")
+	newCmd.Flags().IntVar(&cpus, "cpus", 0, "vCPUs (with --image; default: size.cpu)")
+	newCmd.Flags().IntVar(&memMiB, "mem", 0, "memory in MiB (with --image; default: size.memory)")
 	newCmd.MarkFlagsMutuallyExclusive("from", "image")
 
 	ls := &cobra.Command{
@@ -198,22 +212,18 @@ type agentFlags struct {
 }
 
 func (a *agentFlags) register(c *cobra.Command) {
-	c.Flags().StringVar(&a.agent, "agent", "", "agent to run: "+strings.Join(agents.Names(), ", ")+" (default: default_agent, else claude)")
+	c.Flags().StringVar(&a.agent, "agent", "", "agent to run: "+strings.Join(agents.Names(), ", ")+" (default: default_agent)")
 	c.Flags().StringVar(&a.cmd, "cmd", "", "run any terminal command instead of an agent")
 	c.MarkFlagsMutuallyExclusive("agent", "cmd")
 }
 
-func startThread(ctx context.Context, sess *yamux.Session, box string, a agentFlags, args []string) (api.Thread, error) {
+func startThread(ctx context.Context, sess *yamux.Session, cfg *config.Config, box string, a agentFlags, args []string) (api.Thread, error) {
 	p := api.ThreadParams{Box: box, Agent: a.agent, Cmd: a.cmd}
 	if len(args) > 0 {
 		p.Prompt = args[0]
 	}
 	if p.Agent == "" && p.Cmd == "" {
-		cfg, err := config.Load()
-		if err != nil {
-			return api.Thread{}, err
-		}
-		p.Agent = cfg.DefaultAgent
+		p.Agent = cfg.String("default_agent")
 	}
 	var t api.Thread
 	return t, rpc.Call(ctx, sess, api.ThreadNew, p, &t)
@@ -240,7 +250,11 @@ func threadCommands() []*cobra.Command {
 		GroupID: "boxes",
 		Args:    cobra.RangeArgs(1, 2),
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
-			t, err := startThread(ctx, sess, args[0], agent, args[1:])
+			cfg, err := loadConfig(ctx, sess)
+			if err != nil {
+				return err
+			}
+			t, err := startThread(ctx, sess, cfg, args[0], agent, args[1:])
 			if err != nil {
 				return err
 			}

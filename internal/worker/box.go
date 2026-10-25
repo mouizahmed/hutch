@@ -22,7 +22,7 @@ import (
 )
 
 // Boot creates a box from an image and cold boots it.
-func (w *Worker) Boot(ctx context.Context, id, image string, vcpus, memMiB int) (*Box, error) {
+func (w *Worker) Boot(ctx context.Context, id, image string, vcpus, memMiB int, idle Idle) (*Box, error) {
 	if !validID.MatchString(id) {
 		return nil, fmt.Errorf("invalid box id %q", id)
 	}
@@ -37,7 +37,7 @@ func (w *Worker) Boot(ctx context.Context, id, image string, vcpus, memMiB int) 
 		}
 		return nil, err
 	}
-	b := &Box{ID: id, Image: image, VCPUs: vcpus, MemMiB: memMiB, FCVersion: w.FCVersion, Class: w.Class(), Created: time.Now().UTC()}
+	b := &Box{ID: id, Image: image, VCPUs: vcpus, MemMiB: memMiB, FCVersion: w.FCVersion, Class: w.Class(), Created: time.Now().UTC(), Idle: idle}
 	if err := clone(filepath.Join(w.imageDir(image), "rootfs.ext4"), filepath.Join(w.boxDir(id), "rootfs.ext4")); err != nil {
 		os.RemoveAll(w.boxDir(id))
 		return nil, err
@@ -56,7 +56,7 @@ func (w *Worker) Boot(ctx context.Context, id, image string, vcpus, memMiB int) 
 
 // Fork creates a box from a sleeping box's latest snapshot: the disk is reflinked and
 // the memory file is shared copy-on-write until the new box writes to it.
-func (w *Worker) Fork(ctx context.Context, srcID, id string) (*Box, error) {
+func (w *Worker) Fork(ctx context.Context, srcID, id string, idle Idle) (*Box, error) {
 	if !validID.MatchString(id) {
 		return nil, fmt.Errorf("invalid box id %q", id)
 	}
@@ -73,6 +73,7 @@ func (w *Worker) Fork(ctx context.Context, srcID, id string) (*Box, error) {
 	}
 	b, err := w.copyFromSnapshot(srcID, id)
 	if err == nil {
+		b.Idle = idle
 		err = w.start(ctx, b, map[string]string{
 			jailRootfs: filepath.Join(w.boxDir(id), "rootfs.ext4"),
 			jailState:  filepath.Join(w.boxDir(id), "base.vmstate"),

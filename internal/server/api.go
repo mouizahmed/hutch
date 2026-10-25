@@ -24,6 +24,8 @@ func (s *Server) apiMux() rpc.Mux {
 		api.BoxConsole:  s.boxConsole,
 		api.ThreadNew:   s.threadNew,
 		api.ThreadSend:  s.threadSend,
+		api.ConfigGet:   s.configGet,
+		api.ConfigPut:   s.configPut,
 		api.WorkerList:  s.workerList,
 		api.TokenCreate: s.tokenCreate,
 	}

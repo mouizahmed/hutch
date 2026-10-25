@@ -52,6 +52,13 @@ type Box struct {
 	// BaseMem is the memory file the running VM was restored from (empty after a cold
 	// boot); the next diff snapshot is applied on top of a copy of it.
 	BaseMem string `json:"base_mem,omitempty"`
+	Idle    Idle   `json:"idle"`
+}
+
+// Idle is a box's idle policy; zero values mean the defaults.
+type Idle struct {
+	Timeout      time.Duration `json:"timeout,omitempty"`
+	CPUThreshold float64       `json:"cpu_threshold,omitempty"`
 }
 
 var validID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)

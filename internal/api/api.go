@@ -20,11 +20,53 @@ const (
 	ThreadNew  = "thread.new"
 	ThreadSend = "thread.send"
 
-	WorkerList   = "worker.list"
-	WorkerHello  = "worker.hello"
-	WorkerReport = "worker.report"
-	TokenCreate  = "token.create"
+	ConfigGet = "config.get"
+	ConfigPut = "config.put"
+
+	WorkerList     = "worker.list"
+	WorkerHello    = "worker.hello"
+	WorkerSettings = "worker.settings"
+	WorkerReport   = "worker.report"
+	TokenCreate    = "token.create"
 )
+
+// Config documents the server keeps: "server" (the server layer) and "user" (the
+// authoritative copy of the user config). Version 0 means never written.
+type ConfigDoc struct {
+	Name    string `json:"name"`
+	Version int64  `json:"version"`
+	Content string `json:"content"`
+}
+
+type Configs struct {
+	Server ConfigDoc `json:"server"`
+	User   ConfigDoc `json:"user"`
+}
+
+// ConfigPutParams replaces a document if it is still at BaseVersion.
+type ConfigPutParams struct {
+	Name        string `json:"name"`
+	BaseVersion int64  `json:"base_version"`
+	Content     string `json:"content"`
+}
+
+// ConfigPutResult holds the new document, or on a conflict the server's current one.
+type ConfigPutResult struct {
+	Doc      ConfigDoc `json:"doc"`
+	Conflict bool      `json:"conflict,omitempty"`
+}
+
+// WorkerSettingsParams carries the server-layer keys hutchd uses.
+type WorkerSettingsParams struct {
+	IdleInterval  time.Duration `json:"idle_interval"`
+	WorkingWindow time.Duration `json:"working_window"`
+}
+
+// Idle is a box's idle policy, resolved from its project when the box is created.
+type Idle struct {
+	Timeout      time.Duration `json:"timeout"`
+	CPUThreshold float64       `json:"cpu_threshold"`
+}
 
 type Box struct {
 	ID         string    `json:"id"`
@@ -102,11 +144,13 @@ type BootParams struct {
 	VCPUs  int    `json:"vcpus"`
 	MemMiB int    `json:"mem_mib"`
 	Worker string `json:"worker,omitempty"`
+	Idle   Idle   `json:"idle"`
 }
 
 type ForkParams struct {
 	Source string `json:"source"`
 	ID     string `json:"id"`
+	Idle   Idle   `json:"idle"`
 }
 
 type IDParams struct {
