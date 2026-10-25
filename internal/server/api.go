@@ -24,6 +24,10 @@ func (s *Server) apiMux() rpc.Mux {
 		api.BoxConsole:       s.boxConsole,
 		api.BoxStatus:        s.boxStatus,
 		api.ThreadNew:        s.threadNew,
+		api.ThreadRm:         s.threadRm,
+		api.ThreadPin:        s.threadPin,
+		api.ThreadRename:     s.threadRename,
+		api.ThreadResume:     s.threadResume,
 		api.ThreadSend:       s.threadSend,
 		api.ConfigGet:        s.configGet,
 		api.UserGet:          s.userGet,
@@ -55,9 +59,14 @@ func (s *Server) boxList(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (an
 	for i := range boxes {
 		ts := threads[boxes[i].ID]
 		for j := range ts {
+			st := s.threadStates[boxes[i].ID][ts[j].N]
 			if boxes[i].State == "running" {
-				ts[j].State = s.threadStates[boxes[i].ID][ts[j].N]
+				ts[j].State = st.State
 			}
+			if st.Title != "" && !ts[j].Renamed {
+				ts[j].Title = st.Title
+			}
+			ts[j].Tokens = st.Tokens
 		}
 		boxes[i].Threads = ts
 		boxes[i].PushError = s.pushErrors[boxes[i].ID]

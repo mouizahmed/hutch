@@ -1,6 +1,6 @@
 name        = "claude"
 install     = "curl -fsSL https://claude.ai/install.sh | bash"
-start       = "claude {prompt}"
+start       = "claude --session-id {session_id} {prompt}"
 autonomy    = { full = ["--dangerously-skip-permissions"], ask = [] }
 resume      = "claude --resume {session_id}"
 login       = "claude auth login"

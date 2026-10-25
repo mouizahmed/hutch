@@ -36,8 +36,12 @@ const (
 	TemplateList     = "template.list"
 	TemplateBox      = "template.box"
 
-	ThreadNew  = "thread.new"
-	ThreadSend = "thread.send"
+	ThreadNew    = "thread.new"
+	ThreadSend   = "thread.send"
+	ThreadRm     = "thread.rm"
+	ThreadPin    = "thread.pin"
+	ThreadRename = "thread.rename"
+	ThreadResume = "thread.resume"
 
 	ConfigGet = "config.get"
 	ConfigPut = "config.put"
@@ -215,6 +219,19 @@ type Thread struct {
 	Title   string    `json:"title"`
 	Created time.Time `json:"created"`
 	State   string    `json:"state,omitempty"` // working, waiting, exited; from the latest report
+	Tokens  int64     `json:"tokens,omitempty"`
+	Pinned  bool      `json:"pinned,omitempty"`
+	Renamed bool      `json:"renamed,omitempty"` // Title is the user's, not the agent's
+	// SessionID is the agent's own session, for resuming it.
+	SessionID string `json:"session_id,omitempty"`
+}
+
+// ThreadTarget names one thread, with what to change for pin and rename.
+type ThreadTarget struct {
+	Box    string `json:"box"`
+	N      int    `json:"n"`
+	Title  string `json:"title,omitempty"`
+	Pinned bool   `json:"pinned,omitempty"`
 }
 
 const (
@@ -240,6 +257,9 @@ type ThreadState struct {
 	N          int       `json:"n"`
 	State      string    `json:"state"`
 	LastOutput time.Time `json:"last_output"`
+	Title      string    `json:"title,omitempty"` // the agent's own title for the conversation
+	Tokens     int64     `json:"tokens,omitempty"`
+	SessionID  string    `json:"session_id,omitempty"`
 }
 
 type ThreadParams struct {

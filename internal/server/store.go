@@ -109,6 +109,14 @@ type store struct {
 	db *sql.DB
 }
 
+// migrations add columns to tables from earlier versions; each may already be done.
+var migrations = []string{
+	`ALTER TABLE threads ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE threads ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE threads ADD COLUMN autonomy TEXT NOT NULL DEFAULT 'full'`,
+	`ALTER TABLE threads ADD COLUMN renamed INTEGER NOT NULL DEFAULT 0`,
+}
+
 func openStore(path string) (*store, error) {
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
 	if err != nil {
@@ -118,6 +126,12 @@ func openStore(path string) (*store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("schema: %w", err)
+	}
+	for _, m := range migrations {
+		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			db.Close()
+			return nil, fmt.Errorf("migrate: %w", err)
+		}
 	}
 	return &store{db: db}, nil
 }
@@ -263,14 +277,42 @@ func (s *store) event(boxID, kind, msg string) {
 	s.db.Exec(`INSERT INTO events (ts, box_id, kind, message) VALUES (?, ?, ?, ?)`, time.Now().UTC(), boxID, kind, msg)
 }
 
-func (s *store) addThread(t api.Thread) error {
-	_, err := s.db.Exec(`INSERT INTO threads (box_id, n, agent, title, created) VALUES (?, ?, ?, ?, ?)`,
-		t.Box, t.N, t.Agent, t.Title, t.Created)
+func (s *store) addThread(t api.Thread, autonomy string) error {
+	_, err := s.db.Exec(`INSERT INTO threads (box_id, n, agent, title, created, session_id, autonomy) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		t.Box, t.N, t.Agent, t.Title, t.Created, t.SessionID, autonomy)
 	return err
 }
 
+// updateThread sets one column of a thread.
+func (s *store) updateThread(box string, n int, column string, value any) error {
+	res, err := s.db.Exec(`UPDATE threads SET `+column+` = ? WHERE box_id = ? AND n = ?`, value, box, n)
+	if err != nil {
+		return err
+	}
+	if c, _ := res.RowsAffected(); c == 0 {
+		return fmt.Errorf("no thread %s/%d", box, n)
+	}
+	return nil
+}
+
+func (s *store) deleteThread(box string, n int) error {
+	_, err := s.db.Exec(`DELETE FROM threads WHERE box_id = ? AND n = ?`, box, n)
+	return err
+}
+
+func (s *store) thread(box string, n int) (api.Thread, string, error) {
+	t := api.Thread{Box: box, N: n}
+	var autonomy string
+	err := s.db.QueryRow(`SELECT agent, title, created, session_id, pinned, autonomy FROM threads WHERE box_id = ? AND n = ?`, box, n).
+		Scan(&t.Agent, &t.Title, &t.Created, &t.SessionID, &t.Pinned, &autonomy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return t, "", fmt.Errorf("no thread %s/%d", box, n)
+	}
+	return t, autonomy, err
+}
+
 func (s *store) threads() (map[string][]api.Thread, error) {
-	rows, err := s.db.Query(`SELECT box_id, n, agent, title, created FROM threads ORDER BY box_id, n`)
+	rows, err := s.db.Query(`SELECT box_id, n, agent, title, created, session_id, pinned, renamed FROM threads ORDER BY box_id, n`)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +320,7 @@ func (s *store) threads() (map[string][]api.Thread, error) {
 	byBox := map[string][]api.Thread{}
 	for rows.Next() {
 		var t api.Thread
-		if err := rows.Scan(&t.Box, &t.N, &t.Agent, &t.Title, &t.Created); err != nil {
+		if err := rows.Scan(&t.Box, &t.N, &t.Agent, &t.Title, &t.Created, &t.SessionID, &t.Pinned, &t.Renamed); err != nil {
 			return nil, err
 		}
 		byBox[t.Box] = append(byBox[t.Box], t)

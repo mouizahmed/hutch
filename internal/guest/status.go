@@ -26,6 +26,7 @@ const threadSession = "hutch"
 
 func status(watch []string) (guestproto.Status, error) {
 	st := guestproto.Status{Sessions: int(sessions.Load())}
+	parsed := threadTranscripts()
 	out, err := tmuxAsDev("list-windows", "-t", threadSession, "-F", "#{window_index} #{pane_dead} #{window_activity}")
 	if err == nil {
 		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
@@ -35,7 +36,11 @@ func status(watch []string) (guestproto.Status, error) {
 			}
 			n, _ := strconv.Atoi(f[0])
 			last, _ := strconv.ParseInt(f[2], 10, 64)
-			st.Threads = append(st.Threads, guestproto.ThreadStatus{N: n, Dead: f[1] == "1", LastOutput: last})
+			ts := guestproto.ThreadStatus{N: n, Dead: f[1] == "1", LastOutput: last}
+			if t := parsed[n]; t != nil {
+				ts.Title, ts.Tokens, ts.Hint, ts.SessionID = t.title, t.tokens, t.hint, t.sessionID
+			}
+			st.Threads = append(st.Threads, ts)
 		}
 	}
 	if out, err := tmuxAsDev("list-clients", "-F", "#{client_name}"); err == nil {

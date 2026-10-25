@@ -19,7 +19,7 @@ import (
 type Adapter struct {
 	Name        string              `toml:"name"`
 	Install     string              `toml:"install"` // shell, as dev, at template build and in login boxes
-	Start       string              `toml:"start"`   // command; {prompt} is replaced by the prompt
+	Start       string              `toml:"start"`   // command; {prompt} and {session_id} are filled in
 	Autonomy    map[string][]string `toml:"autonomy"`
 	Resume      string              `toml:"resume"`
 	Login       string              `toml:"login"`
@@ -182,32 +182,65 @@ func (s Set) Sorted() []*Adapter {
 }
 
 // Argv returns a thread's command: the agent with its autonomy flags and prompt, or
-// a generic command run by bash when cmd is set.
-func (s Set) Argv(agent, cmd, prompt, autonomy string) ([]string, error) {
+// a generic command run by bash when cmd is set. sessionID fills {session_id} for
+// agents that take one at start (see ChoosesSession).
+func (s Set) Argv(agent, cmd, prompt, autonomy, sessionID string) ([]string, error) {
 	if cmd != "" {
 		return []string{"bash", "-lc", cmd}, nil
 	}
-	a, ok := s[agent]
-	if !ok || !a.Agent() {
-		return nil, fmt.Errorf("unknown agent %q (known: %s; or use --cmd)", agent, strings.Join(s.Names(), ", "))
+	a, err := s.agent(agent)
+	if err != nil {
+		return nil, err
 	}
+	return fill(a.Start, a.Autonomy[autonomy], prompt, sessionID), nil
+}
+
+// ResumeArgv continues a session after the agent's process is gone.
+func (s Set) ResumeArgv(agent, autonomy, sessionID string) ([]string, error) {
+	a, err := s.agent(agent)
+	if err != nil {
+		return nil, err
+	}
+	if a.Resume == "" {
+		return nil, fmt.Errorf("the %s adapter has no resume command", agent)
+	}
+	return fill(a.Resume, a.Autonomy[autonomy], "", sessionID), nil
+}
+
+// ChoosesSession reports whether Hutch picks the session id when starting the agent.
+func (a *Adapter) ChoosesSession() bool { return strings.Contains(a.Start, "{session_id}") }
+
+func (s Set) agent(name string) (*Adapter, error) {
+	a, ok := s[name]
+	if !ok || !a.Agent() {
+		return nil, fmt.Errorf("unknown agent %q (known: %s; or use --cmd)", name, strings.Join(s.Names(), ", "))
+	}
+	return a, nil
+}
+
+// fill splits a command template into argv. Autonomy flags go where {prompt} is,
+// before the prompt, or at the end.
+func fill(template string, autonomy []string, prompt, sessionID string) []string {
 	var argv []string
 	placed := false
-	for _, f := range strings.Fields(a.Start) {
-		if f != "{prompt}" {
+	for _, f := range strings.Fields(template) {
+		switch f {
+		case "{session_id}":
+			argv = append(argv, sessionID)
+		case "{prompt}":
+			argv = append(argv, autonomy...)
+			placed = true
+			if prompt != "" {
+				argv = append(argv, prompt)
+			}
+		default:
 			argv = append(argv, f)
-			continue
-		}
-		argv = append(argv, a.Autonomy[autonomy]...)
-		placed = true
-		if prompt != "" {
-			argv = append(argv, prompt)
 		}
 	}
 	if !placed {
-		argv = append(argv, a.Autonomy[autonomy]...)
+		argv = append(argv, autonomy...)
 	}
-	return argv, nil
+	return argv
 }
 
 // JSONKeys returns a JSON object of only the given top-level keys of data, or nil

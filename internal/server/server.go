@@ -38,7 +38,7 @@ type Server struct {
 	mu      sync.Mutex
 	workers map[string]*workerConn
 	// threadStates holds the latest reported state of each thread, by box and number.
-	threadStates map[string]map[int]string
+	threadStates map[string]map[int]api.ThreadState
 	// fileHashes holds the last reported hashes of each box's watched credential
 	// files; syncing marks boxes whose changed credentials are being read.
 	fileHashes map[string]map[string]string
@@ -67,7 +67,7 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: cfg, store: st, ca: ca, workers: map[string]*workerConn{}, threadStates: map[string]map[int]string{},
+	return &Server{cfg: cfg, store: st, ca: ca, workers: map[string]*workerConn{}, threadStates: map[string]map[int]api.ThreadState{},
 		fileHashes: map[string]map[string]string{}, syncing: map[string]bool{}, pushErrors: map[string]string{}}, nil
 }
 
@@ -291,12 +291,21 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 				if err == nil && prev.State != br.Box.State {
 					s.store.event(br.Box.ID, "state", br.Box.State)
 				}
-				states := map[int]string{}
+				states := map[int]api.ThreadState{}
 				for _, t := range br.Threads {
-					states[t.N] = t.State
+					states[t.N] = t
 				}
 				s.mu.Lock()
-				s.threadStates[br.Box.ID] = states
+				prevStates := s.threadStates[br.Box.ID]
+				// A box put to sleep reports no threads; keep their last titles and tokens.
+				if len(states) > 0 || br.Box.State == "running" {
+					s.threadStates[br.Box.ID] = states
+				}
+				for n, t := range states {
+					if t.SessionID != "" && prevStates[n].SessionID != t.SessionID {
+						s.store.updateThread(br.Box.ID, n, "session_id", t.SessionID)
+					}
+				}
 				if br.Push != nil {
 					if prev := s.pushErrors[br.Box.ID]; br.Push.Error != prev && br.Push.Error != "" {
 						s.store.event(br.Box.ID, "push", br.Push.Error)

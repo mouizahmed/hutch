@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -135,7 +136,11 @@ func boxCommands() []*cobra.Command {
 					fmt.Fprintf(tw, "  ! push of %s failed: %s\t\t\t\t\t\n", b.Branch, msg)
 				}
 				for _, t := range b.Threads {
-					fmt.Fprintf(tw, "  %d  %s\t%s\t%s\t\t\t%s\n", t.N, t.Title, t.Agent, t.State, ago(t.Created))
+					pin := ""
+					if t.Pinned {
+						pin = "* "
+					}
+					fmt.Fprintf(tw, "  %d  %s%s\t%s\t%s\t\t\t%s\n", t.N, pin, t.Title, t.Agent, t.State, ago(t.Created))
 				}
 			}
 			return tw.Flush()
@@ -289,6 +294,7 @@ func threadCommands() []*cobra.Command {
 		}),
 	}
 	agent.register(thread)
+	thread.AddCommand(threadSubcommands()...)
 
 	send := &cobra.Command{
 		Use:     `send <box>/<thread> "<message>"`,
@@ -307,4 +313,84 @@ func threadCommands() []*cobra.Command {
 		}),
 	}
 	return []*cobra.Command{thread, send}
+}
+
+func threadSubcommands() []*cobra.Command {
+	target := func(use, short string, run func(ctx context.Context, sess *yamux.Session, box string, n int, args []string) error) *cobra.Command {
+		return &cobra.Command{
+			Use:   use,
+			Short: short,
+			Args:  cobra.MinimumNArgs(1),
+			RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
+				box, n, err := parseTarget(args[0])
+				if err != nil {
+					return err
+				}
+				if n == 0 {
+					return fmt.Errorf("which thread? use %s/<number>", box)
+				}
+				return run(ctx, sess, box, n, args[1:])
+			}),
+		}
+	}
+	rm := target("rm <box>/<thread>", "Stop a thread and forget it", func(ctx context.Context, sess *yamux.Session, box string, n int, _ []string) error {
+		return rpc.Call(ctx, sess, api.ThreadRm, api.ThreadTarget{Box: box, N: n}, nil)
+	})
+	pin := target("pin <box>/<thread>", "Pin a thread to the top of lists", func(ctx context.Context, sess *yamux.Session, box string, n int, _ []string) error {
+		return rpc.Call(ctx, sess, api.ThreadPin, api.ThreadTarget{Box: box, N: n, Pinned: true}, nil)
+	})
+	unpin := target("unpin <box>/<thread>", "Unpin a thread", func(ctx context.Context, sess *yamux.Session, box string, n int, _ []string) error {
+		return rpc.Call(ctx, sess, api.ThreadPin, api.ThreadTarget{Box: box, N: n}, nil)
+	})
+	rename := target(`rename <box>/<thread> "<title>"`, "Give a thread your own title", func(ctx context.Context, sess *yamux.Session, box string, n int, args []string) error {
+		if len(args) != 1 {
+			return errors.New("give one title")
+		}
+		return rpc.Call(ctx, sess, api.ThreadRename, api.ThreadTarget{Box: box, N: n, Title: args[0]}, nil)
+	})
+	resume := target("resume <box>/<thread>", "Restart an exited agent in its own session", func(ctx context.Context, sess *yamux.Session, box string, n int, _ []string) error {
+		var t api.Thread
+		if err := rpc.Call(ctx, sess, api.ThreadResume, api.ThreadTarget{Box: box, N: n}, &t); err != nil {
+			return err
+		}
+		fmt.Printf("%s/%d resumed %s session %s\n  hutch attach %s/%d\n", box, n, t.Agent, t.SessionID, box, n)
+		return nil
+	})
+	return []*cobra.Command{rm, pin, unpin, rename, resume}
+}
+
+func statusCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:     "status <box>",
+		Short:   "Show a box and its threads, with token counts",
+		GroupID: "boxes",
+		Args:    cobra.ExactArgs(1),
+		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
+			b, err := findBox(ctx, sess, args[0])
+			if err != nil {
+				return err
+			}
+			fmt.Printf("%s  %s, %d vCPU, %s, on %s\n", b.ID, b.State, b.VCPUs, mib(b.MemMiB), b.Worker)
+			if b.Branch != "" {
+				fmt.Printf("branch %s (base %s)\n", b.Branch, b.Base)
+			}
+			if b.PushError != "" {
+				fmt.Printf("push failed: %s\n", b.PushError)
+			}
+			if len(b.Threads) == 0 {
+				return nil
+			}
+			fmt.Println()
+			tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+			fmt.Fprintln(tw, "THREAD\tAGENT\tSTATE\tTOKENS\tSESSION")
+			for _, t := range b.Threads {
+				tokens := ""
+				if t.Tokens > 0 {
+					tokens = fmt.Sprint(t.Tokens)
+				}
+				fmt.Fprintf(tw, "%d  %s\t%s\t%s\t%s\t%s\n", t.N, t.Title, t.Agent, t.State, tokens, t.SessionID)
+			}
+			return tw.Flush()
+		}),
+	}
 }

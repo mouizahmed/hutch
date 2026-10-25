@@ -153,4 +153,21 @@ type ThreadStatus struct {
 	N          int   `json:"n"`
 	Dead       bool  `json:"dead"`
 	LastOutput int64 `json:"last_output"` // unix seconds
+	// From the agent's transcript, for threads with a parser.
+	Title     string `json:"title,omitempty"`
+	Tokens    int64  `json:"tokens,omitempty"`
+	Hint      string `json:"hint,omitempty"` // working or waiting
+	SessionID string `json:"session_id,omitempty"`
 }
+
+// ThreadInfo is written by the host to ThreadsDir/<n>.json when it starts an agent
+// thread, so the guest can find and parse its transcript.
+type ThreadInfo struct {
+	N         int    `json:"n"`
+	Parser    string `json:"parser"`   // built-in transcript parser: claude, codex
+	Sessions  string `json:"sessions"` // the adapter's session file glob, under ~/
+	SessionID string `json:"session_id,omitempty"`
+	Started   int64  `json:"started"` // unix seconds
+}
+
+const ThreadsDir = "/var/lib/hutch-guest/threads"

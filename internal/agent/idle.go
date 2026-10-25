@@ -155,13 +155,20 @@ func (m *monitor) checkBox(ctx context.Context, b *worker.Box) (api.BoxReport, b
 		switch {
 		case th.Dead:
 			state = api.ThreadExited
+		case th.Hint == api.ThreadWorking || th.Hint == api.ThreadWaiting:
+			state = th.Hint
 		case now.Sub(out) < window:
 			state = api.ThreadWorking
+		}
+		// An agent waiting on a slow model call prints nothing but is busy.
+		if !th.Dead && th.Hint == api.ThreadWorking {
+			a.lastActive = now
 		}
 		if !th.Dead && out.After(a.lastActive) {
 			a.lastActive = out
 		}
-		r.Threads = append(r.Threads, api.ThreadState{N: th.N, State: state, LastOutput: out})
+		r.Threads = append(r.Threads, api.ThreadState{N: th.N, State: state, LastOutput: out,
+			Title: th.Title, Tokens: th.Tokens, SessionID: th.SessionID})
 	}
 	r.LastActive = a.lastActive
 	return r, now.Sub(a.lastActive) >= policy.Timeout

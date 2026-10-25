@@ -42,6 +42,7 @@ func main() {
 	root.AddCommand(sessionCommands()...)
 	root.AddCommand(threadCommands()...)
 	root.AddCommand(gitCommands()...)
+	root.AddCommand(statusCommand())
 	root.AddCommand(setupCommands()...)
 	root.AddCommand(configCommands(), initCommand(), templateCommands(), sizesCommand(), userCommands(), loginCommand())
 

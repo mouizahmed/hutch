@@ -3,14 +3,17 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/mouizahmed/hutch/internal/agents"
 	"github.com/mouizahmed/hutch/internal/api"
+	"github.com/mouizahmed/hutch/internal/guestproto"
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
@@ -38,14 +41,18 @@ func (s *Server) threadNew(ctx context.Context, params json.RawMessage, _ *rpc.O
 	if p.Agent == "" && p.Cmd == "" {
 		p.Agent = "claude"
 	}
+	if p.Autonomy == "" {
+		p.Autonomy = "full"
+	}
 	set, err := s.adapters()
 	if err != nil {
 		return nil, err
 	}
-	if p.Autonomy == "" {
-		p.Autonomy = "full"
+	var sessionID string
+	if a := set[p.Agent]; p.Cmd == "" && a != nil && a.ChoosesSession() {
+		sessionID = newUUID()
 	}
-	argv, err := set.Argv(p.Agent, p.Cmd, p.Prompt, p.Autonomy)
+	argv, err := set.Argv(p.Agent, p.Cmd, p.Prompt, p.Autonomy, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -79,11 +86,114 @@ func (s *Server) threadNew(ctx context.Context, params json.RawMessage, _ *rpc.O
 	if err != nil {
 		return nil, fmt.Errorf("tmux window index %q: %w", out, err)
 	}
-	t := api.Thread{Box: p.Box, N: n, Agent: name, Title: agents.Title(p.Agent, p.Cmd, p.Prompt), Created: time.Now().UTC()}
-	if err := s.store.addThread(t); err != nil {
+	t := api.Thread{Box: p.Box, N: n, Agent: name, Title: agents.Title(p.Agent, p.Cmd, p.Prompt), Created: time.Now().UTC(), SessionID: sessionID}
+	if a := set[p.Agent]; p.Cmd == "" && a != nil && a.Transcript != "" && a.Transcript != "none" {
+		if err := s.registerThread(ctx, w, p.Box, a, t); err != nil {
+			return nil, err
+		}
+	}
+	if err := s.store.addThread(t, p.Autonomy); err != nil {
 		return nil, err
 	}
 	s.store.event(p.Box, api.ThreadNew, fmt.Sprintf("%d %s", n, t.Title))
+	return t, nil
+}
+
+// registerThread tells the guest where the thread's transcript is, so it can report
+// the agent's title, tokens, state, and session.
+func (s *Server) registerThread(ctx context.Context, w *workerConn, box string, a *agents.Adapter, t api.Thread) error {
+	info, _ := json.Marshal(guestproto.ThreadInfo{N: t.N, Parser: a.Transcript, Sessions: a.Sessions, SessionID: t.SessionID, Started: t.Created.Unix()})
+	return rpc.Call(ctx, w.sess, api.BoxFiles, api.FilesParams{ID: box, Files: guestproto.Files{User: "root",
+		Files: []guestproto.File{{Path: fmt.Sprintf("%s/%d.json", guestproto.ThreadsDir, t.N), Mode: 0o644, Data: info}}}}, nil)
+}
+
+func newUUID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+}
+
+func (s *Server) threadRm(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+	var p api.ThreadTarget
+	if err := rpc.Decode(params, &p); err != nil {
+		return nil, err
+	}
+	if _, _, err := s.store.thread(p.Box, p.N); err != nil {
+		return nil, err
+	}
+	w, err := s.awake(ctx, p.Box)
+	if err != nil {
+		return nil, err
+	}
+	s.boxRun(ctx, w, p.Box, "tmux", "kill-window", "-t", fmt.Sprintf("%s:%d", tmuxSession, p.N))
+	s.run(ctx, w, p.Box, api.ExecParams{User: "root", Argv: []string{"rm", "-f", fmt.Sprintf("%s/%d.json", guestproto.ThreadsDir, p.N)}}, io.Discard, io.Discard)
+	s.store.event(p.Box, api.ThreadRm, strconv.Itoa(p.N))
+	return nil, s.store.deleteThread(p.Box, p.N)
+}
+
+func (s *Server) threadPin(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+	var p api.ThreadTarget
+	if err := rpc.Decode(params, &p); err != nil {
+		return nil, err
+	}
+	return nil, s.store.updateThread(p.Box, p.N, "pinned", p.Pinned)
+}
+
+func (s *Server) threadRename(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+	var p api.ThreadTarget
+	if err := rpc.Decode(params, &p); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(p.Title) == "" {
+		return nil, fmt.Errorf("empty title")
+	}
+	if err := s.store.updateThread(p.Box, p.N, "title", p.Title); err != nil {
+		return nil, err
+	}
+	return nil, s.store.updateThread(p.Box, p.N, "renamed", true)
+}
+
+// threadResume restarts an agent whose process has exited (or was lost to a cold
+// boot) in its own session, in the same tmux window.
+func (s *Server) threadResume(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+	var p api.ThreadTarget
+	if err := rpc.Decode(params, &p); err != nil {
+		return nil, err
+	}
+	t, autonomy, err := s.store.thread(p.Box, p.N)
+	if err != nil {
+		return nil, err
+	}
+	if t.SessionID == "" {
+		return nil, fmt.Errorf("%s/%d has no known session to resume", p.Box, p.N)
+	}
+	set, err := s.adapters()
+	if err != nil {
+		return nil, err
+	}
+	argv, err := set.ResumeArgv(t.Agent, autonomy, t.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	w, err := s.awake(ctx, p.Box)
+	if err != nil {
+		return nil, err
+	}
+	target := fmt.Sprintf("%s:%d", tmuxSession, p.N)
+	out, _, err := s.boxRun(ctx, w, p.Box, "tmux", "display-message", "-p", "-t", target, "#{pane_dead}")
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(out) == "0" {
+		return nil, fmt.Errorf("%s/%d is still running", p.Box, p.N)
+	}
+	cmd := append([]string{"tmux", "respawn-pane", "-t", target, "-c", "/workspace", "--"}, argv...)
+	if _, code, err := s.boxRun(ctx, w, p.Box, cmd...); err != nil || code != 0 {
+		return nil, fmt.Errorf("respawn: exit %d %v", code, err)
+	}
+	s.store.event(p.Box, api.ThreadResume, strconv.Itoa(p.N))
 	return t, nil
 }
 
