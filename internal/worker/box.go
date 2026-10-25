@@ -356,6 +356,29 @@ func (w *Worker) Exec(ctx context.Context, id string, e guestproto.Exec, stdout,
 	return c.Exec(ctx, e, stdout, stderr)
 }
 
+func (w *Worker) WriteFiles(ctx context.Context, id string, f guestproto.Files) error {
+	b, err := w.load(id)
+	if err != nil {
+		return err
+	}
+	if b.State != Running {
+		return fmt.Errorf("box %q is %s", id, b.State)
+	}
+	return (&guestproto.Client{UDSPath: w.vsockPath(id)}).Files(ctx, f)
+}
+
+// DialPort opens a byte stream to a TCP port on a running box's loopback.
+func (w *Worker) DialPort(ctx context.Context, id string, port int) (net.Conn, error) {
+	b, err := w.load(id)
+	if err != nil {
+		return nil, err
+	}
+	if b.State != Running {
+		return nil, fmt.Errorf("box %q is %s", id, b.State)
+	}
+	return (&guestproto.Client{UDSPath: w.vsockPath(id)}).DialPort(ctx, port)
+}
+
 // DialGuest opens a raw connection to a running box's hutch-guest.
 func (w *Worker) DialGuest(ctx context.Context, id string) (net.Conn, error) {
 	b, err := w.load(id)

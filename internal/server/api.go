@@ -22,6 +22,7 @@ func (s *Server) apiMux() rpc.Mux {
 		api.BoxRm:            s.boxRm,
 		api.BoxExec:          s.boxExec,
 		api.BoxConsole:       s.boxConsole,
+		api.BoxStatus:        s.boxStatus,
 		api.ThreadNew:        s.threadNew,
 		api.ThreadSend:       s.threadSend,
 		api.ConfigGet:        s.configGet,
@@ -236,7 +237,36 @@ func (s *Server) boxConsole(ctx context.Context, params json.RawMessage, out *rp
 }
 
 func (s *Server) apiStreams() rpc.Streams {
-	return rpc.Streams{api.BoxPTY: s.boxPTY, api.BoxSerial: s.boxSerial}
+	return rpc.Streams{api.BoxPTY: s.boxPTY, api.BoxSerial: s.boxSerial, api.BoxDial: s.boxDial}
+}
+
+func (s *Server) boxDial(ctx context.Context, params json.RawMessage, conn net.Conn) error {
+	var p api.DialParams
+	if err := rpc.Decode(params, &p); err != nil {
+		return err
+	}
+	w, err := s.workerFor(p.ID)
+	if err != nil {
+		return err
+	}
+	wc, err := rpc.OpenStream(ctx, w.sess, api.BoxDial, p)
+	if err != nil {
+		return err
+	}
+	rpc.Splice(conn, wc)
+	return nil
+}
+
+func (s *Server) boxStatus(ctx context.Context, params json.RawMessage, out *rpc.Out) (any, error) {
+	var p api.IDParams
+	if err := rpc.Decode(params, &p); err != nil {
+		return nil, err
+	}
+	w, err := s.workerFor(p.ID)
+	if err != nil {
+		return nil, err
+	}
+	return rpc.Relay(ctx, w.sess, api.BoxStatus, params, out)
 }
 
 // boxSerial does not wake the box: the serial console is for boxes whose guest is broken.

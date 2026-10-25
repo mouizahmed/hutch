@@ -164,6 +164,10 @@ func checkGuest(t *testing.T, c *guestproto.Client, ref string) {
 		t.Fatalf("exec: code=%d err=%v stdout=%q stderr=%q", code, err, out.String(), errb.String())
 	}
 
+	if ref == "current" {
+		checkFilesAndDial(t, ctx, c)
+	}
+
 	// A command that leaves a background process holding its output must still return.
 	if ref == "current" {
 		start := time.Now()
@@ -225,5 +229,44 @@ func checkPTY(ctx context.Context, c *guestproto.Client) error {
 		case guestproto.RespError:
 			return errors.New(r.Error)
 		}
+	}
+}
+
+func checkFilesAndDial(t *testing.T, ctx context.Context, c *guestproto.Client) {
+	files := []guestproto.File{
+		{Path: "~/compat/a.json", Mode: 0o600, Data: []byte(`{"keep": 1, "obj": {"x": 1}}`)},
+		{Path: "~/compat/a.json", Merge: true, Data: []byte(`{"obj": {"y": 2}}`)},
+	}
+	if err := c.Files(ctx, guestproto.Files{Files: files}); err != nil {
+		t.Fatalf("files: %v", err)
+	}
+	var out bytes.Buffer
+	if _, err := c.Exec(ctx, guestproto.Exec{Argv: []string{"sh", "-c", "tr -d ' \\n' < ~/compat/a.json; stat -c ' %U %a' ~/compat/a.json"}, User: "dev"}, &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); got != `{"keep":1,"obj":{"x":1,"y":2}} dev 600`+"\n" {
+		t.Fatalf("merged file: %q", got)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		if conn, err := ln.Accept(); err == nil {
+			io.Copy(conn, conn)
+			conn.Close()
+		}
+	}()
+	conn, err := c.DialPort(ctx, ln.Addr().(*net.TCPAddr).Port)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	io.WriteString(conn, "ping")
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(conn, buf); err != nil || string(buf) != "ping" {
+		t.Fatalf("dial echo: %q %v", buf, err)
 	}
 }

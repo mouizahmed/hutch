@@ -264,6 +264,20 @@ func handlers(w *worker.Worker, name string, m *monitor) rpc.Mux {
 			}
 			return w.Rename(p.ID, p.NewID)
 		}),
+		api.BoxFiles: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+			var p api.FilesParams
+			if err := rpc.Decode(params, &p); err != nil {
+				return nil, err
+			}
+			return nil, w.WriteFiles(ctx, p.ID, p.Files)
+		},
+		api.BoxStatus: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+			var p api.IDParams
+			if err := rpc.Decode(params, &p); err != nil {
+				return nil, err
+			}
+			return w.GuestStatus(ctx, p.ID)
+		},
 		api.BoxSleep: byID(w.Sleep),
 		api.BoxWake:  byID(w.Wake),
 		api.BoxRm: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
@@ -321,6 +335,22 @@ func streamHandlers(w *worker.Worker) rpc.Streams {
 			req := guestproto.Request{Type: guestproto.TypePTY, Version: guestproto.Version,
 				PTY: &guestproto.PTY{Argv: p.Argv, User: p.User, Term: p.Term, Rows: p.Rows, Cols: p.Cols}}
 			if err := wire.Write(g, req); err != nil {
+				g.Close()
+				return err
+			}
+			rpc.Splice(conn, g)
+			return nil
+		},
+		api.BoxDial: func(ctx context.Context, params json.RawMessage, conn net.Conn) error {
+			var p api.DialParams
+			if err := rpc.Decode(params, &p); err != nil {
+				return err
+			}
+			g, err := w.DialPort(ctx, p.ID, p.Port)
+			if err != nil {
+				return err
+			}
+			if err := wire.Write(conn, guestproto.Response{Type: guestproto.RespOK}); err != nil {
 				g.Close()
 				return err
 			}

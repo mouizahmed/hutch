@@ -11,6 +11,8 @@ const (
 	TypeExec    = "exec"
 	TypePTY     = "pty"
 	TypeStatus  = "status"
+	TypeFiles   = "files"
+	TypeDial    = "dial"
 )
 
 const (
@@ -29,6 +31,30 @@ type Request struct {
 	Restore *Restore `json:"restore,omitempty"`
 	Exec    *Exec    `json:"exec,omitempty"`
 	PTY     *PTY     `json:"pty,omitempty"`
+	Files   *Files   `json:"files,omitempty"`
+	Dial    *Dial    `json:"dial,omitempty"`
+}
+
+// Files writes files atomically, owned by User (default dev).
+type Files struct {
+	User  string `json:"user,omitempty"`
+	Files []File `json:"files"`
+}
+
+type File struct {
+	// Path is absolute, or under the user's home with a "~/" prefix.
+	Path string `json:"path"`
+	Mode uint32 `json:"mode"`
+	Data []byte `json:"data"`
+	// Merge deep-merges Data into the existing file instead of replacing it; the
+	// format comes from the extension (.json or .toml).
+	Merge bool `json:"merge,omitempty"`
+}
+
+// Dial connects to a TCP port on the guest's loopback. After the guest answers
+// "ok", the connection carries the raw byte stream both ways.
+type Dial struct {
+	Port int `json:"port"`
 }
 
 type Restore struct {

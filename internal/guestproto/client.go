@@ -147,3 +147,31 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 	})
 	return st, err
 }
+
+func (c *Client) Files(ctx context.Context, f Files) error {
+	return c.call(ctx, Request{Type: TypeFiles, Files: &f}, func(Response) (bool, error) {
+		return true, nil
+	})
+}
+
+// DialPort opens a byte stream to a TCP port on the guest's loopback.
+func (c *Client) DialPort(ctx context.Context, port int) (net.Conn, error) {
+	conn, err := c.Dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := wire.Write(conn, Request{Type: TypeDial, Version: Version, Dial: &Dial{Port: port}}); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	var r Response
+	if err := wire.Read(conn, &r); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if r.Type == RespError {
+		conn.Close()
+		return nil, errors.New(r.Error)
+	}
+	return conn, nil
+}

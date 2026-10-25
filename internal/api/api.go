@@ -1,7 +1,11 @@
 // Package api holds the methods and types shared by the CLI, server, and hutchd.
 package api
 
-import "time"
+import (
+	"time"
+
+	"github.com/mouizahmed/hutch/internal/guestproto"
+)
 
 // Methods the server serves to the CLI. The box.* methods are also served by
 // hutchd to the server, which forwards them to the box's worker.
@@ -17,6 +21,9 @@ const (
 	BoxConsole = "box.console"
 	BoxSerial  = "box.serial"
 	BoxRename  = "box.rename" // hutchd only
+	BoxFiles   = "box.files"  // hutchd only
+	BoxStatus  = "box.status"
+	BoxDial    = "box.dial"
 
 	ProjectInit      = "project.init"
 	TemplateBuild    = "template.build"
@@ -131,6 +138,18 @@ type TemplateParams struct {
 
 type ProjectParams struct {
 	Project string `json:"project"`
+}
+
+type FilesParams struct {
+	ID    string           `json:"id"`
+	Files guestproto.Files `json:"files"`
+}
+
+// DialParams opens a stream to a port on a box's loopback: after a guestproto "ok"
+// response, raw bytes.
+type DialParams struct {
+	ID   string `json:"id"`
+	Port int    `json:"port"`
 }
 
 type RenameParams struct {

@@ -82,6 +82,15 @@ func handle(ctx context.Context, conn net.Conn) {
 	sessions.Add(1)
 	defer sessions.Add(-1)
 
+	if req.Type == guestproto.TypeDial {
+		if req.Dial == nil {
+			(&responder{conn: conn}).fail(fmt.Errorf("dial request without a port"))
+			return
+		}
+		dial(conn, *req.Dial)
+		return
+	}
+
 	if req.Type == guestproto.TypePTY {
 		if req.PTY == nil || len(req.PTY.Argv) == 0 {
 			(&responder{conn: conn}).fail(fmt.Errorf("pty request without a command"))
@@ -127,6 +136,16 @@ func handle(ctx context.Context, conn net.Conn) {
 			return
 		}
 		r.send(guestproto.Response{Type: guestproto.RespExit, ExitCode: code})
+	case guestproto.TypeFiles:
+		if req.Files == nil {
+			r.fail(fmt.Errorf("files request without body"))
+			return
+		}
+		if err := writeFiles(*req.Files); err != nil {
+			r.fail(err)
+			return
+		}
+		r.send(guestproto.Response{Type: guestproto.RespOK})
 	default:
 		r.fail(fmt.Errorf("unsupported request type %q", req.Type))
 	}
