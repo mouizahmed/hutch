@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/rpc"
@@ -95,7 +96,14 @@ func (s *Server) boxBoot(ctx context.Context, params json.RawMessage, _ *rpc.Out
 	if err != nil {
 		return nil, err
 	}
-	return s.callForBox(ctx, w, api.BoxBoot, p)
+	b, err := s.callForBox(ctx, w, api.BoxBoot, p)
+	if err != nil {
+		// The worker keeps a box that failed to boot so its console can be read.
+		s.store.putBox(api.Box{ID: p.ID, Worker: w.id, State: "failed", Image: p.Image, VCPUs: p.VCPUs, MemMiB: p.MemMiB, Created: time.Now().UTC()})
+		s.store.event(p.ID, api.BoxBoot, "failed: "+err.Error())
+		return nil, err
+	}
+	return b, nil
 }
 
 func (s *Server) boxFork(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {

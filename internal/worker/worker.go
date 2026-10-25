@@ -33,6 +33,8 @@ type State string
 const (
 	Running State = "running"
 	Asleep  State = "asleep"
+	// Failed boxes did not boot; they are kept so their console can be read.
+	Failed State = "failed"
 )
 
 type Box struct {

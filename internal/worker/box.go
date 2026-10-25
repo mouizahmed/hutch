@@ -38,18 +38,18 @@ func (w *Worker) Boot(ctx context.Context, id, image string, vcpus, memMiB int) 
 		return nil, err
 	}
 	b := &Box{ID: id, Image: image, VCPUs: vcpus, MemMiB: memMiB, FCVersion: w.FCVersion, Class: w.Class(), Created: time.Now().UTC()}
-	err = func() error {
-		if err := clone(filepath.Join(w.imageDir(image), "rootfs.ext4"), filepath.Join(w.boxDir(id), "rootfs.ext4")); err != nil {
-			return err
-		}
-		return w.start(ctx, b, map[string]string{
-			jailKernel: filepath.Join(w.imageDir(image), "vmlinux"),
-			jailRootfs: filepath.Join(w.boxDir(id), "rootfs.ext4"),
-		}, func(m *vm) error { return m.coldBoot(ctx, w.vendor) }, 60*time.Second)
-	}()
-	if err != nil {
+	if err := clone(filepath.Join(w.imageDir(image), "rootfs.ext4"), filepath.Join(w.boxDir(id), "rootfs.ext4")); err != nil {
 		os.RemoveAll(w.boxDir(id))
 		return nil, err
+	}
+	err = w.start(ctx, b, map[string]string{
+		jailKernel: filepath.Join(w.imageDir(image), "vmlinux"),
+		jailRootfs: filepath.Join(w.boxDir(id), "rootfs.ext4"),
+	}, func(m *vm) error { return m.coldBoot(ctx, w.vendor) }, 60*time.Second)
+	if err != nil {
+		b.State, b.PID, b.Slot = Failed, 0, 0
+		w.save(b)
+		return b, fmt.Errorf("%w (box kept as failed; see its console)", err)
 	}
 	return b, nil
 }

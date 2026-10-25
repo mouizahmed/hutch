@@ -37,7 +37,8 @@ func listBoxes(ctx context.Context, sess *yamux.Session) ([]api.Box, error) {
 }
 
 func boxCommands() []*cobra.Command {
-	var name, from string
+	var name, from, image string
+	var cpus, memMiB int
 	var agent agentFlags
 	newCmd := &cobra.Command{
 		Use:     `new ["<prompt>"]`,
@@ -58,7 +59,12 @@ func boxCommands() []*cobra.Command {
 			}
 			start := time.Now()
 			var b api.Box
-			if err := rpc.Call(ctx, sess, api.BoxFork, api.ForkParams{Source: from, ID: name}, &b); err != nil {
+			if image != "" {
+				p := api.BootParams{ID: name, Image: image, VCPUs: cpus, MemMiB: memMiB}
+				if err := rpc.Call(ctx, sess, api.BoxBoot, p, &b); err != nil {
+					return fmt.Errorf("%w\n  hutch console %s", err, name)
+				}
+			} else if err := rpc.Call(ctx, sess, api.BoxFork, api.ForkParams{Source: from, ID: name}, &b); err != nil {
 				return err
 			}
 			t, err := startThread(ctx, sess, b.ID, agent, args)
@@ -73,6 +79,10 @@ func boxCommands() []*cobra.Command {
 	agent.register(newCmd)
 	newCmd.Flags().StringVar(&name, "name", "", "box name (default: generated, like quiet-fox)")
 	newCmd.Flags().StringVar(&from, "from", "base", "sleeping box to fork from")
+	newCmd.Flags().StringVar(&image, "image", "", "cold boot from this worker image instead of forking")
+	newCmd.Flags().IntVar(&cpus, "cpus", 2, "vCPUs (with --image)")
+	newCmd.Flags().IntVar(&memMiB, "mem", 4096, "memory in MiB (with --image)")
+	newCmd.MarkFlagsMutuallyExclusive("from", "image")
 
 	ls := &cobra.Command{
 		Use:     "ls",
