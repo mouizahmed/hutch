@@ -1,7 +1,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X github.com/mouizahmed/hutch/internal/version.Version=$(VERSION)
 
-.PHONY: build linux test vet vuln check clean images kernel rootfs
+.PHONY: build linux test vet vuln check clean images kernel rootfs compat
 
 build:
 	go build -trimpath -ldflags '$(LDFLAGS)' -o bin/ ./cmd/...
@@ -21,6 +21,10 @@ vuln:
 	go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 
 check: vet test vuln
+
+# Builds every guest in compat/guests.txt and tests the current client against it.
+compat:
+	docker run --rm --privileged -v $(CURDIR):/src -w /src golang@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 compat/run.sh
 
 images: kernel rootfs
 

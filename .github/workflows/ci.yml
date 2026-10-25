@@ -26,3 +26,14 @@ jobs:
       - run: make test
       - run: make vuln
       - run: make build linux
+
+  compat:
+    runs-on: ubuntu-latest
+    container:
+      image: golang@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 # golang:1.27-bookworm
+      options: --privileged
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - run: compat/run.sh

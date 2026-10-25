@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
 
 	"github.com/mdlayher/vsock"
@@ -15,10 +16,18 @@ import (
 	"github.com/mouizahmed/hutch/internal/wire"
 )
 
-func ListenAndServe(ctx context.Context) error {
-	ln, err := vsock.Listen(guestproto.Port, nil)
+// ListenAndServe serves on vsock, or on a Unix socket when listen is "unix:PATH"
+// (used by the protocol compatibility tests).
+func ListenAndServe(ctx context.Context, listen string) error {
+	var ln net.Listener
+	var err error
+	if path, ok := strings.CutPrefix(listen, "unix:"); ok {
+		ln, err = net.Listen("unix", path)
+	} else {
+		ln, err = vsock.Listen(guestproto.Port, nil)
+	}
 	if err != nil {
-		return fmt.Errorf("vsock listen on port %d: %w", guestproto.Port, err)
+		return fmt.Errorf("listen: %w", err)
 	}
 	go func() {
 		<-ctx.Done()

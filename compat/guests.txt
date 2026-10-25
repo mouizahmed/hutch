@@ -1,0 +1,6 @@
+# hutch-guest builds the current host client must keep working with: a box asleep
+# for months wakes with its old guest still running. Add the commit of every
+# released hutch-guest. Builds older than the compat harness can't be tested
+# (they can't listen on a Unix socket).
+#
+# <commit>  <note>

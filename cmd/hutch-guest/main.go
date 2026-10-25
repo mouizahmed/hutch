@@ -30,9 +30,12 @@ func main() {
 
 	switch flag.Arg(0) {
 	case "serve":
+		fs := flag.NewFlagSet("serve", flag.ExitOnError)
+		listen := fs.String("listen", "", "unix:PATH instead of vsock (tests only)")
+		fs.Parse(flag.Args()[1:])
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		if err := guest.ListenAndServe(ctx); err != nil {
+		if err := guest.ListenAndServe(ctx, *listen); err != nil {
 			log.Fatal(err)
 		}
 	default:
