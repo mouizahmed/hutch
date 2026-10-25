@@ -19,9 +19,10 @@ const (
 	ThreadNew  = "thread.new"
 	ThreadSend = "thread.send"
 
-	WorkerList  = "worker.list"
-	WorkerHello = "worker.hello"
-	TokenCreate = "token.create"
+	WorkerList   = "worker.list"
+	WorkerHello  = "worker.hello"
+	WorkerReport = "worker.report"
+	TokenCreate  = "token.create"
 )
 
 type Box struct {
@@ -45,6 +46,30 @@ type Thread struct {
 	Agent   string    `json:"agent"`
 	Title   string    `json:"title"`
 	Created time.Time `json:"created"`
+	State   string    `json:"state,omitempty"` // working, waiting, exited; from the latest report
+}
+
+const (
+	ThreadWorking = "working"
+	ThreadWaiting = "waiting"
+	ThreadExited  = "exited"
+)
+
+// Report is sent by hutchd after each activity check and after it puts a box to sleep.
+type Report struct {
+	Boxes []BoxReport `json:"boxes"`
+}
+
+type BoxReport struct {
+	Box        Box           `json:"box"`
+	Threads    []ThreadState `json:"threads,omitempty"`
+	LastActive time.Time     `json:"last_active"`
+}
+
+type ThreadState struct {
+	N          int       `json:"n"`
+	State      string    `json:"state"`
+	LastOutput time.Time `json:"last_output"`
 }
 
 type ThreadParams struct {

@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -108,16 +109,18 @@ func Enroll(ctx context.Context, id Identity, serverAddr, token, name string) (s
 
 // Run keeps a connection to the server open and serves its calls, reconnecting
 // with backoff. Boxes keep running while the server is unreachable.
-func Run(ctx context.Context, id Identity, w *worker.Worker, name string) error {
+func Run(ctx context.Context, id Identity, w *worker.Worker, name string, idle IdleConfig) error {
 	conf, addr, err := id.tlsConfig()
 	if err != nil {
 		return fmt.Errorf("not enrolled (run `hutchd enroll`): %w", err)
 	}
 	mux, streams := handlers(w, name), streamHandlers(w)
+	var server atomic.Pointer[yamux.Session]
+	go monitor(ctx, w, idle, &server)
 	backoff := time.Second
 	for ctx.Err() == nil {
 		start := time.Now()
-		err := serveOnce(ctx, conf, addr, mux, streams)
+		err := serveOnce(ctx, conf, addr, mux, streams, &server)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -159,7 +162,7 @@ func (id Identity) tlsConfig() (*tls.Config, string, error) {
 	return &tls.Config{Certificates: []tls.Certificate{cert}, RootCAs: pool, ServerName: host, MinVersion: tls.VersionTLS13}, server, nil
 }
 
-func serveOnce(ctx context.Context, conf *tls.Config, addr string, mux rpc.Mux, streams rpc.Streams) error {
+func serveOnce(ctx context.Context, conf *tls.Config, addr string, mux rpc.Mux, streams rpc.Streams, server *atomic.Pointer[yamux.Session]) error {
 	d := tls.Dialer{Config: conf, NetDialer: &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}}
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
@@ -175,6 +178,8 @@ func serveOnce(ctx context.Context, conf *tls.Config, addr string, mux rpc.Mux, 
 	}
 	defer sess.Close()
 	context.AfterFunc(ctx, func() { sess.Close() })
+	server.Store(sess)
+	defer server.Store(nil)
 	log.Printf("connected to server %s", addr)
 	if err := rpc.Serve(ctx, sess, mux, streams); err != nil {
 		return err

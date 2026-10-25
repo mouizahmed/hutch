@@ -37,8 +37,16 @@ func (s *Server) boxList(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (an
 	if err != nil {
 		return nil, err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for i := range boxes {
-		boxes[i].Threads = threads[boxes[i].ID]
+		ts := threads[boxes[i].ID]
+		for j := range ts {
+			if boxes[i].State == "running" {
+				ts[j].State = s.threadStates[boxes[i].ID][ts[j].N]
+			}
+		}
+		boxes[i].Threads = ts
 	}
 	return boxes, nil
 }

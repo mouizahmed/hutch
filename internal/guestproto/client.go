@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/mouizahmed/hutch/internal/wire"
 )
@@ -16,8 +17,21 @@ type Client struct {
 	UDSPath string
 }
 
-// Dial opens a raw connection to hutch-guest.
+// Dial opens a raw connection to hutch-guest, retrying failed handshakes for up
+// to a second: the guest can refuse connections briefly after a restore, and no
+// request has been sent yet, so a retry is always safe.
 func (c *Client) Dial(ctx context.Context) (net.Conn, error) {
+	deadline := time.Now().Add(time.Second)
+	for {
+		conn, err := c.dialOnce(ctx)
+		if err == nil || ctx.Err() != nil || time.Now().After(deadline) {
+			return conn, err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func (c *Client) dialOnce(ctx context.Context) (net.Conn, error) {
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", c.UDSPath)
 	if err != nil {
@@ -121,4 +135,15 @@ func (c *Client) Exec(ctx context.Context, e Exec, stdout, stderr io.Writer) (in
 		return false, fmt.Errorf("unexpected response %q", r.Type)
 	})
 	return code, err
+}
+
+func (c *Client) Status(ctx context.Context) (Status, error) {
+	var st Status
+	err := c.call(ctx, Request{Type: TypeStatus}, func(r Response) (bool, error) {
+		if r.Status != nil {
+			st = *r.Status
+		}
+		return true, nil
+	})
+	return st, err
 }

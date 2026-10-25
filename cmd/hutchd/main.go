@@ -218,6 +218,8 @@ func daemon(ctx context.Context, root, fcVersion string, args []string) error {
 	name := fs.String("name", host, "worker name shown by the server")
 	serverAddr := fs.String("server", "", "server address, host:port")
 	token := fs.String("token", "", "join token from `hutch server token`")
+	idleTimeout := fs.Duration("idle-timeout", 10*time.Minute, "sleep a box after this long without activity")
+	idleCPU := fs.Float64("idle-cpu", 5, "CPU percent of a box's vCPUs that still counts as activity")
 	fs.Parse(args[1:])
 	if args[0] == "enroll" {
 		if *serverAddr == "" || *token == "" {
@@ -234,5 +236,5 @@ func daemon(ctx context.Context, root, fcVersion string, args []string) error {
 	if err != nil {
 		return err
 	}
-	return agent.Run(ctx, id, w, *name)
+	return agent.Run(ctx, id, w, *name, agent.IdleConfig{Timeout: *idleTimeout, CPUThreshold: *idleCPU, Interval: 15 * time.Second})
 }

@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -36,6 +37,8 @@ type Server struct {
 
 	mu      sync.Mutex
 	workers map[string]*workerConn
+	// threadStates holds the latest reported state of each thread, by box and number.
+	threadStates map[string]map[int]string
 }
 
 type workerConn struct {
@@ -58,7 +61,7 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: cfg, store: st, ca: ca, workers: map[string]*workerConn{}}, nil
+	return &Server{cfg: cfg, store: st, ca: ca, workers: map[string]*workerConn{}, threadStates: map[string]map[int]string{}}, nil
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -180,6 +183,7 @@ func (s *Server) handleWorkerConn(ctx context.Context, conn *tls.Conn) {
 	if err := s.store.syncWorkerBoxes(id, info.Boxes); err != nil {
 		log.Printf("worker %s: sync boxes: %v", id, err)
 	}
+	go rpc.Serve(ctx, sess, s.workerMux(id), nil)
 	w := &workerConn{id: id, sess: sess, info: info}
 	s.mu.Lock()
 	if old := s.workers[id]; old != nil {
@@ -260,4 +264,34 @@ func (s *Server) placement(requested string) (*workerConn, error) {
 		return w, nil
 	}
 	return nil, errors.New("no workers online")
+}
+
+// workerMux serves calls a worker makes to the server.
+func (s *Server) workerMux(workerID string) rpc.Mux {
+	return rpc.Mux{
+		api.WorkerReport: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+			var r api.Report
+			if err := rpc.Decode(params, &r); err != nil {
+				return nil, err
+			}
+			for _, br := range r.Boxes {
+				prev, err := s.store.box(br.Box.ID)
+				br.Box.Worker = workerID
+				if err := s.store.putBox(br.Box); err != nil {
+					return nil, err
+				}
+				if err == nil && prev.State != br.Box.State {
+					s.store.event(br.Box.ID, "state", br.Box.State)
+				}
+				states := map[int]string{}
+				for _, t := range br.Threads {
+					states[t.N] = t.State
+				}
+				s.mu.Lock()
+				s.threadStates[br.Box.ID] = states
+				s.mu.Unlock()
+			}
+			return nil, nil
+		},
+	}
 }

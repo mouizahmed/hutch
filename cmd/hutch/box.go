@@ -89,7 +89,7 @@ func boxCommands() []*cobra.Command {
 			for _, b := range boxes {
 				fmt.Fprintf(tw, "%s\t\t%s\t%d vCPU, %s\t%s\t%s\n", b.ID, b.State, b.VCPUs, mib(b.MemMiB), b.Worker, ago(b.Created))
 				for _, t := range b.Threads {
-					fmt.Fprintf(tw, "  %d  %s\t%s\t\t\t\t%s\n", t.N, t.Title, t.Agent, ago(t.Created))
+					fmt.Fprintf(tw, "  %d  %s\t%s\t%s\t\t\t%s\n", t.N, t.Title, t.Agent, t.State, ago(t.Created))
 				}
 			}
 			return tw.Flush()

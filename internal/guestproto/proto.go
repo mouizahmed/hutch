@@ -10,6 +10,7 @@ const (
 	TypeRestore = "restore"
 	TypeExec    = "exec"
 	TypePTY     = "pty"
+	TypeStatus  = "status"
 )
 
 const (
@@ -19,6 +20,7 @@ const (
 	RespStdout = "stdout"
 	RespStderr = "stderr"
 	RespExit   = "exit"
+	RespStatus = "status"
 )
 
 type Request struct {
@@ -68,10 +70,25 @@ type Input struct {
 }
 
 type Response struct {
-	Type     string `json:"type"`
-	Version  int    `json:"version,omitempty"`
-	Guest    string `json:"guest,omitempty"`
-	Error    string `json:"error,omitempty"`
-	Data     []byte `json:"data,omitempty"`
-	ExitCode int    `json:"exit_code,omitempty"`
+	Type     string  `json:"type"`
+	Version  int     `json:"version,omitempty"`
+	Guest    string  `json:"guest,omitempty"`
+	Settling bool    `json:"settling,omitempty"` // still absorbing a restore; see guest.settle
+	Error    string  `json:"error,omitempty"`
+	Data     []byte  `json:"data,omitempty"`
+	ExitCode int     `json:"exit_code,omitempty"`
+	Status   *Status `json:"status,omitempty"`
+}
+
+// Status is what the guest knows about activity; hutchd adds CPU from the host.
+type Status struct {
+	Threads  []ThreadStatus `json:"threads"`
+	Clients  int            `json:"clients"`  // attached tmux clients, any session
+	Sessions int            `json:"sessions"` // open exec and terminal sessions
+}
+
+type ThreadStatus struct {
+	N          int   `json:"n"`
+	Dead       bool  `json:"dead"`
+	LastOutput int64 `json:"last_output"` // unix seconds
 }

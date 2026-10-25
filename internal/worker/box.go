@@ -11,6 +11,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -199,7 +201,23 @@ func (w *Worker) guestRestore(ctx context.Context, b *Box, timeout time.Duration
 	}
 	seed := make([]byte, 32)
 	rand.Read(seed)
-	return c.Restore(ctx, guestproto.Restore{UnixNano: time.Now().UnixNano(), BoxID: b.ID, Hostname: b.ID, Seed: seed})
+	if err := c.Restore(ctx, guestproto.Restore{UnixNano: time.Now().UnixNano(), BoxID: b.ID, Hostname: b.ID, Seed: seed}); err != nil {
+		return err
+	}
+	// Wait until the guest has absorbed the restore; connections may fail meanwhile.
+	for {
+		attempt, cancelAttempt := context.WithTimeout(ctx, 2*time.Second)
+		h, err := c.Hello(attempt)
+		cancelAttempt()
+		if err == nil && !h.Settling {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("hutch-guest did not settle after restore: %w", ctx.Err())
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
 }
 
 // Sleep snapshots a running box and stops its VM. The new memory file is the previous
@@ -304,6 +322,27 @@ func (w *Worker) DialGuest(ctx context.Context, id string) (net.Conn, error) {
 		return nil, fmt.Errorf("box %q is %s", id, b.State)
 	}
 	return (&guestproto.Client{UDSPath: w.vsockPath(id)}).Dial(ctx)
+}
+
+// CPUTime returns the total CPU time a running box's Firecracker has used.
+func (w *Worker) CPUTime(b *Box) (time.Duration, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", b.PID))
+	if err != nil {
+		return 0, err
+	}
+	// Fields after the parenthesized command name; utime and stime are fields 14 and 15.
+	s := string(data)
+	f := strings.Fields(s[strings.LastIndexByte(s, ')')+1:])
+	if len(f) < 13 {
+		return 0, fmt.Errorf("short /proc/%d/stat", b.PID)
+	}
+	utime, _ := strconv.ParseInt(f[11], 10, 64)
+	stime, _ := strconv.ParseInt(f[12], 10, 64)
+	return time.Duration(utime+stime) * time.Second / 100, nil
+}
+
+func (w *Worker) GuestStatus(ctx context.Context, id string) (guestproto.Status, error) {
+	return (&guestproto.Client{UDSPath: w.vsockPath(id)}).Status(ctx)
 }
 
 // Alive reports whether a running box's Firecracker process still exists.
