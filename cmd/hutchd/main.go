@@ -35,7 +35,7 @@ commands:
   image import <name> <vmlinux> <rootfs.ext4>
   enroll --server HOST:PORT --token TOKEN [--name NAME]   join a server
   run [--name NAME]                                      serve the server's calls
-  boot                                                   start a cloud worker (data disk, enrollment from user data, run)
+  boot                                                   start an elastic worker (data disk, enrollment from user data, run)
   version
 `
 

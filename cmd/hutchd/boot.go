@@ -22,14 +22,14 @@ import (
 // Where the worker image keeps what a new worker's data disk starts with.
 const imageDir = "/opt/hutch"
 
-// Join is the user data a cloud worker boots with: all it needs to enroll.
+// Join is the user data an elastic worker boots with: all it needs to enroll.
 type Join struct {
 	Server string `json:"server"`
 	Token  string `json:"token"`
 	Name   string `json:"name"`
 }
 
-// boot starts a cloud worker: the first time, it formats and mounts the data disk,
+// boot starts an elastic worker: the first time, it formats and mounts the data disk,
 // copies Firecracker and the base image onto it from the worker image, and enrolls
 // with the token in the instance's user data. Then it runs.
 func boot(ctx context.Context, root, fcVersion string) error {

@@ -2,7 +2,7 @@ package server
 
 import "testing"
 
-// Placement decides what the fleet costs: cloud workers only when self-hosted ones
+// Placement decides what the fleet costs: elastic workers only when persistent ones
 // are full, and the fullest worker first, so lightly used ones empty out and stop.
 func TestChoose(t *testing.T) {
 	box := need{memMiB: 4096, vcpus: 2, class: "intel"}
@@ -20,10 +20,10 @@ func TestChoose(t *testing.T) {
 		return ""
 	}
 	if got := pick(cs, box); got != "home-full" {
-		t.Fatalf("got %s, want the fullest self-hosted worker that fits", got)
+		t.Fatalf("got %s, want the fullest persistent worker that fits", got)
 	}
 	if got := pick(cs[:1], box); got != "cloud-empty" {
-		t.Fatalf("got %s, want the cloud worker when nothing else fits", got)
+		t.Fatalf("got %s, want the elastic worker when nothing else fits", got)
 	}
 
 	// A fork needs its snapshot class; a template already on a worker beats fullness.

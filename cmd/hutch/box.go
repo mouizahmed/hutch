@@ -401,7 +401,7 @@ func statusCommand() *cobra.Command {
 	}
 }
 
-// perHour shows a price per hour, or "-" for none (asleep, or a self-hosted worker).
+// perHour shows a price per hour, or "-" for none (asleep, or a persistent worker).
 func perHour(usd float64) string {
 	if usd <= 0 {
 		return "-"

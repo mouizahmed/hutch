@@ -26,7 +26,9 @@ func New() *Provider {
 
 func (p *Provider) Name() string { return "fake" }
 
-func (p *Provider) InstanceTypes(context.Context) ([]provider.InstanceType, error) { return p.Types, nil }
+func (p *Provider) InstanceTypes(context.Context) ([]provider.InstanceType, error) {
+	return p.Types, nil
+}
 
 func (p *Provider) ProvisionNode(_ context.Context, spec provider.NodeSpec) (*provider.Node, error) {
 	p.mu.Lock()
@@ -62,7 +64,9 @@ func (p *Provider) set(op, id string, state provider.NodeState) error {
 	return nil
 }
 
-func (p *Provider) StopNode(_ context.Context, id string) error { return p.set("stop", id, provider.Stopped) }
+func (p *Provider) StopNode(_ context.Context, id string) error {
+	return p.set("stop", id, provider.Stopped)
+}
 
 func (p *Provider) StartNode(_ context.Context, id string) (*provider.Node, error) {
 	if err := p.set("start", id, provider.Running); err != nil {

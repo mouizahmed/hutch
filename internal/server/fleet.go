@@ -151,8 +151,8 @@ func (s *Server) limitInt(key string) int64 {
 	return v.(int64)
 }
 
-// placeWait places a box, starting a cloud worker when none has room, and waiting
-// (queued, with a notification) while a limit is reached or self-hosted workers are
+// placeWait places a box, starting an elastic worker when none has room, and waiting
+// (queued, with a notification) while a limit is reached or persistent workers are
 // full. It returns when the box can start, or ctx ends.
 func (s *Server) placeWait(ctx context.Context, n need, requested, box string, out io.Writer) (*workerConn, func(), error) {
 	notified := false
@@ -199,7 +199,7 @@ func (s *Server) placeWait(ctx context.Context, n need, requested, box string, o
 
 var errNoRoom = errors.New("no worker has room")
 
-// grow starts a stopped cloud worker, or provisions a new one, and waits for it to
+// grow starts a stopped elastic worker, or provisions a new one, and waits for it to
 // connect.
 func (s *Server) grow(ctx context.Context, f *fleet, n need, out io.Writer) error {
 	f.grow.Lock()
@@ -288,7 +288,7 @@ func (s *Server) grow(ctx context.Context, f *fleet, n need, out io.Writer) erro
 	return nil
 }
 
-// startWorker starts a stopped cloud worker and waits for it to connect.
+// startWorker starts a stopped elastic worker and waits for it to connect.
 func (s *Server) startWorker(ctx context.Context, f *fleet, w api.Worker) (*workerConn, error) {
 	if _, err := f.p.StartNode(ctx, w.Node); err != nil {
 		return nil, fmt.Errorf("start %s: %w", w.Name, err)
@@ -320,8 +320,8 @@ func (s *Server) waitNode(ctx context.Context, node string, timeout time.Duratio
 	}
 }
 
-// wakeStopped starts the stopped cloud worker a box is on, so the box wakes where
-// its files are. It returns nil when the worker isn't a stopped cloud worker.
+// wakeStopped starts the stopped elastic worker a box is on, so the box wakes where
+// its files are. It returns nil when the worker isn't a stopped elastic worker.
 func (s *Server) wakeStopped(ctx context.Context, workerID string) (*workerConn, error) {
 	f := s.fleet.Load()
 	if f == nil {
@@ -361,7 +361,7 @@ func (s *Server) cloudRunning(ctx context.Context, f *fleet) int {
 	return n
 }
 
-// teardownLoop stops cloud workers that have had no awake boxes (and nothing left
+// teardownLoop stops elastic workers that have had no awake boxes (and nothing left
 // to upload) for providers.teardown_after, and keeps the stopped pool in bounds.
 // Nothing is stopped or destroyed while a worker can't be seen: a worker that isn't
 // connected is left alone.
@@ -482,7 +482,7 @@ func (s *Server) teardown(ctx context.Context, f *fleet, empty map[string]time.T
 	return nil
 }
 
-// destroyWorker terminates a cloud worker. Its sleeping boxes are in the bucket
+// destroyWorker terminates an elastic worker. Its sleeping boxes are in the bucket
 // and restore on another worker when used. A worker holding a box the bucket
 // doesn't have (a template box, a box outside projects, a snapshot not uploaded
 // yet) is kept.

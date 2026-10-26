@@ -195,7 +195,7 @@ func hashSecret(secret string) string {
 }
 
 // addToken stores a join token; nodeID links the worker it enrolls to the cloud
-// node it runs on ("" for a self-hosted worker).
+// node it runs on ("" for a persistent worker).
 func (s *store) addToken(secret, nodeID string) error {
 	_, err := s.db.Exec(`INSERT INTO tokens (hash, created, node_id) VALUES (?, ?, ?)`, hashSecret(secret), time.Now().UTC(), nodeID)
 	return err
@@ -234,7 +234,7 @@ func (s *store) addWorker(id, name, nodeID string) error {
 	return err
 }
 
-// setWorkerNode records a cloud worker stopped (at set) or started (zero) or gone.
+// setWorkerStopped records an elastic worker stopped (at set) or started (zero).
 func (s *store) setWorkerStopped(id string, at time.Time) error {
 	var v any
 	if !at.IsZero() {

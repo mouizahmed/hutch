@@ -172,7 +172,7 @@ workers reconnect once the server's address points here.`,
 			return tw.Flush()
 		},
 	}
-	providerCmd := &cobra.Command{Use: "provider", Short: "Let the server start cloud workers when yours are full", GroupID: "setup"}
+	providerCmd := &cobra.Command{Use: "provider", Short: "Let the server start elastic workers when yours are full", GroupID: "setup"}
 	var profile string
 	addAWS := &cobra.Command{
 		Use:   "add aws",

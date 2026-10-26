@@ -433,13 +433,13 @@ type Worker struct {
 	Boxes    []Box     `json:"boxes,omitempty"`
 	// ReservedMiB is the memory its awake boxes reserve; set by the server.
 	ReservedMiB int `json:"reserved_mib,omitempty"`
-	// Node is the cloud instance of a provisioned worker ("" for self-hosted ones).
+	// Node is the cloud instance of a provisioned worker ("" for persistent ones).
 	Node    string    `json:"node,omitempty"`
 	Stopped time.Time `json:"stopped,omitzero"` // when the server stopped it
 	Gone    bool      `json:"gone,omitempty"`   // destroyed; its boxes restore elsewhere
 	// Draining workers take no new boxes.
-	Draining bool `json:"draining,omitempty"`
-	PerHour float64   `json:"per_hour,omitempty"`
+	Draining bool    `json:"draining,omitempty"`
+	PerHour  float64 `json:"per_hour,omitempty"`
 }
 
 // Disk is a worker's data volume, in bytes.

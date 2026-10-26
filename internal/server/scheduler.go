@@ -59,7 +59,7 @@ func (c candidate) why(n need) string {
 	return ""
 }
 
-// choose picks a worker for a box: of those it fits, self-hosted over cloud, its
+// choose picks a worker for a box: of those it fits, persistent over elastic, its
 // snapshot class over another, one that has its template, then the fullest, so
 // lightly used workers empty out and can be stopped. It returns -1 if none fits.
 func choose(cs []candidate, n need) int {

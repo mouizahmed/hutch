@@ -333,7 +333,7 @@ func (s *Server) perHour(ctx context.Context, boxes []api.Box) map[string]float6
 	return out
 }
 
-// workerPerHour returns each running cloud worker's price.
+// workerPerHour returns each running elastic worker's price.
 func (s *Server) workerPerHour(ctx context.Context) map[string]float64 {
 	f := s.fleet.Load()
 	if f == nil {
