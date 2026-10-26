@@ -27,7 +27,7 @@ const usage = `usage: hutchd [--root DIR] [--firecracker VERSION] <command>
 commands:
   box boot <id> [--image NAME] [--cpus N] [--mem MIB]   cold boot a new box from an image
   box fork <src> <id>                                    new box from a sleeping box's snapshot
-  box sleep | wake | rm <id>
+  box sleep | wake | archive | rm <id>
   box ls
   box exec <id> [--user NAME] -- <command> [args...]
   box console <id>                                       print the serial console log
@@ -121,6 +121,12 @@ func dispatch(ctx context.Context, root, fcVersion string, args []string) error 
 			return err
 		}
 		return done(w.Wake(ctx, id))
+	case "archive":
+		id, err := oneArg(flag.NewFlagSet("archive", flag.ExitOnError), rest, "box archive <id>")
+		if err != nil {
+			return err
+		}
+		return done(w.Archive(id))
 	case "rm":
 		id, err := oneArg(flag.NewFlagSet("rm", flag.ExitOnError), rest, "box rm <id>")
 		if err != nil {
