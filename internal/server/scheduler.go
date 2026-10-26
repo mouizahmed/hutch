@@ -40,7 +40,7 @@ type candidate struct {
 	cpus       int
 	diskOK     bool // free disk above worker.disk_reserve
 	class      string
-	cloud      bool
+	elastic    bool
 	hasVersion bool
 }
 
@@ -73,8 +73,8 @@ func choose(cs []candidate, n need) int {
 }
 
 func better(a, b candidate, n need) bool {
-	if a.cloud != b.cloud {
-		return !a.cloud
+	if a.elastic != b.elastic {
+		return !a.elastic
 	}
 	if am, bm := a.class == n.class, b.class == n.class; am != bm {
 		return am
@@ -111,9 +111,9 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	draining := map[string]bool{}
+	draining, elastic := map[string]bool{}, map[string]bool{}
 	for _, w := range ws {
-		draining[w.ID] = w.Draining
+		draining[w.ID], elastic[w.ID] = w.Draining, w.Node != ""
 	}
 	copies := map[string]bool{}
 	if n.version != "" {
@@ -152,6 +152,7 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 			cpus:       w.info.CPUs,
 			diskOK:     d.Total == 0 || float64(d.Free) >= reserve*float64(d.Total),
 			class:      w.info.Class,
+			elastic:    elastic[id],
 			hasVersion: copies[id],
 		})
 		conns = append(conns, w)

@@ -7,7 +7,7 @@ import "testing"
 func TestChoose(t *testing.T) {
 	box := need{memMiB: 4096, vcpus: 2, class: "intel"}
 	cs := []candidate{
-		{id: "cloud-empty", freeMiB: 28000, cpus: 8, diskOK: true, class: "intel", cloud: true},
+		{id: "cloud-empty", freeMiB: 28000, cpus: 8, diskOK: true, class: "intel", elastic: true},
 		{id: "home-roomy", freeMiB: 20000, cpus: 8, diskOK: true, class: "intel"},
 		{id: "home-full", freeMiB: 5000, cpus: 8, diskOK: true, class: "intel"},
 		{id: "home-tight", freeMiB: 3000, cpus: 8, diskOK: true, class: "intel"},
