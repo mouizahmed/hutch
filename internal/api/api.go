@@ -10,6 +10,7 @@ import (
 
 	"github.com/mouizahmed/hutch/internal/bucket"
 	"github.com/mouizahmed/hutch/internal/guestproto"
+	"github.com/mouizahmed/hutch/internal/sigv4"
 )
 
 // Methods the server serves to the CLI. The box.* methods are also served by
@@ -63,9 +64,63 @@ const (
 	WorkerReport   = "worker.report"
 	TokenCreate    = "token.create"
 
-	ServerInit = "server.init"
-	ServerGC   = "server.gc"
+	ServerInit  = "server.init"
+	ServerGC    = "server.gc"
+	ProviderAdd = "provider.add"
+	CostsGet    = "costs.get"
+	BoxMove     = "box.move"
+	WorkerDrain = "worker.drain"
 )
+
+type MoveParams struct {
+	ID string `json:"id"`
+	To string `json:"to,omitempty"` // a worker; empty lets the scheduler choose
+}
+
+// MoveResult says how a box moved: warm (everything survived) or cold (its disk
+// survived; processes restarted and agents resumed).
+type MoveResult struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	Kind string `json:"kind"`
+}
+
+type DrainParams struct {
+	Worker string `json:"worker"`
+	Undo   bool   `json:"undo,omitempty"`
+}
+
+// CostsParams asks for the last Days days of the ledger, by box or by project.
+type CostsParams struct {
+	Days int    `json:"days"`
+	By   string `json:"by,omitempty"`
+}
+
+// CostRow is one ledger amount. Box is "" for fleet overhead; by project, it holds
+// the project.
+type CostRow struct {
+	Day      string  `json:"day"`
+	Box      string  `json:"box,omitempty"`
+	Category string  `json:"category"`
+	USD      float64 `json:"usd"`
+}
+
+type Costs struct {
+	Rows   []CostRow `json:"rows"`
+	Billed []CostRow `json:"billed"`
+}
+
+// ProviderParams connects the server to AWS with credentials that can run instances.
+type ProviderParams struct {
+	Credentials     sigv4.Credentials `json:"credentials"`
+	InstanceProfile string            `json:"instance_profile,omitempty"`
+}
+
+type ProviderInfo struct {
+	Region  string `json:"region"`
+	Image   string `json:"image"`
+	Address string `json:"address"`
+}
 
 // ServerInitParams connects the server to its bucket and backs up its master key
 // there, wrapped by the recovery passphrase.
@@ -159,6 +214,8 @@ type Box struct {
 	Branch     string    `json:"branch,omitempty"`
 	Base       string    `json:"base,omitempty"`
 	PushError  string    `json:"push_error,omitempty"`
+	// PerHour is the box's share of its worker's price while awake (by reserved memory).
+	PerHour float64 `json:"per_hour,omitempty"`
 }
 
 const (
@@ -323,6 +380,12 @@ const (
 type Report struct {
 	Boxes []BoxReport `json:"boxes"`
 	Disk  Disk        `json:"disk"`
+	// Uploading counts boxes with snapshots not yet in the bucket; a worker isn't
+	// stopped until it's zero.
+	Uploading int `json:"uploading"`
+	// Requests counts bucket requests since hutchd started, by price tier, for
+	// cost estimates.
+	Requests [2]int64 `json:"requests"`
 }
 
 type BoxReport struct {
@@ -370,6 +433,13 @@ type Worker struct {
 	Boxes    []Box     `json:"boxes,omitempty"`
 	// ReservedMiB is the memory its awake boxes reserve; set by the server.
 	ReservedMiB int `json:"reserved_mib,omitempty"`
+	// Node is the cloud instance of a provisioned worker ("" for self-hosted ones).
+	Node    string    `json:"node,omitempty"`
+	Stopped time.Time `json:"stopped,omitzero"` // when the server stopped it
+	Gone    bool      `json:"gone,omitempty"`   // destroyed; its boxes restore elsewhere
+	// Draining workers take no new boxes.
+	Draining bool `json:"draining,omitempty"`
+	PerHour float64   `json:"per_hour,omitempty"`
 }
 
 // Disk is a worker's data volume, in bytes.

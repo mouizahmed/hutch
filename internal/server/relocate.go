@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"strconv"
 	"strings"
@@ -48,6 +49,9 @@ func (s *Server) boxWorker(ctx context.Context, b api.Box) (*workerConn, api.Box
 	if w, err := s.worker(b.Worker); err == nil {
 		return w, b, nil
 	}
+	if w, err := s.wakeStopped(ctx, b.Worker); err != nil || w != nil {
+		return w, b, err
+	}
 	lost, after, err := s.workerLost(b.Worker)
 	if err != nil {
 		return nil, b, err
@@ -63,7 +67,7 @@ func (s *Server) boxWorker(ctx context.Context, b api.Box) (*workerConn, api.Box
 	if err != nil {
 		return nil, b, fmt.Errorf("%s can't move from lost worker %s: %w", b.ID, b.Worker, err)
 	}
-	w, release, err := s.place(need{memMiB: b.MemMiB, vcpus: b.VCPUs, class: b.Class}, "")
+	w, release, err := s.placeWait(ctx, need{memMiB: b.MemMiB, vcpus: b.VCPUs, class: b.Class}, "", b.ID, io.Discard)
 	if err != nil {
 		return nil, b, err
 	}
@@ -160,6 +164,88 @@ func (s *Server) archiveLoop(ctx context.Context) {
 				continue
 			}
 			s.store.event(b.ID, "archived", fmt.Sprintf("asleep for %s; memory dropped, disk kept", after))
+		}
+	}
+}
+
+// maxAwakeLoop puts boxes to sleep that have been awake for limits.box_max_awake,
+// even mid-task: a checkpoint loses nothing, and waking gives a fresh allowance.
+func (s *Server) maxAwakeLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Minute):
+		}
+		v, err := s.limits("limits.box_max_awake")
+		if err != nil {
+			continue
+		}
+		max := v.(time.Duration)
+		since, err := s.store.statesSince()
+		if err != nil {
+			continue
+		}
+		boxes, err := s.store.boxes()
+		if err != nil {
+			continue
+		}
+		for _, b := range boxes {
+			if b.State != "running" || b.Kind == api.BoxTemplate || time.Since(since[b.ID]) < max {
+				continue
+			}
+			w, err := s.worker(b.Worker)
+			if err != nil {
+				continue
+			}
+			if _, err := s.callForBox(ctx, w, api.BoxSleep, api.IDParams{ID: b.ID}); err != nil {
+				log.Printf("max awake %s: %v", b.ID, err)
+				continue
+			}
+			msg := fmt.Sprintf("%s was awake for %s (limits.box_max_awake) and was put to sleep; hutch wake %s starts it again", b.ID, max, b.ID)
+			s.store.event(b.ID, "force-slept", msg)
+			s.notify("force-slept", b.ID, "Box put to sleep", msg)
+		}
+	}
+}
+
+// admitWake waits while limits.awake_boxes is reached, then counts the box as
+// starting until release.
+func (s *Server) admitWake(ctx context.Context, box string) (func(), error) {
+	notified := false
+	for {
+		boxes, err := s.store.boxes()
+		if err != nil {
+			return nil, err
+		}
+		running := 0
+		for _, b := range boxes {
+			if b.State == "running" {
+				running++
+			}
+		}
+		lim := s.limitInt("limits.awake_boxes")
+		s.mu.Lock()
+		if int64(running+s.starting) < lim {
+			s.starting++
+			s.mu.Unlock()
+			return func() {
+				s.mu.Lock()
+				s.starting--
+				s.mu.Unlock()
+			}, nil
+		}
+		s.mu.Unlock()
+		if !notified {
+			msg := fmt.Sprintf("%s is queued: limits.awake_boxes (%d) reached", box, lim)
+			s.notify("queued", box, "Box queued", msg)
+			s.store.event(box, "queued", msg)
+			notified = true
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(10 * time.Second):
 		}
 	}
 }

@@ -128,22 +128,22 @@ func boxCommands() []*cobra.Command {
 				return err
 			}
 			tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(tw, "BOX / THREAD\tAGENT\tSTATE\tSIZE\tWORKER\tCREATED")
+			fmt.Fprintln(tw, "BOX / THREAD\tAGENT\tSTATE\tSIZE\tWORKER\tCOST\tCREATED")
 			for _, b := range boxes {
 				if b.Kind == api.BoxVersion {
 					continue
 				}
-				fmt.Fprintf(tw, "%s\t\t%s\t%d vCPU, %s\t%s\t%s\n", b.ID, b.State, b.VCPUs, mib(b.MemMiB), b.Worker, ago(b.Created))
+				fmt.Fprintf(tw, "%s\t\t%s\t%d vCPU, %s\t%s\t%s\t%s\n", b.ID, b.State, b.VCPUs, mib(b.MemMiB), b.Worker, perHour(b.PerHour), ago(b.Created))
 				if b.PushError != "" {
 					msg, _, _ := strings.Cut(b.PushError, "\n")
-					fmt.Fprintf(tw, "  ! push of %s failed: %s\t\t\t\t\t\n", b.Branch, msg)
+					fmt.Fprintf(tw, "  ! push of %s failed: %s\t\t\t\t\t\t\n", b.Branch, msg)
 				}
 				for _, t := range b.Threads {
 					pin := ""
 					if t.Pinned {
 						pin = "* "
 					}
-					fmt.Fprintf(tw, "  %d  %s%s\t%s\t%s\t\t\t%s\n", t.N, pin, t.Title, t.Agent, t.State, ago(t.Created))
+					fmt.Fprintf(tw, "  %d  %s%s\t%s\t%s\t\t\t\t%s\n", t.N, pin, t.Title, t.Agent, t.State, ago(t.Created))
 				}
 			}
 			return tw.Flush()
@@ -399,4 +399,42 @@ func statusCommand() *cobra.Command {
 			return tw.Flush()
 		}),
 	}
+}
+
+// perHour shows a price per hour, or "-" for none (asleep, or a self-hosted worker).
+func perHour(usd float64) string {
+	if usd <= 0 {
+		return "-"
+	}
+	return fmt.Sprintf("$%.3f/h", usd)
+}
+
+func moveCommand() *cobra.Command {
+	var to string
+	cmd := &cobra.Command{
+		Use:     "move <box>",
+		Short:   "Move a box to another worker (warm when it can, else cold)",
+		GroupID: "boxes",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sess, err := connect()
+			if err != nil {
+				return err
+			}
+			defer sess.Close()
+			var r api.MoveResult
+			if err := rpc.CallOutput(cmd.Context(), sess, api.BoxMove, api.MoveParams{ID: args[0], To: to}, &r, os.Stdout, os.Stderr); err != nil {
+				return err
+			}
+			switch r.Kind {
+			case "warm":
+				fmt.Printf("Warm move from %s to %s: everything kept running, agents mid-conversation.\n", r.From, r.To)
+			default:
+				fmt.Printf("Cold move from %s to %s (another snapshot class): files kept, processes restarted, agents resumed.\n", r.From, r.To)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&to, "to", "", "worker to move to (default: the scheduler's choice)")
+	return cmd
 }

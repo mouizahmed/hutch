@@ -58,6 +58,7 @@ var (
 	user        = []Layer{User}
 	project     = []Layer{Project}
 	userProject = []Layer{User, Project}
+	serverUser  = []Layer{Server, User}
 )
 
 // Keys is the one schema for every layer.
@@ -125,6 +126,30 @@ var Keys = []*Key{
 		Doc: "server backups are kept this long: all from the last hour, then one per hour for a day, then one per day"},
 	{Path: "gc.interval", Kind: Duration, Default: "24h", Min: "1h", Max: "30d", Layers: server,
 		Doc: "how often the server deletes bucket chunks nothing uses"},
+	{Path: "providers.aws.worker_type", Kind: String, Default: "m8i.2xlarge", Layers: server,
+		Doc: "instance type of every AWS worker (nested virtualization: c8i, m8i, r8i)"},
+	{Path: "worker_disk.size", Kind: Size, Default: "100G", Min: "20G", Max: "16T", Layers: server,
+		Doc: "data disk of every cloud worker; billed while it is stopped too"},
+	{Path: "providers.teardown_after", Kind: Duration, Default: "20m", Min: "1m", Max: "7d", Layers: server,
+		Doc: "a cloud worker with no awake boxes for this long is stopped"},
+	{Path: "providers.empty_worker", Kind: Enum, Enum: []string{"stop", "terminate"}, Default: "stop", Layers: server,
+		Doc: "stop: keep its disk so it starts again fast; terminate: delete it"},
+	{Path: "providers.stopped_pool", Kind: Int, Default: int64(2), Min: "0", Max: "100", Layers: server,
+		Doc: "stopped cloud workers kept for fast starts; extras are terminated"},
+	{Path: "providers.stopped_ttl", Kind: Duration, Default: "7d", Min: "1h", Max: "365d", Layers: server,
+		Doc: "a cloud worker stopped this long is terminated"},
+	{Path: "limits.cloud_workers", Kind: Int, Default: int64(2), Min: "0", Max: "1000", Layers: serverUser,
+		Doc: "cloud workers running at once; past it, boxes queue (the server's value caps yours)"},
+	{Path: "limits.awake_boxes", Kind: Int, Default: int64(8), Min: "0", Max: "10000", Layers: serverUser,
+		Doc: "boxes awake at once across all workers; past it, boxes queue (the server's value caps yours)"},
+	{Path: "limits.box_max_awake", Kind: Duration, Default: "8h", Min: "1m", Max: "365d", Layers: serverUser,
+		Doc: "a box awake this long without a break is put to sleep, even mid-task (the server's value caps yours)"},
+	{Path: "limits.cloud_spend_per_day", Kind: Int, Default: int64(15), Min: "0", Max: "1000000", Layers: serverUser,
+		Doc: "USD a day of estimated cloud cost (workers, disks, addresses, bucket); past it, boxes queue; 0 means no limit"},
+	{Path: "costs.reconcile_tolerance", Kind: Percent, Default: "10%", Min: "1%", Max: "100%", Layers: server,
+		Doc: "a day's bill differing from the estimate by more than this notifies you"},
+	{Path: "notify", Kind: String, Layers: user,
+		Doc: "command the server runs on events, with HUTCH_EVENT, HUTCH_BOX, HUTCH_TITLE, HUTCH_MESSAGE set"},
 	{Path: "gc.grace", Kind: Duration, Default: "24h", Min: "1h", Max: "30d", Layers: server,
 		Doc: "chunks younger than this are never deleted, so a sweep can't race an upload"},
 }

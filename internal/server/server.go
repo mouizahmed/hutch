@@ -42,8 +42,15 @@ type Server struct {
 	backupMu sync.Mutex
 	gcMu     sync.Mutex
 	moving   sync.Map // box ID → *sync.Mutex, held while a box moves off a lost worker
-	// pending is memory held on each worker for boxes being placed; guarded by mu.
-	pending map[string]int
+	// pending is memory held on each worker for boxes being placed, and starting
+	// the boxes being placed or woken; guarded by mu.
+	pending  map[string]int
+	starting int
+	fleet    atomic.Pointer[fleet]
+	// Bucket requests not yet in the ledger, and the server's own count when last
+	// read; guarded by mu. bucketBytes is the bucket's size, measured hourly.
+	requests, ownRequests [2]int64
+	bucketBytes           atomic.Int64
 
 	mu      sync.Mutex
 	workers map[string]*workerConn
@@ -61,8 +68,11 @@ type workerConn struct {
 	id   string
 	sess *yamux.Session
 	info api.Worker
-	// projects whose keys the worker was given; guarded by Server.mu.
-	projects map[string]bool
+	// projects whose keys the worker was given, and boxes it has yet to upload;
+	// guarded by Server.mu.
+	projects  map[string]bool
+	uploading int
+	requests  [2]int64 // its bucket requests as last reported
 }
 
 func SocketPath(dir string) string { return filepath.Join(dir, "api.sock") }
@@ -95,6 +105,13 @@ func New(cfg Config) (*Server, error) {
 		}
 		s.vault.Store(&vault{bucket: b, cfg: *bcfg})
 	}
+	f, err := loadFleet(cfg.Dir)
+	if err != nil {
+		return nil, err
+	}
+	if f != nil {
+		s.fleet.Store(f)
+	}
 	return s, nil
 }
 
@@ -108,6 +125,10 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.backupLoop(ctx)
 	go s.gcLoop(ctx)
 	go s.archiveLoop(ctx)
+	go s.teardownLoop(ctx)
+	go s.costLoop(ctx)
+	go s.bucketSizeLoop(ctx)
+	go s.maxAwakeLoop(ctx)
 	select {
 	case <-ctx.Done():
 		return nil
@@ -221,7 +242,8 @@ func (s *Server) handleWorkerConn(ctx context.Context, conn *tls.Conn) {
 		return
 	}
 	go rpc.Serve(ctx, sess, s.workerMux(id), nil)
-	w := &workerConn{id: id, sess: sess, info: info, projects: map[string]bool{}}
+	// Busy until its first report says what it has left to upload.
+	w := &workerConn{id: id, sess: sess, info: info, projects: map[string]bool{}, uploading: 1}
 	var copies []string
 	info.Boxes, copies = s.dropStale(ctx, w, info.Boxes)
 	if err := s.store.syncWorkerBoxes(id, info.Boxes, copies); err != nil {
@@ -259,7 +281,8 @@ func (s *Server) enroll(conn *tls.Conn) {
 		return
 	}
 	resp := func() api.EnrollResponse {
-		if err := s.store.useToken(req.Secret); err != nil {
+		node, err := s.store.useToken(req.Secret)
+		if err != nil {
 			return api.EnrollResponse{Error: err.Error()}
 		}
 		id := "w-" + randomHex(6)
@@ -267,7 +290,7 @@ func (s *Server) enroll(conn *tls.Conn) {
 		if err != nil {
 			return api.EnrollResponse{Error: err.Error()}
 		}
-		if err := s.store.addWorker(id, req.Name); err != nil {
+		if err := s.store.addWorker(id, req.Name, node); err != nil {
 			return api.EnrollResponse{Error: err.Error()}
 		}
 		log.Printf("enrolled worker %s (%s)", id, req.Name)
@@ -279,11 +302,13 @@ func (s *Server) enroll(conn *tls.Conn) {
 // NewToken creates a single-use join token: <CA fingerprint>.<secret>.
 func (s *Server) NewToken() (string, error) {
 	secret := randomHex(24)
-	if err := s.store.addToken(secret); err != nil {
+	if err := s.store.addToken(secret, ""); err != nil {
 		return "", err
 	}
 	return pki.Fingerprint(s.ca.Cert) + "." + secret, nil
 }
+
+func fingerprint(s *Server) string { return pki.Fingerprint(s.ca.Cert) }
 
 func randomHex(n int) string {
 	b := make([]byte, n)
@@ -316,10 +341,17 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 				return nil, err
 			}
 			s.mu.Lock()
-			if w := s.workers[workerID]; w != nil && r.Disk.Total > 0 {
-				w.info.Disk = r.Disk
+			w := s.workers[workerID]
+			if w != nil {
+				if r.Disk.Total > 0 {
+					w.info.Disk = r.Disk
+				}
+				w.uploading = r.Uploading
 			}
 			s.mu.Unlock()
+			if w != nil {
+				s.countRequests(w, r.Requests)
+			}
 			for _, br := range r.Boxes {
 				prev, err := s.store.box(br.Box.ID)
 				if err == nil && prev.Worker != workerID {

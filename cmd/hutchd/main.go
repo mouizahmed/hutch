@@ -35,6 +35,7 @@ commands:
   image import <name> <vmlinux> <rootfs.ext4>
   enroll --server HOST:PORT --token TOKEN [--name NAME]   join a server
   run [--name NAME]                                      serve the server's calls
+  boot                                                   start a cloud worker (data disk, enrollment from user data, run)
   version
 `
 
@@ -67,6 +68,9 @@ func dispatch(ctx context.Context, root, fcVersion string, args []string) error 
 			return fmt.Errorf("usage: hutchd image import <name> <vmlinux> <rootfs.ext4>")
 		}
 		return importImage(root, args[2], args[3], args[4])
+	}
+	if args[0] == "boot" {
+		return boot(ctx, root, fcVersion)
 	}
 	if args[0] == "enroll" || args[0] == "run" {
 		return daemon(ctx, root, fcVersion, args)

@@ -70,6 +70,19 @@ func cacheLimit(root string, percent float64) int64 {
 	return int64(float64(diskUsage(root).Total) * percent / 100)
 }
 
+// requests returns the bucket requests made so far, by price tier.
+func (u *uploader) requests() [2]int64 {
+	v := u.vault.Load()
+	if v == nil {
+		return [2]int64{}
+	}
+	if b, ok := v.store.Bucket.(interface{ Requests() (int64, int64) }); ok {
+		t1, t2 := b.Requests()
+		return [2]int64{t1, t2}
+	}
+	return [2]int64{}
+}
+
 // key returns the store and a project's key, or false without them.
 func (u *uploader) key(project string) (*durable.Store, durable.Key, bool) {
 	v := u.vault.Load()

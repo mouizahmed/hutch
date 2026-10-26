@@ -501,3 +501,47 @@ func category(usage string) string {
 		return "other"
 	}
 }
+
+// WorkerImage finds the newest worker image (AMI) this account built, and the size
+// of its root volume in GB.
+func (a *AWS) WorkerImage(ctx context.Context) (string, int, error) {
+	var out struct {
+		Images []struct {
+			ID      string    `xml:"imageId"`
+			Created time.Time `xml:"creationDate"`
+			State   string    `xml:"imageState"`
+			Volumes []int     `xml:"blockDeviceMapping>item>ebs>volumeSize"`
+		} `xml:"imagesSet>item"`
+	}
+	if err := a.ec2(ctx, "DescribeImages", map[string]string{"Owner.1": "self", "Filter.1.Name": "tag-key", "Filter.1.Value.1": "hutch:worker-image"}, &out); err != nil {
+		return "", 0, err
+	}
+	best, size := "", 0
+	var at time.Time
+	for _, im := range out.Images {
+		if im.State == "available" && im.Created.After(at) {
+			best, at, size = im.ID, im.Created, 0
+			for _, v := range im.Volumes {
+				size += v
+			}
+		}
+	}
+	if best == "" {
+		return "", 0, errors.New("no worker image in this account: build one with images/aws/build-ami.sh")
+	}
+	return best, size, nil
+}
+
+// AllowWithinGroup lets members of a security group reach a TCP port on each other:
+// workers dialing the server.
+func (a *AWS) AllowWithinGroup(ctx context.Context, group, port string) error {
+	err := a.ec2(ctx, "AuthorizeSecurityGroupIngress", map[string]string{
+		"GroupId": group, "IpPermissions.1.IpProtocol": "tcp", "IpPermissions.1.FromPort": port, "IpPermissions.1.ToPort": port,
+		"IpPermissions.1.Groups.1.GroupId": group,
+	}, nil)
+	var e *apiError
+	if errors.As(err, &e) && e.Code == "InvalidPermission.Duplicate" {
+		return nil
+	}
+	return err
+}

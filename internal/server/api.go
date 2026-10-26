@@ -46,6 +46,10 @@ func (s *Server) apiMux() rpc.Mux {
 		api.ConfigPut:        s.configPut,
 		api.ServerInit:       s.serverInit,
 		api.ServerGC:         s.serverGC,
+		api.ProviderAdd:      s.providerAdd,
+		api.CostsGet:         s.costsReport,
+		api.BoxMove:          s.boxMove,
+		api.WorkerDrain:      s.workerDrain,
 		api.WorkerList:       s.workerList,
 		api.TokenCreate:      s.tokenCreate,
 	}
@@ -77,6 +81,12 @@ func (s *Server) boxList(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (an
 		boxes[i].Threads = ts
 		boxes[i].PushError = s.pushErrors[boxes[i].ID]
 	}
+	s.mu.Unlock()
+	perHour := s.perHour(ctx, boxes)
+	s.mu.Lock()
+	for i := range boxes {
+		boxes[i].PerHour = perHour[boxes[i].ID]
+	}
 	return boxes, nil
 }
 
@@ -95,9 +105,11 @@ func (s *Server) workerList(ctx context.Context, _ json.RawMessage, _ *rpc.Out) 
 			reserved[b.Worker] += b.MemMiB
 		}
 	}
+	perHour := s.workerPerHour(ctx)
 	s.mu.Lock()
 	for i := range ws {
 		ws[i].ReservedMiB = reserved[ws[i].ID]
+		ws[i].PerHour = perHour[ws[i].Node]
 		if w := s.workers[ws[i].ID]; w != nil {
 			ws[i].Online, ws[i].Disk = true, w.info.Disk
 		}
@@ -125,7 +137,7 @@ func (s *Server) callForBox(ctx context.Context, w *workerConn, method string, p
 	return b, nil
 }
 
-func (s *Server) boxBoot(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+func (s *Server) boxBoot(ctx context.Context, params json.RawMessage, out *rpc.Out) (any, error) {
 	var p api.BootParams
 	if err := rpc.Decode(params, &p); err != nil {
 		return nil, err
@@ -137,7 +149,8 @@ func (s *Server) boxBoot(ctx context.Context, params json.RawMessage, _ *rpc.Out
 	if err := s.checkFits(n); err != nil {
 		return nil, err
 	}
-	w, release, err := s.place(n, p.Worker)
+	_, stderr := out.Writers()
+	w, release, err := s.placeWait(ctx, n, p.Worker, p.ID, stderr)
 	if err != nil {
 		return nil, err
 	}
@@ -259,6 +272,13 @@ func (s *Server) awake(ctx context.Context, id string) (*workerConn, error) {
 	}
 	if err := notVersion(b); err != nil {
 		return nil, err
+	}
+	if b.State == "asleep" || b.State == "archived" {
+		release, err := s.admitWake(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
 	}
 	w, b, err := s.boxWorker(ctx, b)
 	if err != nil {

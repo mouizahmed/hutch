@@ -4,6 +4,8 @@ package bucket
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/base64"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/mouizahmed/hutch/internal/sigv4"
@@ -51,7 +54,12 @@ type Bucket interface {
 type S3 struct {
 	cfg    Config
 	client *http.Client
+	// Requests made, by price tier: 1 is PUT and LIST, 2 is GET, HEAD, and the rest.
+	tier1, tier2 atomic.Int64
 }
+
+// Requests returns the requests made so far, by price tier.
+func (s *S3) Requests() (tier1, tier2 int64) { return s.tier1.Load(), s.tier2.Load() }
 
 func New(cfg Config) (*S3, error) {
 	if cfg.Name == "" || cfg.Region == "" || cfg.AccessKey == "" || cfg.SecretKey == "" {
@@ -82,6 +90,11 @@ func (s *S3) url(key string, query url.Values) *url.URL {
 }
 
 func (s *S3) do(ctx context.Context, method, key string, query url.Values, body []byte, header http.Header) (*http.Response, error) {
+	if method == http.MethodPut || (method == http.MethodGet && key == "") {
+		s.tier1.Add(1)
+	} else if method != http.MethodDelete {
+		s.tier2.Add(1)
+	}
 	u := s.url(key, query)
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), bytes.NewReader(body))
 	if err != nil {
@@ -129,6 +142,29 @@ func (s *S3) Put(ctx context.Context, key string, data []byte, ifAbsent bool) er
 		h.Set("If-None-Match", "*")
 	}
 	resp, err := s.do(ctx, http.MethodPut, key, nil, data, h)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// Tag replaces the bucket's tags; on AWS they attribute its costs.
+func (s *S3) Tag(ctx context.Context, tags map[string]string) error {
+	var b strings.Builder
+	b.WriteString("<Tagging><TagSet>")
+	for k, v := range tags {
+		b.WriteString("<Tag><Key>")
+		xml.EscapeText(&b, []byte(k))
+		b.WriteString("</Key><Value>")
+		xml.EscapeText(&b, []byte(v))
+		b.WriteString("</Value></Tag>")
+	}
+	b.WriteString("</TagSet></Tagging>")
+	body := []byte(b.String())
+	sum := md5.Sum(body)
+	h := http.Header{"Content-Md5": {base64.StdEncoding.EncodeToString(sum[:])}}
+	resp, err := s.do(ctx, http.MethodPut, "", url.Values{"tagging": {""}}, body, h)
 	if err != nil {
 		return err
 	}

@@ -257,7 +257,7 @@ func (s *Server) userLoginBox(ctx context.Context, params json.RawMessage, out *
 		return nil, err
 	}
 	stdout, stderr := out.Writers()
-	w, release, err := s.place(need{memMiB: 4096, vcpus: 2}, "")
+	w, release, err := s.placeWait(ctx, need{memMiB: 4096, vcpus: 2}, "", "login box", stderr)
 	if err != nil {
 		return nil, err
 	}

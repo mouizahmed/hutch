@@ -170,7 +170,7 @@ func (s *Server) bootTemplate(ctx context.Context, proj api.Project, p api.Templ
 	if err := s.checkFits(n); err != nil {
 		return api.Box{}, nil, err
 	}
-	w, release, err := s.place(n, "")
+	w, release, err := s.placeWait(ctx, n, "", id, stderr)
 	if err != nil {
 		return api.Box{}, nil, err
 	}
@@ -330,7 +330,7 @@ func (s *Server) templateBox(ctx context.Context, params json.RawMessage, out *r
 		return b, err
 	}
 	v := versions[0]
-	w, release, err := s.versionWorker(ctx, v)
+	w, release, err := s.versionWorker(ctx, v, id, stderr)
 	if err != nil {
 		return nil, err
 	}
@@ -360,7 +360,7 @@ func (s *Server) forkProject(ctx context.Context, p api.ForkParams, stdout, stde
 		return api.Box{}, errors.New("this project has no template yet: hutch template snapshot (or hutch new --from base)")
 	}
 	v := versions[0]
-	w, release, err := s.versionWorker(ctx, v)
+	w, release, err := s.versionWorker(ctx, v, p.ID, stderr)
 	if err != nil {
 		return api.Box{}, err
 	}

@@ -108,6 +108,12 @@ func (m *monitor) check(ctx context.Context, server *atomic.Pointer[yamux.Sessio
 		}
 	}
 	report.Disk = diskUsage(m.w.Root)
+	report.Requests = m.uploads.requests()
+	for _, b := range boxes {
+		if b.Pending() {
+			report.Uploading++
+		}
+	}
 	if sess := server.Load(); sess != nil {
 		rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		if err := rpc.Call(rctx, sess, api.WorkerReport, report, nil); err != nil {

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
@@ -20,6 +21,8 @@ type need struct {
 	// version is the template version box it forks from: a worker that has it
 	// starts the box without downloading it.
 	version string
+	// avoid is a worker it mustn't go to: the one it moves off.
+	avoid string
 }
 
 func (n need) String() string { return fmt.Sprintf("%d vCPU, %s", n.vcpus, mib(n.memMiB)) }
@@ -104,6 +107,14 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 			reserved[b.Worker] += b.MemMiB
 		}
 	}
+	ws, err := s.store.workers()
+	if err != nil {
+		return nil, nil, err
+	}
+	draining := map[string]bool{}
+	for _, w := range ws {
+		draining[w.ID] = w.Draining
+	}
 	copies := map[string]bool{}
 	if n.version != "" {
 		ws, err := s.store.versionWorkers(n.version)
@@ -115,12 +126,23 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 		}
 	}
 
+	running := 0
+	for _, b := range boxes {
+		if b.State == "running" {
+			running++
+		}
+	}
+	awakeLimit := s.limitInt("limits.awake_boxes")
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if int64(running+s.starting) >= awakeLimit {
+		return nil, nil, &limitError{"limits.awake_boxes", awakeLimit}
+	}
 	var cs []candidate
 	var conns []*workerConn
 	for id, w := range s.workers {
-		if requested != "" && id != requested {
+		if (requested != "" && id != requested) || id == n.avoid || (requested == "" && draining[id]) {
 			continue
 		}
 		d := w.info.Disk
@@ -140,20 +162,22 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 	i := choose(cs, n)
 	if i < 0 {
 		if len(cs) == 0 {
-			return nil, nil, fmt.Errorf("no workers online")
+			return nil, nil, fmt.Errorf("%w: no workers online", errNoRoom)
 		}
 		var reasons []string
 		for i, c := range cs {
 			reasons = append(reasons, fmt.Sprintf("%s: %s", conns[i].info.Name, c.why(n)))
 		}
 		sort.Strings(reasons)
-		return nil, nil, fmt.Errorf("no worker has room for a %s box (%s)", n, strings.Join(reasons, "; "))
+		return nil, nil, fmt.Errorf("%w for a %s box (%s)", errNoRoom, n, strings.Join(reasons, "; "))
 	}
 	w := conns[i]
 	s.pending[w.id] += n.memMiB
+	s.starting++
 	return w, func() {
 		s.mu.Lock()
 		s.pending[w.id] -= n.memMiB
+		s.starting--
 		s.mu.Unlock()
 	}, nil
 }
@@ -189,7 +213,7 @@ func (s *Server) checkFits(n need) error {
 // versionWorker returns a worker with a copy of a template version that can take
 // a fork of it, copying the version there from the bucket when the chosen worker
 // doesn't have it. release frees the fork's reservation.
-func (s *Server) versionWorker(ctx context.Context, v api.Template) (*workerConn, func(), error) {
+func (s *Server) versionWorker(ctx context.Context, v api.Template, box string, out io.Writer) (*workerConn, func(), error) {
 	src, err := s.store.box(v.Box)
 	if err != nil {
 		return nil, nil, err
@@ -198,7 +222,7 @@ func (s *Server) versionWorker(ctx context.Context, v api.Template) (*workerConn
 	if err := s.checkFits(n); err != nil {
 		return nil, nil, err
 	}
-	w, release, err := s.place(n, "")
+	w, release, err := s.placeWait(ctx, n, "", box, out)
 	if err != nil {
 		return nil, nil, err
 	}
