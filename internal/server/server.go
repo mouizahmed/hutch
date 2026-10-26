@@ -42,6 +42,7 @@ type Server struct {
 	backupMu sync.Mutex
 	gcMu     sync.Mutex
 	moving   sync.Map // box ID → *sync.Mutex, held while a box moves off a lost worker
+	copying  sync.Map // "<version>@<worker>" → *sync.Mutex, held while a template copies there
 	// pending is memory held on each worker for boxes being placed, and starting
 	// the boxes being placed or woken; guarded by mu.
 	pending  map[string]int

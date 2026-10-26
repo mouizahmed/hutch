@@ -158,7 +158,7 @@ func (s *Server) limitInt(key string) int64 {
 // (queued, with a notification) while a limit is reached or persistent workers are
 // full. It returns when the box can start, or ctx ends.
 func (s *Server) placeWait(ctx context.Context, n need, requested, box string, out io.Writer) (*workerConn, func(), error) {
-	notified := false
+	reason := ""
 	for {
 		lim, err := s.spendReached()
 		if err != nil {
@@ -186,11 +186,13 @@ func (s *Server) placeWait(ctx context.Context, n need, requested, box string, o
 			}
 			err = gerr
 		}
-		if !notified {
+		if err.Error() != reason {
+			if reason == "" {
+				s.notify("queued", box, "Box queued", fmt.Sprintf("%s is queued: %v", box, err))
+			}
+			reason = err.Error()
 			fmt.Fprintf(out, "Queued: %v. %s starts when there's room (Ctrl-C to give up).\n", err, box)
-			s.notify("queued", box, "Box queued", fmt.Sprintf("%s is queued: %v", box, err))
-			s.store.event(box, "queued", err.Error())
-			notified = true
+			s.store.event(box, "queued", reason)
 		}
 		select {
 		case <-ctx.Done():

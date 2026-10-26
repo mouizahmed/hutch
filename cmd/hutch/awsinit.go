@@ -198,15 +198,16 @@ func awsInit(ctx context.Context, serverType, binary string) error {
 		}
 	}
 	target := "ubuntu@" + node.PublicIP
-	sshRun := func(stdin io.Reader, script string) error {
-		args := append(client.SSHArgs(), "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=5", target, script)
+	ssh := func(stdin io.Reader, stderr io.Writer, script string) error {
+		args := append(client.SSHArgs(), "-o", "StrictHostKeyChecking=accept-new", "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=5", target, script)
 		cmd := exec.CommandContext(ctx, "ssh", args...)
-		cmd.Stdin, cmd.Stderr = stdin, os.Stderr
+		cmd.Stdin, cmd.Stderr = stdin, stderr
 		return cmd.Run()
 	}
+	sshRun := func(stdin io.Reader, script string) error { return ssh(stdin, os.Stderr, script) }
 	step("install the server on " + node.PublicIP)
 	for i := 0; ; i++ {
-		if err := sshRun(nil, "true"); err == nil {
+		if err := ssh(nil, io.Discard, "true"); err == nil {
 			break
 		} else if i > 60 {
 			return fmt.Errorf("can't reach %s over SSH: %w", target, err)
@@ -234,7 +235,7 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 `, node.PrivateIP, node.PublicIP)
-	if err := sshRun(strings.NewReader(unit), "sudo tee /etc/systemd/system/hutch-server.service >/dev/null && sudo systemctl daemon-reload && sudo systemctl enable --now hutch-server && for i in $(seq 50); do [ -S ~/.local/state/hutch/server/api.sock ] && exit 0; sleep 0.2; done; exit 1"); err != nil {
+	if err := sshRun(strings.NewReader(unit), "sudo tee /etc/systemd/system/hutch-server.service >/dev/null && sudo systemctl daemon-reload && sudo systemctl enable --now -q hutch-server && for i in $(seq 50); do [ -S ~/.local/state/hutch/server/api.sock ] && exit 0; sleep 0.2; done; exit 1"); err != nil {
 		return fmt.Errorf("start the server: %w", err)
 	}
 

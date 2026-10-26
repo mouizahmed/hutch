@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
 	"sort"
 	"strings"
 
@@ -227,6 +228,10 @@ func (s *Server) versionWorker(ctx context.Context, v api.Template, box string, 
 	if err != nil {
 		return nil, nil, err
 	}
+	// Boxes forked at once onto a new worker copy the template there once.
+	mu, _ := s.copying.LoadOrStore(v.Box+"@"+w.id, &sync.Mutex{})
+	mu.(*sync.Mutex).Lock()
+	defer mu.(*sync.Mutex).Unlock()
 	have, err := s.store.versionWorkers(v.Box)
 	if err != nil {
 		release()
@@ -243,6 +248,9 @@ func (s *Server) versionWorker(ctx context.Context, v api.Template, box string, 
 		if gen, err = s.latestGeneration(ctx, store); err == nil {
 			s.hostProject(ctx, w, v.Project)
 			err = rpc.Call(ctx, w.sess, api.BoxRestore, api.RestoreParams{ID: v.Box, Store: *store, Generation: gen}, nil)
+			if err != nil && strings.Contains(err.Error(), "already exists") {
+				err = nil // the worker has it; the server hadn't recorded it
+			}
 		}
 	}
 	if err != nil {
