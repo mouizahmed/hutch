@@ -237,7 +237,8 @@ func (s *Server) templateSnapshot(ctx context.Context, params json.RawMessage, o
 		n = versions[0].Version + 1
 	}
 	vid := fmt.Sprintf("%s-v%d", proj.Slug, n)
-	vb, err := s.callForBox(ctx, w, api.BoxRename, api.RenameParams{ID: id, NewID: vid})
+	s.hostProject(ctx, w, proj.ID)
+	vb, err := s.callForBox(ctx, w, api.BoxRename, api.RenameParams{ID: id, NewID: vid, Store: s.versionStore(proj.ID, w.info.Class, n)})
 	if err != nil {
 		return nil, err
 	}
@@ -328,7 +329,7 @@ func (s *Server) templateBox(ctx context.Context, params json.RawMessage, out *r
 	if err != nil {
 		return nil, err
 	}
-	w, err := s.worker(src.Worker)
+	w, _, err := s.boxWorker(ctx, src)
 	if err != nil {
 		return nil, err
 	}
@@ -361,11 +362,12 @@ func (s *Server) forkProject(ctx context.Context, p api.ForkParams, stdout, stde
 	if err != nil {
 		return api.Box{}, err
 	}
-	w, err := s.worker(src.Worker)
+	w, _, err := s.boxWorker(ctx, src)
 	if err != nil {
 		return api.Box{}, err
 	}
-	p.Source = v.Box
+	s.hostProject(ctx, w, p.Project)
+	p.Source, p.Store = v.Box, s.boxStore(p.Project, p.ID)
 	b, err := s.callForBox(ctx, w, api.BoxFork, p)
 	if err != nil {
 		return b, err
@@ -429,14 +431,24 @@ echo "$base"`, "sh", branch, base}}, &out, stderr); err != nil {
 	return branch, base, nil
 }
 
-// removeBox deletes a box on its worker and forgets it.
+// removeBox deletes a box on its worker and in the bucket, and forgets it. A box
+// on a lost worker is removed from the bucket alone; the worker drops its copy if
+// it ever comes back.
 func (s *Server) removeBox(ctx context.Context, id string) error {
-	w, err := s.workerFor(id)
+	b, err := s.store.box(id)
 	if err != nil {
 		return err
 	}
-	if err := rpc.Call(ctx, w.sess, api.BoxRm, api.IDParams{ID: id}, nil); err != nil {
-		return err
+	store, _ := s.storeOf(b)
+	if w, err := s.worker(b.Worker); err == nil {
+		if err := rpc.Call(ctx, w.sess, api.BoxRm, api.IDParams{ID: id}, nil); err != nil {
+			return err
+		}
+	} else if lost, after, lerr := s.workerLost(b.Worker); lerr != nil || !lost {
+		return fmt.Errorf("worker %s is offline; remove %s once it is back or has been offline for %s (worker.lost_after)", b.Worker, id, after)
+	}
+	if store != nil {
+		s.deletePrefix(ctx, store.Prefix)
 	}
 	s.store.event(id, api.BoxRm, "removed")
 	return s.store.deleteBox(id)
@@ -563,5 +575,6 @@ func (s *Server) projectRm(ctx context.Context, params json.RawMessage, _ *rpc.O
 			return nil, err
 		}
 	}
+	s.deletePrefix(ctx, s.projectPrefix(proj.ID))
 	return nil, s.store.deleteProject(proj.ID)
 }

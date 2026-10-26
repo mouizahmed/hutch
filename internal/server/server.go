@@ -14,11 +14,13 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/yamux"
 
 	"github.com/mouizahmed/hutch/internal/api"
+	"github.com/mouizahmed/hutch/internal/durable"
 	"github.com/mouizahmed/hutch/internal/pki"
 	"github.com/mouizahmed/hutch/internal/rpc"
 	"github.com/mouizahmed/hutch/internal/wire"
@@ -34,6 +36,13 @@ type Server struct {
 	cfg   Config
 	store *store
 	ca    *pki.CA
+	// master derives every key ([durable.Key]); vault is the bucket, once initialized.
+	master   durable.Key
+	vault    atomic.Pointer[vault]
+	recorded sync.Map // projects whose ID record is in the bucket
+	backupMu sync.Mutex
+	gcMu     sync.Mutex
+	moving   sync.Map // box ID → *sync.Mutex, held while a box moves off a lost worker
 
 	mu      sync.Mutex
 	workers map[string]*workerConn
@@ -51,6 +60,8 @@ type workerConn struct {
 	id   string
 	sess *yamux.Session
 	info api.Worker
+	// projects whose keys the worker was given; guarded by Server.mu.
+	projects map[string]bool
 }
 
 func SocketPath(dir string) string { return filepath.Join(dir, "api.sock") }
@@ -59,7 +70,11 @@ func New(cfg Config) (*Server, error) {
 	if err := os.MkdirAll(cfg.Dir, 0o700); err != nil {
 		return nil, err
 	}
-	st, err := openStore(filepath.Join(cfg.Dir, "hutch.db"))
+	master, err := loadMaster(cfg.Dir)
+	if err != nil {
+		return nil, err
+	}
+	st, err := openStore(filepath.Join(cfg.Dir, "hutch.db"), master.Derive("user-layer"))
 	if err != nil {
 		return nil, err
 	}
@@ -67,14 +82,31 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: cfg, store: st, ca: ca, workers: map[string]*workerConn{}, threadStates: map[string]map[int]api.ThreadState{},
-		fileHashes: map[string]map[string]string{}, syncing: map[string]bool{}, pushErrors: map[string]string{}}, nil
+	s := &Server{cfg: cfg, store: st, ca: ca, master: master, workers: map[string]*workerConn{}, threadStates: map[string]map[int]api.ThreadState{},
+		fileHashes: map[string]map[string]string{}, syncing: map[string]bool{}, pushErrors: map[string]string{}}
+	b, bcfg, err := loadBucket(cfg.Dir)
+	if err != nil {
+		return nil, err
+	}
+	if b != nil {
+		if err := (&durable.Store{Bucket: b}).CheckFormat(context.Background()); err != nil {
+			return nil, err
+		}
+		s.vault.Store(&vault{bucket: b, cfg: *bcfg})
+	}
+	return s, nil
 }
 
 func (s *Server) Run(ctx context.Context) error {
 	errc := make(chan error, 2)
 	go func() { errc <- s.listenWorkers(ctx) }()
 	go func() { errc <- s.listenAPI(ctx) }()
+	if s.vault.Load() == nil {
+		log.Printf("no bucket: nothing is backed up until hutch server init")
+	}
+	go s.backupLoop(ctx)
+	go s.gcLoop(ctx)
+	go s.archiveLoop(ctx)
 	select {
 	case <-ctx.Done():
 		return nil
@@ -187,11 +219,17 @@ func (s *Server) handleWorkerConn(ctx context.Context, conn *tls.Conn) {
 		log.Printf("worker %s: %v", id, err)
 		return
 	}
+	go rpc.Serve(ctx, sess, s.workerMux(id), nil)
+	w := &workerConn{id: id, sess: sess, info: info, projects: map[string]bool{}}
+	info.Boxes = s.dropStale(ctx, w, info.Boxes)
 	if err := s.store.syncWorkerBoxes(id, info.Boxes); err != nil {
 		log.Printf("worker %s: sync boxes: %v", id, err)
 	}
-	go rpc.Serve(ctx, sess, s.workerMux(id), nil)
-	w := &workerConn{id: id, sess: sess, info: info}
+	for _, b := range info.Boxes {
+		if m, err := s.store.meta(b.ID); err == nil && m.project != "" {
+			w.projects[m.project] = true
+		}
+	}
 	s.sendWorkerSettings(ctx, w)
 	s.mu.Lock()
 	if old := s.workers[id]; old != nil {
@@ -251,6 +289,12 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
+func rpcCall(ctx context.Context, w *workerConn, method string, params any) error {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	return rpc.Call(ctx, w.sess, method, params, nil)
+}
+
 func (s *Server) worker(id string) (*workerConn, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -285,6 +329,9 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 			}
 			for _, br := range r.Boxes {
 				prev, err := s.store.box(br.Box.ID)
+				if err == nil && prev.Worker != workerID {
+					continue // moved off this worker while it was gone; removed when it reconnects
+				}
 				br.Box.Worker = workerID
 				if err := s.store.putBox(br.Box); err != nil {
 					return nil, err

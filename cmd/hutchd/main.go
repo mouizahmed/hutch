@@ -103,12 +103,12 @@ func dispatch(ctx context.Context, root, fcVersion string, args []string) error 
 		if err != nil {
 			return err
 		}
-		return done(w.Boot(ctx, id, *image, *cpus, *mem, 0, worker.Idle{}, nil))
+		return done(w.Boot(ctx, id, *image, *cpus, *mem, 0, worker.Idle{}, nil, nil))
 	case "fork":
 		if len(rest) != 2 {
 			return fmt.Errorf("usage: hutchd box fork <src> <id>")
 		}
-		return done(w.Fork(ctx, rest[0], rest[1], worker.Idle{}, nil))
+		return done(w.Fork(ctx, rest[0], rest[1], worker.Idle{}, nil, nil))
 	case "sleep":
 		id, err := oneArg(flag.NewFlagSet("sleep", flag.ExitOnError), rest, "box sleep <id>")
 		if err != nil {

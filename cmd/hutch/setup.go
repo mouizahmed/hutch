@@ -4,12 +4,16 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
+	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/mouizahmed/hutch/internal/api"
+	"github.com/mouizahmed/hutch/internal/bucket"
 	"github.com/mouizahmed/hutch/internal/client"
 	"github.com/mouizahmed/hutch/internal/rpc"
 	"github.com/mouizahmed/hutch/internal/server"
@@ -59,7 +63,69 @@ func setupCommands() []*cobra.Command {
 			return nil
 		},
 	}
-	serverCmd.AddCommand(run, token)
+	initCmd := &cobra.Command{
+		Use:   "init",
+		Short: "Connect the server to its bucket and set the recovery passphrase",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, pass, err := bucketForm(true)
+			if err != nil {
+				return err
+			}
+			sess, err := connect()
+			if err != nil {
+				return err
+			}
+			defer sess.Close()
+			fmt.Println("Checking the bucket and writing the first backup...")
+			if err := rpc.Call(cmd.Context(), sess, api.ServerInit, api.ServerInitParams{Bucket: cfg, Passphrase: pass}, nil); err != nil {
+				return err
+			}
+			fmt.Printf("Done. Everything durable now goes to %s, encrypted.\n", cfg.Name)
+			return nil
+		},
+	}
+
+	restore := &cobra.Command{
+		Use:   "restore",
+		Short: "Recover a lost server here from its bucket",
+		Long: `Recover a lost server on this machine from its bucket: the master key (with your
+recovery passphrase), then the newest backup. Then start it with hutch server run;
+workers reconnect once the server's address points here.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, pass, err := bucketForm(false)
+			if err != nil {
+				return err
+			}
+			at, err := server.Restore(cmd.Context(), flagServerData, cfg, pass)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Restored the backup from %s (%s) into %s.\nStart the server: hutch server run\n", at.Local().Format(time.DateTime), ago(at), flagServerData)
+			return nil
+		},
+	}
+
+	gc := &cobra.Command{
+		Use:   "gc",
+		Short: "Delete old box snapshots and bucket chunks nothing uses",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			sess, err := connect()
+			if err != nil {
+				return err
+			}
+			defer sess.Close()
+			var r api.GCResult
+			if err := rpc.Call(cmd.Context(), sess, api.ServerGC, struct{}{}, &r); err != nil {
+				return err
+			}
+			fmt.Printf("%d manifests (%d old snapshots pruned); deleted %d of %d chunks (%d MB)\n", r.Manifests, r.Pruned, r.Deleted, r.Chunks, r.Bytes>>20)
+			return nil
+		},
+	}
+	serverCmd.AddCommand(run, token, initCmd, restore, gc)
 
 	apiCmd := &cobra.Command{
 		Use:    "api",
@@ -111,4 +177,62 @@ func ago(t time.Time) string {
 	default:
 		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
+}
+
+// bucketForm asks for the bucket and the recovery passphrase; at init the passphrase
+// is new, so it is asked twice and its safekeeping confirmed.
+func bucketForm(init bool) (bucket.Config, string, error) {
+	cfg := bucket.Config{Region: "us-east-1"}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return cfg, "", fmt.Errorf("this needs a terminal: the recovery passphrase is typed, never passed as an argument")
+	}
+	var pass, again string
+	stored := false
+	notEmpty := func(s string) error {
+		if strings.TrimSpace(s) == "" {
+			return fmt.Errorf("required")
+		}
+		return nil
+	}
+	passDesc := "Unlocks the bucket on a new server if this one is lost."
+	if init {
+		passDesc = fmt.Sprintf("At least %d characters. Unlocks the bucket on a new server if this one is lost. Hutch never stores it.", server.MinPassphrase)
+	}
+	groups := []*huh.Group{
+		huh.NewGroup(
+			huh.NewInput().Title("Bucket").Description("An S3-compatible bucket with conditional writes, empty at init.").Value(&cfg.Name).Validate(notEmpty),
+			huh.NewInput().Title("Endpoint").Description("Blank for AWS S3; otherwise https://host[:port] (R2, MinIO, Garage).").Value(&cfg.Endpoint),
+			huh.NewInput().Title("Region").Value(&cfg.Region).Validate(notEmpty),
+			huh.NewInput().Title("Access key").Value(&cfg.AccessKey).Validate(notEmpty),
+			huh.NewInput().Title("Secret key").EchoMode(huh.EchoModePassword).Value(&cfg.SecretKey).Validate(notEmpty),
+		),
+		huh.NewGroup(huh.NewInput().Title("Recovery passphrase").Description(passDesc).EchoMode(huh.EchoModePassword).Value(&pass).
+			Validate(func(s string) error {
+				if init && len(s) < server.MinPassphrase {
+					return fmt.Errorf("at least %d characters", server.MinPassphrase)
+				}
+				return notEmpty(s)
+			})),
+	}
+	if init {
+		groups = append(groups,
+			huh.NewGroup(huh.NewInput().Title("Passphrase again").EchoMode(huh.EchoModePassword).Value(&again).
+				Validate(func(s string) error {
+					if s != pass {
+						return fmt.Errorf("doesn't match")
+					}
+					return nil
+				})),
+			huh.NewGroup(huh.NewConfirm().Title("Have you stored the passphrase somewhere safe?").
+				Description("Without it, losing this server means the bucket can never be read again.").
+				Affirmative("Yes, it's stored").Negative("Cancel").Value(&stored)))
+	}
+	if err := huh.NewForm(groups...).Run(); err != nil {
+		return cfg, "", err
+	}
+	if init && !stored {
+		return cfg, "", fmt.Errorf("cancelled")
+	}
+	cfg.Name, cfg.Endpoint, cfg.Region, cfg.AccessKey = strings.TrimSpace(cfg.Name), strings.TrimSpace(cfg.Endpoint), strings.TrimSpace(cfg.Region), strings.TrimSpace(cfg.AccessKey)
+	return cfg, pass, nil
 }

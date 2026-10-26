@@ -26,17 +26,19 @@ type boxActivity struct {
 // when connected. It decides locally, so boxes still sleep while the server is down.
 type monitor struct {
 	w        *worker.Worker
+	uploads  *uploader
 	settings atomic.Pointer[api.WorkerSettingsParams] // from the server
 	defaults worker.Idle                              // for boxes created without a policy
 	kicks    chan struct{}
 	seen     map[string]*boxActivity
 }
 
-func newMonitor(w *worker.Worker) *monitor {
+func newMonitor(w *worker.Worker, u *uploader) *monitor {
 	d := config.New()
-	m := &monitor{w: w, kicks: make(chan struct{}, 1), seen: map[string]*boxActivity{},
+	m := &monitor{w: w, uploads: u, kicks: make(chan struct{}, 1), seen: map[string]*boxActivity{},
 		defaults: worker.Idle{Timeout: d.Duration("idle_timeout"), CPUThreshold: d.Percent("idle.cpu_threshold")}}
-	m.settings.Store(&api.WorkerSettingsParams{IdleInterval: d.Duration("idle.check_interval"), WorkingWindow: d.Duration("threads.working_window")})
+	m.settings.Store(&api.WorkerSettingsParams{IdleInterval: d.Duration("idle.check_interval"), WorkingWindow: d.Duration("threads.working_window"),
+		Checkpoint: d.Duration("checkpoint.interval")})
 	return m
 }
 
@@ -88,6 +90,14 @@ func (m *monitor) check(ctx context.Context, server *atomic.Pointer[yamux.Sessio
 				r.Box = toAPI(m.w, slept)
 				r.Threads = nil
 				delete(m.seen, b.ID)
+				m.uploads.kick()
+			}
+		} else if m.dueCheckpoint(b) {
+			if cp, err := m.w.Checkpoint(ctx, b.ID); err != nil {
+				log.Printf("checkpoint %s: %v", b.ID, err)
+			} else {
+				r.Box = toAPI(m.w, cp)
+				m.uploads.kick()
 			}
 		}
 		report.Boxes = append(report.Boxes, r)
@@ -104,6 +114,14 @@ func (m *monitor) check(ctx context.Context, server *atomic.Pointer[yamux.Sessio
 		}
 		cancel()
 	}
+}
+
+// dueCheckpoint reports whether a stored box has been active since its last
+// checkpoint, at least checkpoint.interval ago.
+func (m *monitor) dueCheckpoint(b *worker.Box) bool {
+	every := m.settings.Load().Checkpoint
+	a := m.seen[b.ID]
+	return b.Store != nil && every > 0 && a != nil && time.Since(b.Checkpointed) >= every && a.lastActive.After(b.Checkpointed)
 }
 
 func (m *monitor) policy(b *worker.Box) worker.Idle {

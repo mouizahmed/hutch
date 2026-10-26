@@ -106,6 +106,25 @@ var Keys = []*Key{
 		Doc: "how often workers check boxes for activity"},
 	{Path: "threads.working_window", Kind: Duration, Default: "15s", Min: "1s", Max: "10m", Layers: server,
 		Doc: "a thread with output this recent counts as working"},
+
+	{Path: "checkpoint.interval", Kind: Duration, Default: "15m", Min: "1m", Max: "24h", Layers: server,
+		Doc: "awake, active boxes are snapshotted to the bucket this often: the most work losing a worker loses"},
+	{Path: "archive_after", Kind: Duration, Default: "30d", Min: "1d", Max: "3650d", Layers: user,
+		Doc: "a box asleep this long drops its memory and keeps its disk; waking it is a cold boot"},
+	{Path: "worker.chunk_cache", Kind: Percent, Default: "30%", Min: "0%", Max: "90%", Layers: server,
+		Doc: "share of a worker's disk for chunks downloaded from the bucket"},
+	{Path: "worker.lost_after", Kind: Duration, Default: "5m", Min: "30s", Max: "24h", Layers: server,
+		Doc: "a box whose worker has been offline this long is restored on another worker when you use it"},
+	{Path: "retention.box_checkpoints", Kind: Int, Default: int64(3), Min: "1", Max: "100", Layers: server,
+		Doc: "snapshots kept in the bucket per box"},
+	{Path: "backup.interval", Kind: Duration, Default: "1m", Min: "10s", Max: "1h", Layers: server,
+		Doc: "how often the server backs up its database to the bucket, when it changed"},
+	{Path: "retention.backups", Kind: Duration, Default: "30d", Min: "1d", Max: "3650d", Layers: server,
+		Doc: "server backups are kept this long: all from the last hour, then one per hour for a day, then one per day"},
+	{Path: "gc.interval", Kind: Duration, Default: "24h", Min: "1h", Max: "30d", Layers: server,
+		Doc: "how often the server deletes bucket chunks nothing uses"},
+	{Path: "gc.grace", Kind: Duration, Default: "24h", Min: "1h", Max: "30d", Layers: server,
+		Doc: "chunks younger than this are never deleted, so a sweep can't race an upload"},
 }
 
 func init() {

@@ -18,7 +18,7 @@ func (s *Server) apiMux() rpc.Mux {
 		api.BoxBoot:          s.boxBoot,
 		api.BoxFork:          s.boxFork,
 		api.BoxSleep:         s.onBoxWorker(api.BoxSleep),
-		api.BoxWake:          s.onBoxWorker(api.BoxWake),
+		api.BoxWake:          s.boxWake,
 		api.BoxRm:            s.boxRm,
 		api.BoxExec:          s.boxExec,
 		api.BoxConsole:       s.boxConsole,
@@ -44,6 +44,8 @@ func (s *Server) apiMux() rpc.Mux {
 		api.SecretsGet:       s.secretsGet,
 		api.SecretsPut:       s.secretsPut,
 		api.ConfigPut:        s.configPut,
+		api.ServerInit:       s.serverInit,
+		api.ServerGC:         s.serverGC,
 		api.WorkerList:       s.workerList,
 		api.TokenCreate:      s.tokenCreate,
 	}
@@ -186,12 +188,28 @@ func (s *Server) onBoxWorker(method string) rpc.Handler {
 		if err != nil {
 			return nil, err
 		}
-		nb, err := s.callForBox(ctx, w, method, p)
-		if err == nil && method == api.BoxWake {
-			s.refreshCredentials(ctx, w, p.ID)
-		}
-		return nb, err
+		return s.callForBox(ctx, w, method, p)
 	}
+}
+
+func (s *Server) boxWake(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+	var p api.IDParams
+	if err := rpc.Decode(params, &p); err != nil {
+		return nil, err
+	}
+	b, err := s.store.box(p.ID)
+	if err != nil {
+		return nil, err
+	}
+	if b.State != "asleep" && b.State != "archived" {
+		if _, err := s.worker(b.Worker); err == nil {
+			return nil, fmt.Errorf("box %q is %s", p.ID, b.State)
+		}
+	}
+	if _, err := s.awake(ctx, p.ID); err != nil {
+		return nil, err
+	}
+	return s.store.box(p.ID)
 }
 
 // notVersion refuses to touch a template version: boxes fork from it as it is.
@@ -226,15 +244,18 @@ func (s *Server) awake(ctx context.Context, id string) (*workerConn, error) {
 	if err := notVersion(b); err != nil {
 		return nil, err
 	}
-	w, err := s.worker(b.Worker)
+	w, b, err := s.boxWorker(ctx, b)
 	if err != nil {
 		return nil, err
 	}
-	if b.State == "asleep" {
+	if b.State == "asleep" || b.State == "archived" {
 		if _, err := s.callForBox(ctx, w, api.BoxWake, api.IDParams{ID: id}); err != nil {
 			return nil, fmt.Errorf("wake %s: %w", id, err)
 		}
 		s.refreshCredentials(ctx, w, id)
+		if b.State == "archived" {
+			s.resumeThreads(ctx, w, id)
+		}
 	}
 	return w, nil
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"time"
 
 	"github.com/mouizahmed/hutch/internal/api"
@@ -73,16 +74,48 @@ func (s *Server) settings() (*config.Config, error) {
 	return config.New(docs...), nil
 }
 
+// sendWorkerSettings sends a worker the server settings it uses, the bucket, and
+// the keys of the projects whose boxes it hosts.
 func (s *Server) sendWorkerSettings(ctx context.Context, w *workerConn) {
 	c, err := s.settings()
 	if err != nil {
 		log.Printf("worker %s: settings: %v", w.id, err)
 		return
 	}
-	p := api.WorkerSettingsParams{IdleInterval: c.Duration("idle.check_interval"), WorkingWindow: c.Duration("threads.working_window")}
+	p := api.WorkerSettingsParams{IdleInterval: c.Duration("idle.check_interval"), WorkingWindow: c.Duration("threads.working_window"),
+		Checkpoint: c.Duration("checkpoint.interval"), ChunkCache: c.Percent("worker.chunk_cache"), Refresh: c.Duration("gc.grace") / 2}
+	if v := s.vault.Load(); v != nil {
+		cfg := v.cfg
+		p.Bucket = &cfg
+		p.Keys = map[string][]byte{}
+		s.mu.Lock()
+		projects := maps.Clone(w.projects)
+		s.mu.Unlock()
+		for project := range projects {
+			k := s.master.ProjectKey(project)
+			p.Keys[project] = k[:]
+			s.projectRecord(ctx, project)
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if err := rpc.Call(ctx, w.sess, api.WorkerSettings, p, nil); err != nil {
 		log.Printf("worker %s: settings: %v", w.id, err)
+	}
+}
+
+// hostProject gives a worker a project's key before it gets the project's boxes.
+func (s *Server) hostProject(ctx context.Context, w *workerConn, project string) {
+	if project == "" {
+		return
+	}
+	s.mu.Lock()
+	known := w.projects[project]
+	if !known {
+		w.projects[project] = true
+	}
+	s.mu.Unlock()
+	if !known {
+		s.sendWorkerSettings(ctx, w)
 	}
 }

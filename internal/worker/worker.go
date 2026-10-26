@@ -20,7 +20,10 @@ import (
 //
 //	firecracker/<version>/{firecracker,jailer}
 //	images/<name>/{vmlinux,rootfs.ext4}
-//	boxes/<id>/{box.json,rootfs.ext4,base.mem,console.log,console.in,firecracker.log,snapshots/<gen>/{vmstate,mem}}
+//	boxes/<id>/{box.json,rootfs.ext4,base.mem,console.log,console.in,firecracker.log}
+//	boxes/<id>/snapshots/<gen>/{rootfs.ext4,vmstate,mem}   latest snapshot (disk reflinked)
+//	boxes/<id>/ref/{rootfs.ext4,vmstate,mem,manifest.json}  what the bucket last stored
+//	cache/chunks/                                          downloaded chunks, LRU
 //	jail/firecracker/<id>/root/   jailer chroot while the box runs
 type Worker struct {
 	Root      string
@@ -33,6 +36,8 @@ type State string
 const (
 	Running State = "running"
 	Asleep  State = "asleep"
+	// Archived boxes keep only their disk; waking them is a cold boot.
+	Archived State = "archived"
 	// Failed boxes did not boot; they are kept so their console can be read.
 	Failed State = "failed"
 )
@@ -57,6 +62,20 @@ type Box struct {
 	Watch []string `json:"watch,omitempty"`
 	// Allow lists private targets (host:port) the box may reach despite the blocked ranges.
 	Allow []string `json:"allow,omitempty"`
+	// Store says where the box's snapshots go in the bucket; nil for boxes never stored.
+	Store *Store `json:"store,omitempty"`
+	// Uploaded is the generation the bucket last stored.
+	Uploaded int `json:"uploaded,omitempty"`
+	// Checkpointed is when the box's state was last captured: a snapshot, or the start
+	// from one.
+	Checkpointed time.Time `json:"checkpointed,omitzero"`
+}
+
+// Store places a box's snapshots in the bucket: manifests <Prefix>/<generation>,
+// encrypted with Project's key.
+type Store struct {
+	Project string `json:"project"`
+	Prefix  string `json:"prefix"`
 }
 
 // Idle is a box's idle policy; zero values mean the defaults.

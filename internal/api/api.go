@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/mouizahmed/hutch/internal/bucket"
 	"github.com/mouizahmed/hutch/internal/guestproto"
 )
 
@@ -24,8 +25,10 @@ const (
 	BoxPTY     = "box.pty"
 	BoxConsole = "box.console"
 	BoxSerial  = "box.serial"
-	BoxRename  = "box.rename" // hutchd only
-	BoxFiles   = "box.files"  // hutchd only
+	BoxRename  = "box.rename"  // hutchd only
+	BoxFiles   = "box.files"   // hutchd only
+	BoxRestore = "box.restore" // hutchd only
+	BoxArchive = "box.archive" // hutchd only
 	BoxStatus  = "box.status"
 	BoxDial    = "box.dial"
 
@@ -59,7 +62,25 @@ const (
 	WorkerSettings = "worker.settings"
 	WorkerReport   = "worker.report"
 	TokenCreate    = "token.create"
+
+	ServerInit = "server.init"
+	ServerGC   = "server.gc"
 )
+
+// ServerInitParams connects the server to its bucket and backs up its master key
+// there, wrapped by the recovery passphrase.
+type ServerInitParams struct {
+	Bucket     bucket.Config `json:"bucket"`
+	Passphrase string        `json:"passphrase"`
+}
+
+type GCResult struct {
+	Manifests int   `json:"manifests"`
+	Pruned    int   `json:"pruned"` // manifests removed by retention
+	Chunks    int   `json:"chunks"`
+	Deleted   int   `json:"deleted"`
+	Bytes     int64 `json:"bytes"`
+}
 
 // Config documents the server keeps: "server" (the server layer) and "user" (the
 // authoritative copy of the user config). Version 0 means never written.
@@ -87,10 +108,31 @@ type ConfigPutResult struct {
 	Conflict bool      `json:"conflict,omitempty"`
 }
 
-// WorkerSettingsParams carries the server-layer keys hutchd uses.
+// WorkerSettingsParams carries the server-layer keys hutchd uses, and the bucket
+// with the keys of the projects it hosts. hutchd keeps them in memory only.
 type WorkerSettingsParams struct {
 	IdleInterval  time.Duration `json:"idle_interval"`
 	WorkingWindow time.Duration `json:"working_window"`
+	Checkpoint    time.Duration `json:"checkpoint"`
+	// ChunkCache is the share of the worker's disk downloaded chunks may use, in percent.
+	ChunkCache float64 `json:"chunk_cache"`
+	// Refresh is half the GC grace period: older chunks are written again when reused.
+	Refresh time.Duration     `json:"refresh"`
+	Bucket  *bucket.Config    `json:"bucket,omitempty"`
+	Keys    map[string][]byte `json:"keys,omitempty"` // project ID → key
+}
+
+// Store places a box's snapshots in the bucket (see worker.Store).
+type Store struct {
+	Project string `json:"project"`
+	Prefix  string `json:"prefix"`
+}
+
+// RestoreParams creates box ID on a worker from generation Generation in the bucket.
+type RestoreParams struct {
+	ID         string `json:"id"`
+	Store      Store  `json:"store"`
+	Generation int    `json:"generation"`
 }
 
 // Idle is a box's idle policy, resolved from its project when the box is created.
@@ -107,6 +149,7 @@ type Box struct {
 	VCPUs      int       `json:"vcpus"`
 	MemMiB     int       `json:"mem_mib"`
 	Generation int       `json:"generation"`
+	Uploaded   int       `json:"uploaded,omitempty"` // the generation the bucket has
 	Class      string    `json:"class"`
 	ReachIP    string    `json:"reach_ip,omitempty"`
 	Created    time.Time `json:"created"`
@@ -244,6 +287,7 @@ type DialParams struct {
 type RenameParams struct {
 	ID    string `json:"id"`
 	NewID string `json:"new_id"`
+	Store *Store `json:"store,omitempty"`
 }
 
 // Thread is one agent session: a tmux window in the box's "hutch" session.
@@ -332,6 +376,7 @@ type BootParams struct {
 	Worker    string   `json:"worker,omitempty"`
 	Idle      Idle     `json:"idle"`
 	Allow     []string `json:"allow,omitempty"` // private host:port targets the box may reach
+	Store     *Store   `json:"store,omitempty"`
 }
 
 // ForkParams forks Source, or with Project the project's newest template version,
@@ -346,6 +391,7 @@ type ForkParams struct {
 	Credentials  []string      `json:"credentials,omitempty"`
 	PushInterval time.Duration `json:"push_interval,omitempty"`
 	Allow        []string      `json:"allow,omitempty"`
+	Store        *Store        `json:"store,omitempty"` // set by the server
 }
 
 type IDParams struct {

@@ -13,6 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/mouizahmed/hutch/internal/api"
+	"github.com/mouizahmed/hutch/internal/durable"
 )
 
 const schema = `
@@ -114,6 +115,8 @@ CREATE TABLE IF NOT EXISTS events (
 
 type store struct {
 	db *sql.DB
+	// userKey seals the user layer, so a copy of the database alone doesn't expose credentials.
+	userKey durable.Key
 }
 
 // migrations add columns to tables from earlier versions; each may already be done.
@@ -127,9 +130,10 @@ var migrations = []string{
 	`ALTER TABLE projects ADD COLUMN peaks TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE projects ADD COLUMN confirmed TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE box_meta ADD COLUMN version INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE boxes ADD COLUMN state_since TIMESTAMP`,
 }
 
-func openStore(path string) (*store, error) {
+func openStore(path string, userKey durable.Key) (*store, error) {
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, err
@@ -145,7 +149,14 @@ func openStore(path string) (*store, error) {
 			return nil, fmt.Errorf("migrate: %w", err)
 		}
 	}
-	return &store{db: db}, nil
+	return &store{db: db, userKey: userKey}, nil
+}
+
+// changes counts the rows the server has changed since it started.
+func (s *store) changes() (int64, error) {
+	var n int64
+	err := s.db.QueryRow(`SELECT total_changes()`).Scan(&n)
+	return n, err
 }
 
 func hashSecret(secret string) string {
@@ -203,9 +214,36 @@ func (s *store) putBox(b api.Box) error {
 		INSERT INTO boxes (id, worker_id, state, image, vcpus, mem_mib, generation, class, reach_ip, created, updated)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET worker_id = excluded.worker_id, state = excluded.state, generation = excluded.generation,
-			class = excluded.class, reach_ip = excluded.reach_ip, updated = excluded.updated`,
+			class = excluded.class, reach_ip = excluded.reach_ip, updated = excluded.updated,
+			state_since = CASE WHEN boxes.state = excluded.state THEN boxes.state_since ELSE excluded.updated END`,
 		b.ID, b.Worker, b.State, b.Image, b.VCPUs, b.MemMiB, b.Generation, b.Class, b.ReachIP, b.Created, time.Now().UTC())
 	return err
+}
+
+// removed reports whether a box's last event is its removal.
+func (s *store) removed(id string) bool {
+	var kind string
+	s.db.QueryRow(`SELECT kind FROM events WHERE box_id = ? ORDER BY id DESC LIMIT 1`, id).Scan(&kind)
+	return kind == api.BoxRm
+}
+
+// statesSince returns when each box entered its current state.
+func (s *store) statesSince() (map[string]time.Time, error) {
+	rows, err := s.db.Query(`SELECT id, COALESCE(state_since, updated) FROM boxes`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]time.Time{}
+	for rows.Next() {
+		var id string
+		var t time.Time
+		if err := rows.Scan(&id, &t); err != nil {
+			return nil, err
+		}
+		out[id] = t
+	}
+	return out, rows.Err()
 }
 
 func (s *store) deleteBox(id string) error {
@@ -481,6 +519,10 @@ func (s *store) layerPart(part string) (layerPart, error) {
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, nil
 	}
+	if err != nil {
+		return p, err
+	}
+	p.content, err = s.userKey.Open("user/"+part, p.content)
 	return p, err
 }
 
@@ -496,6 +538,9 @@ func (s *store) layerParts(prefix string) (map[string]layerPart, error) {
 		var name string
 		var p layerPart
 		if err := rows.Scan(&name, &p.version, &p.content, &p.updated); err != nil {
+			return nil, err
+		}
+		if p.content, err = s.userKey.Open("user/"+name, p.content); err != nil {
 			return nil, err
 		}
 		out[name] = p
@@ -520,7 +565,7 @@ func (s *store) putLayerPart(part string, base int64, content []byte) (int64, bo
 	}
 	_, err = tx.Exec(`INSERT INTO user_layer (part, version, content, updated) VALUES (?, ?, ?, ?)
 		ON CONFLICT(part) DO UPDATE SET version = excluded.version, content = excluded.content, updated = excluded.updated`,
-		part, cur+1, content, time.Now().UTC())
+		part, cur+1, s.userKey.Seal("user/"+part, content), time.Now().UTC())
 	if err != nil {
 		return 0, false, err
 	}

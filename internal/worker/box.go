@@ -24,7 +24,7 @@ import (
 
 // Boot creates a box from an image and cold boots it. The image's disk is grown to
 // diskBytes when that is larger.
-func (w *Worker) Boot(ctx context.Context, id, image string, vcpus, memMiB int, diskBytes int64, idle Idle, allow []string) (*Box, error) {
+func (w *Worker) Boot(ctx context.Context, id, image string, vcpus, memMiB int, diskBytes int64, idle Idle, allow []string, store *Store) (*Box, error) {
 	if !validID.MatchString(id) {
 		return nil, fmt.Errorf("invalid box id %q", id)
 	}
@@ -39,7 +39,7 @@ func (w *Worker) Boot(ctx context.Context, id, image string, vcpus, memMiB int, 
 		}
 		return nil, err
 	}
-	b := &Box{ID: id, Image: image, VCPUs: vcpus, MemMiB: memMiB, FCVersion: w.FCVersion, Class: w.Class(), Created: time.Now().UTC(), Idle: idle, Allow: allow}
+	b := &Box{ID: id, Image: image, VCPUs: vcpus, MemMiB: memMiB, FCVersion: w.FCVersion, Class: w.Class(), Created: time.Now().UTC(), Idle: idle, Allow: allow, Store: store}
 	rootfs := filepath.Join(w.boxDir(id), "rootfs.ext4")
 	if err := clone(filepath.Join(w.imageDir(image), "rootfs.ext4"), rootfs); err != nil {
 		os.RemoveAll(w.boxDir(id))
@@ -76,8 +76,9 @@ func growDisk(path string, size int64) error {
 	return run("resize2fs", "-f", path)
 }
 
-// Rename gives a sleeping box a new id; template versions are frozen this way.
-func (w *Worker) Rename(id, newID string) (*Box, error) {
+// Rename gives a sleeping box a new id and bucket place; template versions are
+// frozen this way.
+func (w *Worker) Rename(id, newID string, store *Store) (*Box, error) {
 	if !validID.MatchString(newID) {
 		return nil, fmt.Errorf("invalid box id %q", newID)
 	}
@@ -104,7 +105,7 @@ func (w *Worker) Rename(id, newID string) (*Box, error) {
 	if err := os.Rename(w.boxDir(id), w.boxDir(newID)); err != nil {
 		return nil, err
 	}
-	b.ID = newID
+	b.ID, b.Store, b.Uploaded = newID, store, 0
 	if err := w.save(b); err != nil {
 		return nil, err
 	}
@@ -114,7 +115,7 @@ func (w *Worker) Rename(id, newID string) (*Box, error) {
 
 // Fork creates a box from a sleeping box's latest snapshot: the disk is reflinked and
 // the memory file is shared copy-on-write until the new box writes to it.
-func (w *Worker) Fork(ctx context.Context, srcID, id string, idle Idle, allow []string) (*Box, error) {
+func (w *Worker) Fork(ctx context.Context, srcID, id string, idle Idle, allow []string, store *Store) (*Box, error) {
 	if !validID.MatchString(id) {
 		return nil, fmt.Errorf("invalid box id %q", id)
 	}
@@ -131,7 +132,7 @@ func (w *Worker) Fork(ctx context.Context, srcID, id string, idle Idle, allow []
 	}
 	b, err := w.copyFromSnapshot(srcID, id)
 	if err == nil {
-		b.Idle, b.Allow = idle, allow
+		b.Idle, b.Allow, b.Store = idle, allow, store
 		err = w.start(ctx, b, map[string]string{
 			jailRootfs: filepath.Join(w.boxDir(id), "rootfs.ext4"),
 			jailState:  filepath.Join(w.boxDir(id), "base.vmstate"),
@@ -174,6 +175,13 @@ func (w *Worker) copyFromSnapshot(srcID, id string) (*Box, error) {
 	if err := os.Link(filepath.Join(gen, "vmstate"), filepath.Join(dir, "base.vmstate")); err != nil {
 		return nil, err
 	}
+	// The source's stored chunks are the fork's until it changes them, so its first
+	// upload compares against them.
+	if src.Store != nil && src.Uploaded == src.Generation {
+		if err := cloneDir(w.refDir(srcID), w.refDir(id)); err != nil {
+			os.RemoveAll(w.refDir(id))
+		}
+	}
 	return &Box{ID: id, Image: src.Image, VCPUs: src.VCPUs, MemMiB: src.MemMiB, FCVersion: src.FCVersion, Class: src.Class,
 		Created: time.Now().UTC(), BaseMem: filepath.Join(dir, "base.mem")}, nil
 }
@@ -188,6 +196,9 @@ func (w *Worker) Wake(ctx context.Context, id string) (*Box, error) {
 	b, err := w.load(id)
 	if err != nil {
 		return nil, err
+	}
+	if b.State == Archived {
+		return w.coldWake(ctx, b)
 	}
 	if b.State != Asleep {
 		return nil, fmt.Errorf("box %q is %s", id, b.State)
@@ -231,7 +242,7 @@ func (w *Worker) start(ctx context.Context, b *Box, links map[string]string, boo
 	if err := boot(m); err != nil {
 		return fail(err)
 	}
-	b.State = Running
+	b.State, b.Checkpointed = Running, time.Now().UTC()
 	if err := w.save(b); err != nil {
 		return fail(err)
 	}
@@ -263,8 +274,7 @@ func (w *Worker) guestRestore(ctx context.Context, b *Box, timeout time.Duration
 	return c.Restore(ctx, guestproto.Restore{UnixNano: time.Now().UnixNano(), BoxID: b.ID, Hostname: b.ID, Seed: seed})
 }
 
-// Sleep snapshots a running box and stops its VM. The new memory file is the previous
-// one with the diff applied; older generations are removed.
+// Sleep snapshots a running box and stops its VM.
 func (w *Worker) Sleep(ctx context.Context, id string) (*Box, error) {
 	unlock, err := w.lock(id)
 	if err != nil {
@@ -278,13 +288,67 @@ func (w *Worker) Sleep(ctx context.Context, id string) (*Box, error) {
 	if b.State != Running {
 		return nil, fmt.Errorf("box %q is %s", id, b.State)
 	}
-	m := &vm{w: w, box: b, slot: slot(b.Slot), jail: w.jailRoot(id), api: firecracker.NewClient(filepath.Join(w.jailRoot(id), jailAPI))}
+	cleanup, err := w.snapshotGen(ctx, b, w.running(b))
+	if err != nil {
+		return nil, err
+	}
+	w.killFirecracker(b)
+	slot(b.Slot).teardown()
+	b.State, b.Slot, b.BaseMem = Asleep, 0, ""
+	if err := w.save(b); err != nil {
+		return nil, err
+	}
+	cleanup()
+	os.Remove(filepath.Join(w.boxDir(id), "base.mem"))
+	os.Remove(filepath.Join(w.boxDir(id), "base.vmstate"))
+	return b, nil
+}
+
+// Checkpoint snapshots a running box and lets it run on: a brief pause.
+func (w *Worker) Checkpoint(ctx context.Context, id string) (*Box, error) {
+	unlock, err := w.lock(id)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	b, err := w.load(id)
+	if err != nil {
+		return nil, err
+	}
+	if b.State != Running {
+		return nil, fmt.Errorf("box %q is %s", id, b.State)
+	}
+	m := w.running(b)
+	cleanup, err := w.snapshotGen(ctx, b, m)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.api.Resume(ctx); err != nil {
+		return nil, fmt.Errorf("resume after checkpoint: %w", err)
+	}
+	// The next diff is relative to this snapshot.
+	b.BaseMem = filepath.Join(w.genDir(id, b.Generation), "mem")
+	if err := w.save(b); err != nil {
+		return nil, err
+	}
+	cleanup()
+	return b, nil
+}
+
+func (w *Worker) running(b *Box) *vm {
+	return &vm{w: w, box: b, slot: slot(b.Slot), jail: w.jailRoot(b.ID), api: firecracker.NewClient(filepath.Join(w.jailRoot(b.ID), jailAPI))}
+}
+
+// snapshotGen pauses a running box and writes its next generation: the memory file
+// is the previous one with the diff applied, and the disk is reflinked while the VM
+// is paused, so both match. The VM stays paused. On failure (a full disk, say) what
+// was written is dropped and the VM resumed. The caller saves the box, then calls
+// cleanup to remove the previous generation.
+func (w *Worker) snapshotGen(ctx context.Context, b *Box, m *vm) (cleanup func(), err error) {
 	prev := b.Generation
-	gen := w.genDir(id, prev+1)
-	// Until the new generation is complete, the VM is only paused: on any failure
-	// (a full disk, say) drop what was written and let it run on.
+	gen := w.genDir(b.ID, prev+1)
 	state, diff, err := m.snapshot(ctx)
-	fail := func(err error) (*Box, error) {
+	fail := func(err error) (func(), error) {
 		os.RemoveAll(gen)
 		os.Remove(filepath.Join(m.jail, jailSnap, "vmstate"))
 		os.Remove(filepath.Join(m.jail, jailSnap, "mem"))
@@ -307,6 +371,7 @@ func (w *Worker) Sleep(ctx context.Context, id string) (*Box, error) {
 		if err := applyDiff(mem, diff); err != nil {
 			return fail(err)
 		}
+		os.Remove(diff)
 	} else {
 		if err := os.Rename(diff, mem); err != nil {
 			return fail(err)
@@ -318,19 +383,15 @@ func (w *Worker) Sleep(ctx context.Context, id string) (*Box, error) {
 	if err := os.Rename(state, filepath.Join(gen, "vmstate")); err != nil {
 		return fail(err)
 	}
-
-	w.killFirecracker(b)
-	slot(b.Slot).teardown()
-	b.State, b.Slot, b.Generation, b.BaseMem = Asleep, 0, prev+1, ""
-	if err := w.save(b); err != nil {
-		return nil, err
+	if err := clone(filepath.Join(w.boxDir(b.ID), "rootfs.ext4"), filepath.Join(gen, "rootfs.ext4")); err != nil {
+		return fail(err)
 	}
-	os.Remove(filepath.Join(w.boxDir(id), "base.mem"))
-	os.Remove(filepath.Join(w.boxDir(id), "base.vmstate"))
-	if prev > 0 {
-		os.RemoveAll(w.genDir(id, prev))
-	}
-	return b, nil
+	b.Generation, b.Checkpointed = prev+1, time.Now().UTC()
+	return func() {
+		if prev > 0 {
+			os.RemoveAll(w.genDir(b.ID, prev))
+		}
+	}, nil
 }
 
 func (w *Worker) Remove(id string) error {

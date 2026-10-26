@@ -115,10 +115,12 @@ func Run(ctx context.Context, id Identity, w *worker.Worker, name string) error 
 	if err != nil {
 		return fmt.Errorf("not enrolled (run `hutchd enroll`): %w", err)
 	}
-	m := newMonitor(w)
-	mux, streams := handlers(w, name, m), streamHandlers(w)
+	u := newUploader(w)
+	m := newMonitor(w, u)
+	mux, streams := handlers(w, name, m, u), streamHandlers(w)
 	var server atomic.Pointer[yamux.Session]
 	go m.run(ctx, &server)
+	go u.run(ctx)
 	backoff := time.Second
 	for ctx.Err() == nil {
 		start := time.Now()
@@ -195,10 +197,17 @@ func toAPI(w *worker.Worker, b *worker.Box) api.Box {
 		state = "crashed"
 	}
 	return api.Box{ID: b.ID, State: state, Image: b.Image, VCPUs: b.VCPUs, MemMiB: b.MemMiB,
-		Generation: b.Generation, Class: b.Class, ReachIP: b.ReachIP(), Created: b.Created}
+		Generation: b.Generation, Uploaded: b.Uploaded, Class: b.Class, ReachIP: b.ReachIP(), Created: b.Created}
 }
 
-func handlers(w *worker.Worker, name string, m *monitor) rpc.Mux {
+func toStore(s *api.Store) *worker.Store {
+	if s == nil {
+		return nil
+	}
+	return &worker.Store{Project: s.Project, Prefix: s.Prefix}
+}
+
+func handlers(w *worker.Worker, name string, m *monitor, u *uploader) rpc.Mux {
 	box := func(f func(context.Context, json.RawMessage) (*worker.Box, error)) rpc.Handler {
 		return func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
 			b, err := f(ctx, params)
@@ -209,6 +218,9 @@ func handlers(w *worker.Worker, name string, m *monitor) rpc.Mux {
 			// waiting for the next check.
 			if b.State == worker.Running {
 				m.kick()
+			}
+			if b.Pending() {
+				u.kick()
 			}
 			return toAPI(w, b), nil
 		}
@@ -239,14 +251,14 @@ func handlers(w *worker.Worker, name string, m *monitor) rpc.Mux {
 			if err := rpc.Decode(params, &p); err != nil {
 				return nil, err
 			}
-			return w.Boot(ctx, p.ID, p.Image, p.VCPUs, p.MemMiB, p.DiskBytes, worker.Idle(p.Idle), p.Allow)
+			return w.Boot(ctx, p.ID, p.Image, p.VCPUs, p.MemMiB, p.DiskBytes, worker.Idle(p.Idle), p.Allow, toStore(p.Store))
 		}),
 		api.BoxFork: box(func(ctx context.Context, params json.RawMessage) (*worker.Box, error) {
 			var p api.ForkParams
 			if err := rpc.Decode(params, &p); err != nil {
 				return nil, err
 			}
-			return w.Fork(ctx, p.Source, p.ID, worker.Idle(p.Idle), p.Allow)
+			return w.Fork(ctx, p.Source, p.ID, worker.Idle(p.Idle), p.Allow, toStore(p.Store))
 		}),
 		api.WorkerSettings: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
 			var p api.WorkerSettingsParams
@@ -254,6 +266,7 @@ func handlers(w *worker.Worker, name string, m *monitor) rpc.Mux {
 				return nil, err
 			}
 			m.settings.Store(&p)
+			u.configure(&p)
 			m.kick()
 			return nil, nil
 		},
@@ -262,8 +275,20 @@ func handlers(w *worker.Worker, name string, m *monitor) rpc.Mux {
 			if err := rpc.Decode(params, &p); err != nil {
 				return nil, err
 			}
-			return w.Rename(p.ID, p.NewID)
+			return w.Rename(p.ID, p.NewID, toStore(p.Store))
 		}),
+		api.BoxRestore: box(func(ctx context.Context, params json.RawMessage) (*worker.Box, error) {
+			var p api.RestoreParams
+			if err := rpc.Decode(params, &p); err != nil {
+				return nil, err
+			}
+			s, k, ok := u.key(p.Store.Project)
+			if !ok {
+				return nil, fmt.Errorf("no key for project %s on this worker", p.Store.Project)
+			}
+			return w.Restore(ctx, p.ID, toStore(&p.Store), p.Generation, s, k)
+		}),
+		api.BoxArchive: byID(func(_ context.Context, id string) (*worker.Box, error) { return w.Archive(id) }),
 		api.BoxFiles: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
 			var p api.FilesParams
 			if err := rpc.Decode(params, &p); err != nil {
