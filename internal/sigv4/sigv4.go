@@ -37,7 +37,7 @@ func Sign(req *http.Request, body []byte, service, region string, c Credentials,
 	headers := map[string]string{"host": req.URL.Host}
 	for k, v := range req.Header {
 		lk := strings.ToLower(k)
-		if lk == "content-type" || lk == "if-none-match" || strings.HasPrefix(lk, "x-amz-") {
+		if lk == "content-type" || lk == "content-md5" || lk == "if-none-match" || strings.HasPrefix(lk, "x-amz-") {
 			headers[lk] = strings.TrimSpace(strings.Join(v, ","))
 		}
 	}
