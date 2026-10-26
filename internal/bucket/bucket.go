@@ -4,19 +4,16 @@ package bucket
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"sort"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/mouizahmed/hutch/internal/sigv4"
 )
 
 // Config locates the bucket. An empty Endpoint means AWS S3 in Region.
@@ -79,8 +76,8 @@ func (s *S3) url(key string, query url.Values) *url.URL {
 		u, _ = url.Parse(strings.TrimRight(s.cfg.Endpoint, "/"))
 		u.Path += "/" + s.cfg.Name + "/" + key
 	}
-	u.RawPath = escapePath(u.Path)
-	u.RawQuery = canonicalQuery(query)
+	u.RawPath = sigv4.EscapePath(u.Path)
+	u.RawQuery = sigv4.Query(query)
 	return u
 }
 
@@ -94,7 +91,7 @@ func (s *S3) do(ctx context.Context, method, key string, query url.Values, body 
 	for k, v := range header {
 		req.Header[k] = v
 	}
-	s.sign(req, u, body, time.Now().UTC())
+	sigv4.Sign(req, body, "s3", s.cfg.Region, sigv4.Credentials{AccessKey: s.cfg.AccessKey, SecretKey: s.cfg.SecretKey}, time.Now())
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -204,99 +201,4 @@ func (s *S3) List(ctx context.Context, prefix string) ([]Object, error) {
 		}
 		token = page.NextContinuationToken
 	}
-}
-
-// sign adds an AWS Signature Version 4 to req.
-func (s *S3) sign(req *http.Request, u *url.URL, body []byte, now time.Time) {
-	payload := sha256.Sum256(body)
-	payloadHex := hex.EncodeToString(payload[:])
-	amzDate := now.Format("20060102T150405Z")
-	date := now.Format("20060102")
-	req.Header.Set("X-Amz-Date", amzDate)
-	req.Header.Set("X-Amz-Content-Sha256", payloadHex)
-
-	signed := []string{"host", "x-amz-content-sha256", "x-amz-date"}
-	headers := map[string]string{"host": u.Host, "x-amz-content-sha256": payloadHex, "x-amz-date": amzDate}
-	if v := req.Header.Get("If-None-Match"); v != "" {
-		signed = append(signed, "if-none-match")
-		headers["if-none-match"] = v
-	}
-	sort.Strings(signed)
-	var canonHeaders strings.Builder
-	for _, h := range signed {
-		canonHeaders.WriteString(h + ":" + headers[h] + "\n")
-	}
-	canonical := strings.Join([]string{req.Method, u.EscapedPath(), u.RawQuery, canonHeaders.String(), strings.Join(signed, ";"), payloadHex}, "\n")
-	scope := date + "/" + s.cfg.Region + "/s3/aws4_request"
-	sum := sha256.Sum256([]byte(canonical))
-	toSign := "AWS4-HMAC-SHA256\n" + amzDate + "\n" + scope + "\n" + hex.EncodeToString(sum[:])
-
-	key := s.signingKey(date)
-	sig := hex.EncodeToString(hmacSHA256(key, toSign))
-	req.Header.Set("Authorization", fmt.Sprintf("AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s",
-		s.cfg.AccessKey, scope, strings.Join(signed, ";"), sig))
-}
-
-var keyCache sync.Map // date+secret → signing key
-
-func (s *S3) signingKey(date string) []byte {
-	ck := date + "/" + s.cfg.Region + "/" + s.cfg.SecretKey
-	if k, ok := keyCache.Load(ck); ok {
-		return k.([]byte)
-	}
-	k := hmacSHA256([]byte("AWS4"+s.cfg.SecretKey), date)
-	k = hmacSHA256(k, s.cfg.Region)
-	k = hmacSHA256(k, "s3")
-	k = hmacSHA256(k, "aws4_request")
-	keyCache.Store(ck, k)
-	return k
-}
-
-func hmacSHA256(key []byte, data string) []byte {
-	h := hmac.New(sha256.New, key)
-	h.Write([]byte(data))
-	return h.Sum(nil)
-}
-
-// escapePath encodes each path segment as SigV4 requires: everything but
-// unreserved characters.
-func escapePath(p string) string {
-	segs := strings.Split(p, "/")
-	for i, s := range segs {
-		segs[i] = escape(s)
-	}
-	return strings.Join(segs, "/")
-}
-
-func canonicalQuery(q url.Values) string {
-	if len(q) == 0 {
-		return ""
-	}
-	keys := make([]string, 0, len(q))
-	for k := range q {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var parts []string
-	for _, k := range keys {
-		vs := append([]string(nil), q[k]...)
-		sort.Strings(vs)
-		for _, v := range vs {
-			parts = append(parts, escape(k)+"="+escape(v))
-		}
-	}
-	return strings.Join(parts, "&")
-}
-
-func escape(s string) string {
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if 'A' <= c && c <= 'Z' || 'a' <= c && c <= 'z' || '0' <= c && c <= '9' || c == '-' || c == '_' || c == '.' || c == '~' {
-			b.WriteByte(c)
-		} else {
-			fmt.Fprintf(&b, "%%%02X", c)
-		}
-	}
-	return b.String()
 }
