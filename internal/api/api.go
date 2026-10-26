@@ -70,6 +70,7 @@ const (
 	CostsGet    = "costs.get"
 	BoxMove     = "box.move"
 	WorkerDrain = "worker.drain"
+	WorkerRm    = "worker.rm"
 )
 
 type MoveParams struct {

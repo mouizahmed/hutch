@@ -63,6 +63,7 @@ type Node struct {
 	State     NodeState         `json:"state"`
 	PrivateIP string            `json:"private_ip,omitempty"`
 	PublicIP  string            `json:"public_ip,omitempty"`
+	Image     string            `json:"image,omitempty"` // the worker image it was started from
 	Launched  time.Time         `json:"launched"`
 	Tags      map[string]string `json:"tags,omitempty"`
 }

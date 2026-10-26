@@ -335,6 +335,15 @@ func (w *Worker) Checkpoint(ctx context.Context, id string) (*Box, error) {
 	return b, nil
 }
 
+// syncGuest flushes the guest's page cache to its disk, so the disk alone is a
+// consistent copy: a cold boot from it (archive, a move to another snapshot class)
+// must not lose the last writes. A guest that doesn't answer is snapshotted anyway.
+func (w *Worker) syncGuest(ctx context.Context, b *Box) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	(&guestproto.Client{UDSPath: w.vsockPath(b.ID)}).Exec(ctx, guestproto.Exec{Argv: []string{"sync"}, User: "root"}, io.Discard, io.Discard)
+}
+
 func (w *Worker) running(b *Box) *vm {
 	return &vm{w: w, box: b, slot: slot(b.Slot), jail: w.jailRoot(b.ID), api: firecracker.NewClient(filepath.Join(w.jailRoot(b.ID), jailAPI))}
 }
@@ -347,6 +356,7 @@ func (w *Worker) running(b *Box) *vm {
 func (w *Worker) snapshotGen(ctx context.Context, b *Box, m *vm) (cleanup func(), err error) {
 	prev := b.Generation
 	gen := w.genDir(b.ID, prev+1)
+	w.syncGuest(ctx, b)
 	state, diff, err := m.snapshot(ctx)
 	fail := func(err error) (func(), error) {
 		os.RemoveAll(gen)

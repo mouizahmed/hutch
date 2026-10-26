@@ -474,6 +474,8 @@ func (s *Server) teardown(ctx context.Context, f *fleet, empty map[string]time.T
 		switch {
 		case n.Type != cfg.String("providers.aws.worker_type"):
 			s.destroyWorker(ctx, f, w, "an old worker type")
+		case f.cfg.AWS != nil && n.Image != "" && n.Image != f.cfg.AWS.ImageID:
+			s.destroyWorker(ctx, f, w, "an old worker image")
 		case !w.Stopped.IsZero() && now.Sub(w.Stopped) > cfg.Duration("providers.stopped_ttl"):
 			s.destroyWorker(ctx, f, w, "stopped longer than providers.stopped_ttl")
 		default:

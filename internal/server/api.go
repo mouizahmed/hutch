@@ -50,6 +50,7 @@ func (s *Server) apiMux() rpc.Mux {
 		api.CostsGet:         s.costsReport,
 		api.BoxMove:          s.boxMove,
 		api.WorkerDrain:      s.workerDrain,
+		api.WorkerRm:         s.workerRm,
 		api.WorkerList:       s.workerList,
 		api.TokenCreate:      s.tokenCreate,
 	}

@@ -135,3 +135,45 @@ func (s *Server) workerDrain(ctx context.Context, params json.RawMessage, out *r
 	}
 	return nil, nil
 }
+
+// workerRm forgets an offline worker, destroying its instance if it is elastic.
+// Its boxes that are in the bucket restore on another worker when used; a worker
+// holding any that aren't is kept.
+func (s *Server) workerRm(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+	var p api.IDParams
+	if err := rpc.Decode(params, &p); err != nil {
+		return nil, err
+	}
+	if _, err := s.worker(p.ID); err == nil {
+		return nil, fmt.Errorf("%s is online; drain it and stop hutchd first", p.ID)
+	}
+	ws, err := s.store.workers()
+	if err != nil {
+		return nil, err
+	}
+	for _, w := range ws {
+		if w.ID != p.ID || w.Gone {
+			continue
+		}
+		boxes, err := s.store.boxes()
+		if err != nil {
+			return nil, err
+		}
+		for _, b := range boxes {
+			if b.Worker != w.ID {
+				continue
+			}
+			if _, err := s.storeOf(b); err != nil {
+				return nil, fmt.Errorf("%s holds %s, which isn't in the bucket; remove it first", w.ID, b.ID)
+			}
+		}
+		if f := s.fleet.Load(); f != nil && w.Node != "" {
+			if err := f.p.DestroyNode(ctx, w.Node); err != nil {
+				return nil, err
+			}
+		}
+		s.store.event("", "worker removed", w.Name)
+		return nil, s.store.setWorkerGone(w.ID)
+	}
+	return nil, fmt.Errorf("no worker %s", p.ID)
+}

@@ -161,6 +161,7 @@ type instance struct {
 	State     string    `xml:"instanceState>name"`
 	PrivateIP string    `xml:"privateIpAddress"`
 	PublicIP  string    `xml:"ipAddress"`
+	Image     string    `xml:"imageId"`
 	Launch    time.Time `xml:"launchTime"`
 	Tags      []struct {
 		Key   string `xml:"key"`
@@ -169,7 +170,7 @@ type instance struct {
 }
 
 func (i instance) node() provider.Node {
-	n := provider.Node{ID: i.ID, Type: i.Type, State: provider.NodeState(i.State), PrivateIP: i.PrivateIP, PublicIP: i.PublicIP, Launched: i.Launch, Tags: map[string]string{}}
+	n := provider.Node{ID: i.ID, Type: i.Type, State: provider.NodeState(i.State), PrivateIP: i.PrivateIP, PublicIP: i.PublicIP, Image: i.Image, Launched: i.Launch, Tags: map[string]string{}}
 	for _, t := range i.Tags {
 		n.Tags[t.Key] = t.Value
 		if t.Key == "Name" {

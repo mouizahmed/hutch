@@ -248,7 +248,20 @@ address. The credentials need EC2 access; they stay on the server.`,
 		},
 	}
 	drain.Flags().BoolVar(&undo, "undo", false, "let the worker take new boxes again")
-	workers.AddCommand(drain)
+	rmWorker := &cobra.Command{
+		Use:   "rm <worker>",
+		Short: "Forget an offline worker (terminating it, if Hutch started it)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sess, err := connect()
+			if err != nil {
+				return err
+			}
+			defer sess.Close()
+			return rpc.Call(cmd.Context(), sess, api.WorkerRm, api.IDParams{ID: args[0]}, nil)
+		},
+	}
+	workers.AddCommand(drain, rmWorker)
 	return []*cobra.Command{serverCmd, apiCmd, workers, providerCmd}
 }
 
