@@ -1,0 +1,230 @@
+package server
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/mouizahmed/hutch/internal/api"
+	"github.com/mouizahmed/hutch/internal/rpc"
+)
+
+// need is what a box needs from a worker.
+type need struct {
+	memMiB, vcpus int
+	// class is the snapshot class its memory was taken on; with strict (a fork) only
+	// that class will do, otherwise another class means a cold boot.
+	class  string
+	strict bool
+	// version is the template version box it forks from: a worker that has it
+	// starts the box without downloading it.
+	version string
+}
+
+func (n need) String() string { return fmt.Sprintf("%d vCPU, %s", n.vcpus, mib(n.memMiB)) }
+
+func mib(m int) string {
+	if m%1024 == 0 {
+		return fmt.Sprintf("%d GB", m/1024)
+	}
+	return fmt.Sprintf("%d MB", m)
+}
+
+type candidate struct {
+	id         string
+	freeMiB    int // memory not reserved by awake boxes, after the host's margin
+	cpus       int
+	diskOK     bool // free disk above worker.disk_reserve
+	class      string
+	cloud      bool
+	hasVersion bool
+}
+
+// why says why a box doesn't fit a worker, or "" when it does.
+func (c candidate) why(n need) string {
+	switch {
+	case c.freeMiB < n.memMiB:
+		return fmt.Sprintf("%s free", mib(max(c.freeMiB, 0)))
+	case c.cpus < n.vcpus:
+		return fmt.Sprintf("%d vCPUs", c.cpus)
+	case !c.diskOK:
+		return "disk below worker.disk_reserve"
+	case n.strict && n.class != "" && c.class != n.class:
+		return "snapshot class " + c.class
+	}
+	return ""
+}
+
+// choose picks a worker for a box: of those it fits, self-hosted over cloud, its
+// snapshot class over another, one that has its template, then the fullest, so
+// lightly used workers empty out and can be stopped. It returns -1 if none fits.
+func choose(cs []candidate, n need) int {
+	best := -1
+	for i, c := range cs {
+		if c.why(n) == "" && (best < 0 || better(c, cs[best], n)) {
+			best = i
+		}
+	}
+	return best
+}
+
+func better(a, b candidate, n need) bool {
+	if a.cloud != b.cloud {
+		return !a.cloud
+	}
+	if am, bm := a.class == n.class, b.class == n.class; am != bm {
+		return am
+	}
+	if a.hasVersion != b.hasVersion {
+		return a.hasVersion
+	}
+	if a.freeMiB != b.freeMiB {
+		return a.freeMiB < b.freeMiB
+	}
+	return a.id < b.id
+}
+
+// place picks a worker for a box (requested, if set) and holds the box's memory
+// there until release, so boxes placed at the same time don't all land on the one
+// worker that had room for one of them.
+func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
+	cfg, err := s.settings()
+	if err != nil {
+		return nil, nil, err
+	}
+	margin, reserve := cfg.Percent("worker.memory_margin")/100, cfg.Percent("worker.disk_reserve")/100
+	boxes, err := s.store.boxes()
+	if err != nil {
+		return nil, nil, err
+	}
+	reserved := map[string]int{}
+	for _, b := range boxes {
+		if b.State == "running" {
+			reserved[b.Worker] += b.MemMiB
+		}
+	}
+	copies := map[string]bool{}
+	if n.version != "" {
+		ws, err := s.store.versionWorkers(n.version)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, w := range ws {
+			copies[w] = true
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var cs []candidate
+	var conns []*workerConn
+	for id, w := range s.workers {
+		if requested != "" && id != requested {
+			continue
+		}
+		d := w.info.Disk
+		cs = append(cs, candidate{
+			id:         id,
+			freeMiB:    int(float64(w.info.MemMiB)*(1-margin)) - reserved[id] - s.pending[id],
+			cpus:       w.info.CPUs,
+			diskOK:     d.Total == 0 || float64(d.Free) >= reserve*float64(d.Total),
+			class:      w.info.Class,
+			hasVersion: copies[id],
+		})
+		conns = append(conns, w)
+	}
+	if requested != "" && len(cs) == 0 {
+		return nil, nil, fmt.Errorf("worker %s is offline", requested)
+	}
+	i := choose(cs, n)
+	if i < 0 {
+		if len(cs) == 0 {
+			return nil, nil, fmt.Errorf("no workers online")
+		}
+		var reasons []string
+		for i, c := range cs {
+			reasons = append(reasons, fmt.Sprintf("%s: %s", conns[i].info.Name, c.why(n)))
+		}
+		sort.Strings(reasons)
+		return nil, nil, fmt.Errorf("no worker has room for a %s box (%s)", n, strings.Join(reasons, "; "))
+	}
+	w := conns[i]
+	s.pending[w.id] += n.memMiB
+	return w, func() {
+		s.mu.Lock()
+		s.pending[w.id] -= n.memMiB
+		s.mu.Unlock()
+	}, nil
+}
+
+// checkFits refuses a box size no enrolled worker could ever hold, naming the
+// largest, so it fails at once instead of waiting for room that never comes.
+func (s *Server) checkFits(n need) error {
+	cfg, err := s.settings()
+	if err != nil {
+		return err
+	}
+	margin := cfg.Percent("worker.memory_margin") / 100
+	ws, err := s.store.workers()
+	if err != nil {
+		return err
+	}
+	var largest api.Worker
+	for _, w := range ws {
+		if int(float64(w.MemMiB)*(1-margin)) >= n.memMiB && w.CPUs >= n.vcpus {
+			return nil
+		}
+		if w.MemMiB > largest.MemMiB {
+			largest = w
+		}
+	}
+	if largest.MemMiB == 0 {
+		return nil // capacity unknown until a worker connects
+	}
+	return fmt.Errorf("a %s box fits no worker: the largest, %s, has %d vCPUs and %s for boxes (after worker.memory_margin); choose a smaller size",
+		n, largest.Name, largest.CPUs, mib(int(float64(largest.MemMiB)*(1-margin))))
+}
+
+// versionWorker returns a worker with a copy of a template version that can take
+// a fork of it, copying the version there from the bucket when the chosen worker
+// doesn't have it. release frees the fork's reservation.
+func (s *Server) versionWorker(ctx context.Context, v api.Template) (*workerConn, func(), error) {
+	src, err := s.store.box(v.Box)
+	if err != nil {
+		return nil, nil, err
+	}
+	n := need{memMiB: v.MemMiB, vcpus: v.VCPUs, class: src.Class, strict: true, version: v.Box}
+	if err := s.checkFits(n); err != nil {
+		return nil, nil, err
+	}
+	w, release, err := s.place(n, "")
+	if err != nil {
+		return nil, nil, err
+	}
+	have, err := s.store.versionWorkers(v.Box)
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
+	for _, id := range have {
+		if id == w.id {
+			return w, release, nil
+		}
+	}
+	store, err := s.storeOf(src)
+	if err == nil {
+		var gen int
+		if gen, err = s.latestGeneration(ctx, store); err == nil {
+			s.hostProject(ctx, w, v.Project)
+			err = rpc.Call(ctx, w.sess, api.BoxRestore, api.RestoreParams{ID: v.Box, Store: *store, Generation: gen}, nil)
+		}
+	}
+	if err != nil {
+		release()
+		return nil, nil, fmt.Errorf("copy template v%d to %s: %w", v.Version, w.info.Name, err)
+	}
+	s.store.addVersionCopy(v.Box, w.id)
+	s.store.event(v.Box, "copied", "to "+w.id)
+	return w, release, nil
+}

@@ -85,10 +85,21 @@ func (s *Server) workerList(ctx context.Context, _ json.RawMessage, _ *rpc.Out) 
 	if err != nil {
 		return nil, err
 	}
+	boxes, err := s.store.boxes()
+	if err != nil {
+		return nil, err
+	}
+	reserved := map[string]int{}
+	for _, b := range boxes {
+		if b.State == "running" {
+			reserved[b.Worker] += b.MemMiB
+		}
+	}
 	s.mu.Lock()
 	for i := range ws {
+		ws[i].ReservedMiB = reserved[ws[i].ID]
 		if w := s.workers[ws[i].ID]; w != nil {
-			ws[i].Online, ws[i].CPUs, ws[i].MemMiB = true, w.info.CPUs, w.info.MemMiB
+			ws[i].Online, ws[i].Disk = true, w.info.Disk
 		}
 	}
 	s.mu.Unlock()
@@ -122,10 +133,15 @@ func (s *Server) boxBoot(ctx context.Context, params json.RawMessage, _ *rpc.Out
 	if _, err := s.store.box(p.ID); err == nil {
 		return nil, fmt.Errorf("box %q already exists", p.ID)
 	}
-	w, err := s.placement(p.Worker)
+	n := need{memMiB: p.MemMiB, vcpus: p.VCPUs}
+	if err := s.checkFits(n); err != nil {
+		return nil, err
+	}
+	w, release, err := s.place(n, p.Worker)
 	if err != nil {
 		return nil, err
 	}
+	defer release()
 	b, err := s.callForBox(ctx, w, api.BoxBoot, p)
 	if err != nil {
 		// The worker keeps a box that failed to boot so its console can be read.

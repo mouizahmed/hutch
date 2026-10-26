@@ -166,10 +166,15 @@ func (s *Server) build(ctx context.Context, proj api.Project, p api.TemplatePara
 // repository cloned at /workspace.
 func (s *Server) bootTemplate(ctx context.Context, proj api.Project, p api.TemplateParams, stdout, stderr io.Writer) (api.Box, *workerConn, error) {
 	id := templateBoxID(proj)
-	w, err := s.placement("")
+	n := need{memMiB: p.MemMiB, vcpus: p.VCPUs}
+	if err := s.checkFits(n); err != nil {
+		return api.Box{}, nil, err
+	}
+	w, release, err := s.place(n, "")
 	if err != nil {
 		return api.Box{}, nil, err
 	}
+	defer release()
 	step(stdout, "boot %s (%d vCPU, %d MiB)", id, p.VCPUs, p.MemMiB)
 	b, err := s.callForBox(ctx, w, api.BoxBoot, api.BootParams{ID: id, Image: baseImage, VCPUs: p.VCPUs, MemMiB: p.MemMiB, DiskBytes: p.DiskBytes, Idle: p.Idle, Allow: p.Allow})
 	if err != nil {
@@ -325,14 +330,11 @@ func (s *Server) templateBox(ctx context.Context, params json.RawMessage, out *r
 		return b, err
 	}
 	v := versions[0]
-	src, err := s.store.box(v.Box)
+	w, release, err := s.versionWorker(ctx, v)
 	if err != nil {
 		return nil, err
 	}
-	w, _, err := s.boxWorker(ctx, src)
-	if err != nil {
-		return nil, err
-	}
+	defer release()
 	b, err := s.callForBox(ctx, w, api.BoxFork, api.ForkParams{Source: v.Box, ID: id, Idle: p.Idle, Allow: p.Allow})
 	if err != nil {
 		return nil, err
@@ -358,14 +360,11 @@ func (s *Server) forkProject(ctx context.Context, p api.ForkParams, stdout, stde
 		return api.Box{}, errors.New("this project has no template yet: hutch template snapshot (or hutch new --from base)")
 	}
 	v := versions[0]
-	src, err := s.store.box(v.Box)
+	w, release, err := s.versionWorker(ctx, v)
 	if err != nil {
 		return api.Box{}, err
 	}
-	w, _, err := s.boxWorker(ctx, src)
-	if err != nil {
-		return api.Box{}, err
-	}
+	defer release()
 	s.hostProject(ctx, w, p.Project)
 	p.Source, p.Store = v.Box, s.boxStore(p.Project, p.ID)
 	b, err := s.callForBox(ctx, w, api.BoxFork, p)
@@ -440,6 +439,17 @@ func (s *Server) removeBox(ctx context.Context, id string) error {
 		return err
 	}
 	store, _ := s.storeOf(b)
+	if b.Kind == api.BoxVersion {
+		holders, _ := s.store.versionWorkers(id)
+		for _, wid := range holders {
+			if w, err := s.worker(wid); err == nil && wid != b.Worker {
+				if err := rpc.Call(ctx, w.sess, api.BoxRm, api.IDParams{ID: id}, nil); err != nil {
+					return err
+				}
+				s.store.deleteVersionCopy(id, wid)
+			}
+		}
+	}
 	if w, err := s.worker(b.Worker); err == nil {
 		if err := rpc.Call(ctx, w.sess, api.BoxRm, api.IDParams{ID: id}, nil); err != nil {
 			return err

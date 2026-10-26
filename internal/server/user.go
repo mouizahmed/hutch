@@ -257,10 +257,11 @@ func (s *Server) userLoginBox(ctx context.Context, params json.RawMessage, out *
 		return nil, err
 	}
 	stdout, stderr := out.Writers()
-	w, err := s.placement("")
+	w, release, err := s.place(need{memMiB: 4096, vcpus: 2}, "")
 	if err != nil {
 		return nil, err
 	}
+	defer release()
 	suffix := make([]byte, 3)
 	rand.Read(suffix)
 	id := "login-" + hex.EncodeToString(suffix)

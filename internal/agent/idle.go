@@ -107,7 +107,8 @@ func (m *monitor) check(ctx context.Context, server *atomic.Pointer[yamux.Sessio
 			delete(m.seen, id)
 		}
 	}
-	if sess := server.Load(); sess != nil && len(report.Boxes) > 0 {
+	report.Disk = diskUsage(m.w.Root)
+	if sess := server.Load(); sess != nil {
 		rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		if err := rpc.Call(rctx, sess, api.WorkerReport, report, nil); err != nil {
 			log.Printf("idle: report: %v", err)

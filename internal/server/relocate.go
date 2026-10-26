@@ -63,10 +63,11 @@ func (s *Server) boxWorker(ctx context.Context, b api.Box) (*workerConn, api.Box
 	if err != nil {
 		return nil, b, fmt.Errorf("%s can't move from lost worker %s: %w", b.ID, b.Worker, err)
 	}
-	w, err := s.placement("")
+	w, release, err := s.place(need{memMiB: b.MemMiB, vcpus: b.VCPUs, class: b.Class}, "")
 	if err != nil {
 		return nil, b, err
 	}
+	defer release()
 	s.hostProject(ctx, w, store.Project)
 	nb, err := s.callForBox(ctx, w, api.BoxRestore, api.RestoreParams{ID: b.ID, Store: *store, Generation: gen})
 	if err != nil {
@@ -99,11 +100,15 @@ func (s *Server) storeOf(b api.Box) (*api.Store, error) {
 }
 
 // dropStale removes from a reconnecting worker the boxes that moved to another
-// worker, or were removed, while it was gone, and returns the rest of its boxes.
-func (s *Server) dropStale(ctx context.Context, w *workerConn, boxes []api.Box) []api.Box {
-	var keep []api.Box
+// worker, or were removed, while it was gone. It returns the rest of its boxes, and
+// separately the template versions it holds copies of.
+func (s *Server) dropStale(ctx context.Context, w *workerConn, boxes []api.Box) (keep []api.Box, copies []string) {
 	for _, b := range boxes {
 		known, err := s.store.box(b.ID)
+		if err == nil && known.Worker != w.id && known.Kind == api.BoxVersion {
+			copies = append(copies, b.ID)
+			continue
+		}
 		if err != nil && s.store.removed(b.ID) {
 			known.Worker = "nowhere: it was removed"
 		} else if err != nil || known.Worker == w.id {
@@ -117,7 +122,7 @@ func (s *Server) dropStale(ctx context.Context, w *workerConn, boxes []api.Box) 
 		s.store.event(b.ID, "stale", fmt.Sprintf("removed the old copy on %s; the box is on %s", w.id, known.Worker))
 		log.Printf("worker %s: removed stale copy of %s (now on %s)", w.id, b.ID, known.Worker)
 	}
-	return keep
+	return keep, copies
 }
 
 // archiveLoop archives boxes asleep for longer than archive_after: their memory is

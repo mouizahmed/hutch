@@ -322,6 +322,7 @@ const (
 // Report is sent by hutchd after each activity check and after it puts a box to sleep.
 type Report struct {
 	Boxes []BoxReport `json:"boxes"`
+	Disk  Disk        `json:"disk"`
 }
 
 type BoxReport struct {
@@ -364,7 +365,17 @@ type Worker struct {
 	LastSeen time.Time `json:"last_seen"`
 	CPUs     int       `json:"cpus,omitempty"`
 	MemMiB   int       `json:"mem_mib,omitempty"`
+	Arch     string    `json:"arch,omitempty"`
+	Disk     Disk      `json:"disk"`
 	Boxes    []Box     `json:"boxes,omitempty"`
+	// ReservedMiB is the memory its awake boxes reserve; set by the server.
+	ReservedMiB int `json:"reserved_mib,omitempty"`
+}
+
+// Disk is a worker's data volume, in bytes.
+type Disk struct {
+	Total int64 `json:"total,omitempty"`
+	Free  int64 `json:"free,omitempty"`
 }
 
 type BootParams struct {

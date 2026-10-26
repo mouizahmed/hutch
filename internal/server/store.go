@@ -91,6 +91,12 @@ CREATE TABLE IF NOT EXISTS box_git (
 	branch TEXT NOT NULL,
 	base   TEXT NOT NULL
 );
+-- Workers holding a template version besides the one in boxes (boxes.worker_id).
+CREATE TABLE IF NOT EXISTS version_copies (
+	box_id    TEXT NOT NULL,
+	worker_id TEXT NOT NULL,
+	PRIMARY KEY (box_id, worker_id)
+);
 -- Files from a project's .hutch/uploads.txt, encrypted with the server's secrets key.
 CREATE TABLE IF NOT EXISTS project_secrets (
 	project_id TEXT PRIMARY KEY REFERENCES projects(id),
@@ -131,6 +137,10 @@ var migrations = []string{
 	`ALTER TABLE projects ADD COLUMN confirmed TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE box_meta ADD COLUMN version INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE boxes ADD COLUMN state_since TIMESTAMP`,
+	`ALTER TABLE workers ADD COLUMN cpus INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE workers ADD COLUMN mem_mib INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE workers ADD COLUMN arch TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE workers ADD COLUMN disk_bytes INTEGER NOT NULL DEFAULT 0`,
 }
 
 func openStore(path string, userKey durable.Key) (*store, error) {
@@ -187,13 +197,15 @@ func (s *store) addWorker(id, name string) error {
 	return err
 }
 
-func (s *store) workerSeen(id, class, version string) error {
-	_, err := s.db.Exec(`UPDATE workers SET class = ?, version = ?, last_seen = ? WHERE id = ?`, class, version, time.Now().UTC(), id)
+// workerSeen records a worker's capacity as of its connection, and when it was last seen.
+func (s *store) workerSeen(id string, w api.Worker) error {
+	_, err := s.db.Exec(`UPDATE workers SET class = ?, version = ?, cpus = ?, mem_mib = ?, arch = ?, disk_bytes = ?, last_seen = ? WHERE id = ?`,
+		w.Class, w.Version, w.CPUs, w.MemMiB, w.Arch, w.Disk.Total, time.Now().UTC(), id)
 	return err
 }
 
 func (s *store) workers() ([]api.Worker, error) {
-	rows, err := s.db.Query(`SELECT id, name, class, version, last_seen FROM workers ORDER BY created`)
+	rows, err := s.db.Query(`SELECT id, name, class, version, last_seen, cpus, mem_mib, arch, disk_bytes FROM workers ORDER BY created`)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +213,7 @@ func (s *store) workers() ([]api.Worker, error) {
 	var ws []api.Worker
 	for rows.Next() {
 		var w api.Worker
-		if err := rows.Scan(&w.ID, &w.Name, &w.Class, &w.Version, &w.LastSeen); err != nil {
+		if err := rows.Scan(&w.ID, &w.Name, &w.Class, &w.Version, &w.LastSeen, &w.CPUs, &w.MemMiB, &w.Arch, &w.Disk.Total); err != nil {
 			return nil, err
 		}
 		ws = append(ws, w)
@@ -227,6 +239,34 @@ func (s *store) removed(id string) bool {
 	return kind == api.BoxRm
 }
 
+// versionWorkers lists the workers holding a template version.
+func (s *store) versionWorkers(box string) ([]string, error) {
+	rows, err := s.db.Query(`SELECT worker_id FROM boxes WHERE id = ? UNION SELECT worker_id FROM version_copies WHERE box_id = ?`, box, box)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ws []string
+	for rows.Next() {
+		var w string
+		if err := rows.Scan(&w); err != nil {
+			return nil, err
+		}
+		ws = append(ws, w)
+	}
+	return ws, rows.Err()
+}
+
+func (s *store) addVersionCopy(box, worker string) error {
+	_, err := s.db.Exec(`INSERT OR IGNORE INTO version_copies (box_id, worker_id) VALUES (?, ?)`, box, worker)
+	return err
+}
+
+func (s *store) deleteVersionCopy(box, worker string) error {
+	_, err := s.db.Exec(`DELETE FROM version_copies WHERE box_id = ? AND worker_id = ?`, box, worker)
+	return err
+}
+
 // statesSince returns when each box entered its current state.
 func (s *store) statesSince() (map[string]time.Time, error) {
 	rows, err := s.db.Query(`SELECT id, COALESCE(state_since, updated) FROM boxes`)
@@ -247,6 +287,9 @@ func (s *store) statesSince() (map[string]time.Time, error) {
 }
 
 func (s *store) deleteBox(id string) error {
+	if _, err := s.db.Exec(`DELETE FROM version_copies WHERE box_id = ?`, id); err != nil {
+		return err
+	}
 	_, err := s.db.Exec(`DELETE FROM boxes WHERE id = ?`, id)
 	return err
 }
@@ -282,8 +325,9 @@ func (s *store) boxes() ([]api.Box, error) {
 	return bs, rows.Err()
 }
 
-// syncWorkerBoxes replaces what the server knows about a worker's boxes with its report.
-func (s *store) syncWorkerBoxes(workerID string, boxes []api.Box) error {
+// syncWorkerBoxes replaces what the server knows about a worker's boxes and
+// template version copies with its report.
+func (s *store) syncWorkerBoxes(workerID string, boxes []api.Box, copies []string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -308,6 +352,14 @@ func (s *store) syncWorkerBoxes(workerID string, boxes []api.Box) error {
 	rows.Close()
 	for _, id := range gone {
 		if _, err := tx.Exec(`DELETE FROM boxes WHERE id = ?`, id); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM version_copies WHERE worker_id = ?`, workerID); err != nil {
+		return err
+	}
+	for _, id := range copies {
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO version_copies (box_id, worker_id) VALUES (?, ?)`, id, workerID); err != nil {
 			return err
 		}
 	}

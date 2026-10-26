@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -43,6 +42,8 @@ type Server struct {
 	backupMu sync.Mutex
 	gcMu     sync.Mutex
 	moving   sync.Map // box ID → *sync.Mutex, held while a box moves off a lost worker
+	// pending is memory held on each worker for boxes being placed; guarded by mu.
+	pending map[string]int
 
 	mu      sync.Mutex
 	workers map[string]*workerConn
@@ -82,7 +83,7 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, store: st, ca: ca, master: master, workers: map[string]*workerConn{}, threadStates: map[string]map[int]api.ThreadState{},
+	s := &Server{cfg: cfg, store: st, ca: ca, master: master, workers: map[string]*workerConn{}, pending: map[string]int{}, threadStates: map[string]map[int]api.ThreadState{},
 		fileHashes: map[string]map[string]string{}, syncing: map[string]bool{}, pushErrors: map[string]string{}}
 	b, bcfg, err := loadBucket(cfg.Dir)
 	if err != nil {
@@ -215,14 +216,15 @@ func (s *Server) handleWorkerConn(ctx context.Context, conn *tls.Conn) {
 		return
 	}
 	info.ID, info.Online = id, true
-	if err := s.store.workerSeen(id, info.Class, info.Version); err != nil {
+	if err := s.store.workerSeen(id, info); err != nil {
 		log.Printf("worker %s: %v", id, err)
 		return
 	}
 	go rpc.Serve(ctx, sess, s.workerMux(id), nil)
 	w := &workerConn{id: id, sess: sess, info: info, projects: map[string]bool{}}
-	info.Boxes = s.dropStale(ctx, w, info.Boxes)
-	if err := s.store.syncWorkerBoxes(id, info.Boxes); err != nil {
+	var copies []string
+	info.Boxes, copies = s.dropStale(ctx, w, info.Boxes)
+	if err := s.store.syncWorkerBoxes(id, info.Boxes, copies); err != nil {
 		log.Printf("worker %s: sync boxes: %v", id, err)
 	}
 	for _, b := range info.Boxes {
@@ -246,7 +248,7 @@ func (s *Server) handleWorkerConn(ctx context.Context, conn *tls.Conn) {
 		delete(s.workers, id)
 	}
 	s.mu.Unlock()
-	s.store.workerSeen(id, info.Class, info.Version)
+	s.store.workerSeen(id, info)
 	log.Printf("worker %s disconnected", id)
 }
 
@@ -305,20 +307,6 @@ func (s *Server) worker(id string) (*workerConn, error) {
 	return w, nil
 }
 
-// placement picks the worker for a new box. Phase 1: the requested worker, or the
-// only connected one.
-func (s *Server) placement(requested string) (*workerConn, error) {
-	if requested != "" {
-		return s.worker(requested)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, w := range s.workers {
-		return w, nil
-	}
-	return nil, errors.New("no workers online")
-}
-
 // workerMux serves calls a worker makes to the server.
 func (s *Server) workerMux(workerID string) rpc.Mux {
 	return rpc.Mux{
@@ -327,6 +315,11 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 			if err := rpc.Decode(params, &r); err != nil {
 				return nil, err
 			}
+			s.mu.Lock()
+			if w := s.workers[workerID]; w != nil && r.Disk.Total > 0 {
+				w.info.Disk = r.Disk
+			}
+			s.mu.Unlock()
 			for _, br := range r.Boxes {
 				prev, err := s.store.box(br.Box.ID)
 				if err == nil && prev.Worker != workerID {

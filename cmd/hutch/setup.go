@@ -151,13 +151,16 @@ workers reconnect once the server's address points here.`,
 				return err
 			}
 			tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(tw, "WORKER\tNAME\tSTATE\tCLASS\tLAST SEEN")
+			fmt.Fprintln(tw, "WORKER\tNAME\tSTATE\tCLASS\tMEMORY IN USE\tDISK FREE\tLAST SEEN")
 			for _, w := range ws {
-				state := "offline"
+				state, disk := "offline", "-"
 				if w.Online {
 					state = "online"
+					if w.Disk.Total > 0 {
+						disk = fmt.Sprintf("%d%% of %d GB", 100*w.Disk.Free/w.Disk.Total, w.Disk.Total>>30)
+					}
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", w.ID, w.Name, state, w.Class, ago(w.LastSeen))
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s of %s\t%s\t%s\n", w.ID, w.Name, state, w.Class, mib(w.ReservedMiB), mib(w.MemMiB), disk, ago(w.LastSeen))
 			}
 			return tw.Flush()
 		},

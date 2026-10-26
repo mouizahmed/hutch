@@ -102,6 +102,8 @@ var Keys = []*Key{
 		Doc: "template versions kept per project, besides those boxes were forked from"},
 	{Path: "worker.memory_margin", Kind: Percent, Default: "10%", Min: "0%", Max: "50%", Layers: server,
 		Doc: "RAM held back for the host on every worker"},
+	{Path: "worker.disk_reserve", Kind: Percent, Default: "10%", Min: "0%", Max: "50%", Layers: server,
+		Doc: "free disk below which a worker takes no new boxes"},
 	{Path: "idle.check_interval", Kind: Duration, Default: "15s", Min: "1s", Max: "5m", Layers: server,
 		Doc: "how often workers check boxes for activity"},
 	{Path: "threads.working_window", Kind: Duration, Default: "15s", Min: "1s", Max: "10m", Layers: server,

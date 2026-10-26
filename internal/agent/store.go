@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/mouizahmed/hutch/internal/api"
@@ -68,11 +67,7 @@ func (u *uploader) configure(p *api.WorkerSettingsParams) {
 }
 
 func cacheLimit(root string, percent float64) int64 {
-	var st syscall.Statfs_t
-	if syscall.Statfs(root, &st) != nil {
-		return 0
-	}
-	return int64(float64(st.Blocks) * float64(st.Bsize) * percent / 100)
+	return int64(float64(diskUsage(root).Total) * percent / 100)
 }
 
 // key returns the store and a project's key, or false without them.

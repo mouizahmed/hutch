@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -240,7 +241,8 @@ func handlers(w *worker.Worker, name string, m *monitor, u *uploader) rpc.Mux {
 			if err != nil {
 				return nil, err
 			}
-			info := api.Worker{Name: name, Class: w.Class(), Version: version.String(), CPUs: runtime.NumCPU(), MemMiB: hostMemMiB()}
+			info := api.Worker{Name: name, Class: w.Class(), Version: version.String(), CPUs: runtime.NumCPU(), MemMiB: hostMemMiB(),
+				Arch: runtime.GOARCH, Disk: diskUsage(w.Root)}
 			for _, b := range boxes {
 				info.Boxes = append(info.Boxes, toAPI(w, b))
 			}
@@ -332,6 +334,14 @@ func handlers(w *worker.Worker, name string, m *monitor, u *uploader) rpc.Mux {
 			return rpc.ExitCode(code), nil
 		},
 	}
+}
+
+func diskUsage(root string) api.Disk {
+	var st syscall.Statfs_t
+	if syscall.Statfs(root, &st) != nil {
+		return api.Disk{}
+	}
+	return api.Disk{Total: int64(st.Blocks) * st.Bsize, Free: int64(st.Bavail) * st.Bsize}
 }
 
 func hostMemMiB() int {
