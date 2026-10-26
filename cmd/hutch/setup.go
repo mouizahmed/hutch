@@ -64,11 +64,24 @@ func setupCommands() []*cobra.Command {
 			return nil
 		},
 	}
+	var serverType, serverBinary string
 	initCmd := &cobra.Command{
-		Use:   "init",
-		Short: "Connect the server to its bucket and set the recovery passphrase",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		Use:   "init [aws]",
+		Short: "Create a server on AWS, or connect a running server to its bucket",
+		Long: `hutch server init aws creates a Hutch server in your AWS account: the server
+instance, a bucket, a security group, and an IAM role, then sets the recovery
+passphrase and connects AWS for workers. Run it on your own machine.
+
+hutch server init, for a server you run yourself, connects it to its bucket and
+sets the recovery passphrase.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				if args[0] != "aws" {
+					return fmt.Errorf("unknown provider %q (known: aws)", args[0])
+				}
+				return awsInit(cmd.Context(), serverType, serverBinary)
+			}
 			cfg, pass, err := bucketForm(true)
 			if err != nil {
 				return err
@@ -86,6 +99,9 @@ func setupCommands() []*cobra.Command {
 			return nil
 		},
 	}
+
+	initCmd.Flags().StringVar(&serverType, "server-type", "t4g.micro", "instance type of the server (aws)")
+	initCmd.Flags().StringVar(&serverBinary, "server-binary", "", "the hutch program for the server's Linux (default: linux-<arch>/hutch next to this one)")
 
 	restore := &cobra.Command{
 		Use:   "restore",

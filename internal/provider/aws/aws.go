@@ -160,6 +160,7 @@ type instance struct {
 	Type      string    `xml:"instanceType"`
 	State     string    `xml:"instanceState>name"`
 	PrivateIP string    `xml:"privateIpAddress"`
+	PublicIP  string    `xml:"ipAddress"`
 	Launch    time.Time `xml:"launchTime"`
 	Tags      []struct {
 		Key   string `xml:"key"`
@@ -168,7 +169,7 @@ type instance struct {
 }
 
 func (i instance) node() provider.Node {
-	n := provider.Node{ID: i.ID, Type: i.Type, State: provider.NodeState(i.State), PrivateIP: i.PrivateIP, Launched: i.Launch, Tags: map[string]string{}}
+	n := provider.Node{ID: i.ID, Type: i.Type, State: provider.NodeState(i.State), PrivateIP: i.PrivateIP, PublicIP: i.PublicIP, Launched: i.Launch, Tags: map[string]string{}}
 	for _, t := range i.Tags {
 		n.Tags[t.Key] = t.Value
 		if t.Key == "Name" {
@@ -193,7 +194,7 @@ func tagParams(p map[string]string, n int, resource string, tags map[string]stri
 }
 
 func (a *AWS) ProvisionNode(ctx context.Context, spec provider.NodeSpec) (*provider.Node, error) {
-	tags := map[string]string{provider.TagFleet: a.cfg.Fleet, "Name": spec.Name}
+	tags := map[string]string{provider.TagFleet: a.cfg.Fleet, provider.TagRole: "worker", "Name": spec.Name}
 	for k, v := range spec.Tags {
 		tags[k] = v
 	}
@@ -544,4 +545,10 @@ func (a *AWS) AllowWithinGroup(ctx context.Context, group, port string) error {
 		return nil
 	}
 	return err
+}
+
+// Price returns an instance type's on-demand price per hour in the region.
+func (a *AWS) Price(ctx context.Context, instanceType string) (float64, error) {
+	return a.price(ctx, "AmazonEC2", map[string]string{"instanceType": instanceType, "operatingSystem": "Linux",
+		"tenancy": "Shared", "preInstalledSw": "NA", "capacitystatus": "Used"})
 }

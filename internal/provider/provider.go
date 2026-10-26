@@ -62,6 +62,7 @@ type Node struct {
 	Type      string            `json:"type"`
 	State     NodeState         `json:"state"`
 	PrivateIP string            `json:"private_ip,omitempty"`
+	PublicIP  string            `json:"public_ip,omitempty"`
 	Launched  time.Time         `json:"launched"`
 	Tags      map[string]string `json:"tags,omitempty"`
 }
@@ -90,4 +91,9 @@ const (
 	TagFleet  = "hutch:fleet"
 	TagWorker = "hutch:worker"
 	TagBox    = "hutch:box"
+	// TagRole is "server" on the server instance; workers are everything else.
+	TagRole = "hutch:role"
 )
+
+// Worker reports whether a node is a worker rather than the server.
+func (n Node) Worker() bool { return n.Tags[TagRole] != "server" }

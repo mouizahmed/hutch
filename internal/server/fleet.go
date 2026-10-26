@@ -38,7 +38,8 @@ type fleet struct {
 	pricesMu sync.Mutex
 	price    prices
 	nodesMu  sync.Mutex
-	nodes    []provider.Node // as last listed
+	nodes    []provider.Node // workers, as last listed
+	server   *provider.Node
 }
 
 // fleetConfig is provider.json in the data directory.
@@ -48,6 +49,8 @@ type fleetConfig struct {
 	Address string `json:"address"`
 	// RootGB is the worker image's root volume, billed with each worker's data disk.
 	RootGB int `json:"root_gb"`
+	// ServerDiskGB is the server instance's disk, when hutch server init created it.
+	ServerDiskGB int `json:"server_disk_gb,omitempty"`
 }
 
 func loadFleet(dir string) (*fleet, error) {
@@ -222,7 +225,7 @@ func (s *Server) grow(ctx context.Context, f *fleet, n need, out io.Writer) erro
 	if int(float64(t.MemMiB)*(1-margin)) < n.memMiB || t.VCPUs < n.vcpus {
 		return fmt.Errorf("a %s box doesn't fit a %s worker (%d vCPUs, %s); set providers.aws.worker_type larger", n, wtype, t.VCPUs, mib(t.MemMiB))
 	}
-	nodes, err := f.p.ListNodes(ctx)
+	nodes, err := f.listNodes(ctx)
 	if err != nil {
 		return err
 	}
@@ -348,7 +351,7 @@ func (s *Server) wakeStopped(ctx context.Context, workerID string) (*workerConn,
 }
 
 func (s *Server) cloudRunning(ctx context.Context, f *fleet) int {
-	nodes, err := f.p.ListNodes(ctx)
+	nodes, err := f.listNodes(ctx)
 	if err != nil {
 		return 0
 	}
@@ -542,7 +545,11 @@ func (s *Server) providerAdd(ctx context.Context, params json.RawMessage, _ *rpc
 	if !found {
 		return nil, fmt.Errorf("start the server with --name %s, so new workers can verify it at %s", md.privateIP, address)
 	}
-	cfg := aws.Config{Region: md.region, Credentials: p.Credentials, Fleet: pkiFleet(s), SubnetID: md.subnet,
+	fleetID := p.Fleet
+	if fleetID == "" {
+		fleetID = pkiFleet(s)
+	}
+	cfg := aws.Config{Region: md.region, Credentials: p.Credentials, Fleet: fleetID, SubnetID: md.subnet,
 		SecurityGroupID: md.securityGroup, InstanceProfile: p.InstanceProfile}
 	a, err := aws.New(cfg)
 	if err != nil {
@@ -567,7 +574,7 @@ func (s *Server) providerAdd(ctx context.Context, params json.RawMessage, _ *rpc
 			}
 		}
 	}
-	fc := fleetConfig{AWS: &cfg, Address: address, RootGB: rootGB}
+	fc := fleetConfig{AWS: &cfg, Address: address, RootGB: rootGB, ServerDiskGB: p.ServerDiskGB}
 	f, err := newFleet(fc)
 	if err != nil {
 		return nil, err

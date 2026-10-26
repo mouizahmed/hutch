@@ -28,15 +28,26 @@ type prices struct {
 	at      time.Time
 }
 
-// listNodes lists the fleet's nodes and keeps the list for perHour.
+// listNodes lists the fleet's workers, keeping the list for perHour and the
+// server instance (when Hutch created it) for costs.
 func (f *fleet) listNodes(ctx context.Context) ([]provider.Node, error) {
-	nodes, err := f.p.ListNodes(ctx)
-	if err == nil {
-		f.nodesMu.Lock()
-		f.nodes = nodes
-		f.nodesMu.Unlock()
+	all, err := f.p.ListNodes(ctx)
+	if err != nil {
+		return nil, err
 	}
-	return nodes, err
+	var workers []provider.Node
+	var server *provider.Node
+	for _, n := range all {
+		if n.Worker() {
+			workers = append(workers, n)
+		} else {
+			server = &n
+		}
+	}
+	f.nodesMu.Lock()
+	f.nodes, f.server = workers, server
+	f.nodesMu.Unlock()
+	return workers, nil
 }
 
 func (f *fleet) prices(ctx context.Context) (map[string]float64, provider.Rates, error) {
@@ -147,6 +158,14 @@ func (s *Server) accrue(ctx context.Context, f *fleet, dt time.Duration) error {
 			}
 		}
 		add[[2]string{"", costCompute}] += math.Max(left, 0)
+	}
+	f.nodesMu.Lock()
+	server := f.server
+	f.nodesMu.Unlock()
+	if server != nil && server.State == provider.Running {
+		add[[2]string{"", costCompute}] += perHour[server.Type] * hours
+		add[[2]string{"", costOther}] += rates.IPv4Hour * hours
+		add[[2]string{"", costStorage}] += float64(f.cfg.ServerDiskGB) * rates.DiskGBMonth * months
 	}
 	add[[2]string{"", costStorage}] += float64(s.bucketBytes.Load()) / (1 << 30) * rates.BucketGBMonth * months
 	t1, t2 := s.takeRequests()

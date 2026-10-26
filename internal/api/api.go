@@ -114,6 +114,9 @@ type Costs struct {
 type ProviderParams struct {
 	Credentials     sigv4.Credentials `json:"credentials"`
 	InstanceProfile string            `json:"instance_profile,omitempty"`
+	// Set by hutch server init, which tagged what it created with Fleet.
+	Fleet        string `json:"fleet,omitempty"`
+	ServerDiskGB int    `json:"server_disk_gb,omitempty"`
 }
 
 type ProviderInfo struct {

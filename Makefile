@@ -8,8 +8,8 @@ build:
 
 # hutch-guest must be static to run in any guest image.
 linux:
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/linux-amd64/ ./cmd/hutchd ./cmd/hutch-guest
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/linux-arm64/ ./cmd/hutchd ./cmd/hutch-guest
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/linux-amd64/ ./cmd/hutchd ./cmd/hutch-guest ./cmd/hutch
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/linux-arm64/ ./cmd/hutchd ./cmd/hutch-guest ./cmd/hutch
 
 test:
 	go test ./...

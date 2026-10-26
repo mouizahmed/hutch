@@ -45,8 +45,29 @@ func Dial(sshTarget, socketPath string) (*yamux.Session, error) {
 	return yamux.Client(conn, cfg)
 }
 
+// SSHKeyPath is the key hutch server init makes for the servers it creates.
+func SSHKeyPath() string {
+	if d := os.Getenv("XDG_CONFIG_HOME"); d != "" {
+		return filepath.Join(d, "hutch", "ssh", "id_ed25519")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "hutch", "ssh", "id_ed25519")
+}
+
+// SSHArgs are the ssh options every connection to a server uses: Hutch's own key
+// and known hosts, when hutch server init made them, besides the user's.
+func SSHArgs() []string {
+	args := []string{"-o", "BatchMode=yes"}
+	key := SSHKeyPath()
+	if _, err := os.Stat(key); err == nil {
+		home, _ := os.UserHomeDir()
+		args = append(args, "-i", key, "-o", "UserKnownHostsFile="+filepath.Join(home, ".ssh", "known_hosts")+" "+filepath.Join(filepath.Dir(key), "known_hosts"))
+	}
+	return args
+}
+
 func sshConn(target string) (net.Conn, error) {
-	cmd := exec.Command("ssh", "-o", "BatchMode=yes", target, "hutch", "api")
+	cmd := exec.Command("ssh", append(SSHArgs(), target, "hutch", "api")...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
