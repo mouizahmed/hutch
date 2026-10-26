@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"syscall"
 	"time"
@@ -93,7 +94,7 @@ func New(root, fcVersion string) (*Worker, error) {
 	}
 	w := &Worker{Root: root, FCVersion: fcVersion, vendor: vendor}
 	for _, f := range []string{"firecracker", "jailer"} {
-		if _, err := os.Stat(w.fcBin(f)); err != nil {
+		if _, err := os.Stat(w.fcBin("", f)); err != nil {
 			return nil, fmt.Errorf("firecracker %s not installed: %w", fcVersion, err)
 		}
 	}
@@ -103,10 +104,40 @@ func New(root, fcVersion string) (*Worker, error) {
 	return w, os.MkdirAll(filepath.Join(root, "boxes"), 0o755)
 }
 
+// Class is the snapshot class new boxes get: the newest Firecracker's.
 func (w *Worker) Class() string { return firecracker.SnapshotClass(w.vendor, w.FCVersion) }
 
-func (w *Worker) fcBin(name string) string {
-	return filepath.Join(w.Root, "firecracker", w.FCVersion, name)
+// Classes lists every snapshot class the worker restores warm: one per installed
+// Firecracker version, kept side by side so old snapshots outlive upgrades.
+func (w *Worker) Classes() []string {
+	var out []string
+	for _, v := range w.versions() {
+		out = append(out, firecracker.SnapshotClass(w.vendor, v))
+	}
+	return out
+}
+
+// versions lists the installed Firecracker versions.
+func (w *Worker) versions() []string {
+	entries, _ := os.ReadDir(filepath.Join(w.Root, "firecracker"))
+	var out []string
+	for _, e := range entries {
+		if _, err := os.Stat(filepath.Join(w.Root, "firecracker", e.Name(), "firecracker")); err == nil {
+			out = append(out, e.Name())
+		}
+	}
+	return out
+}
+
+// warm reports whether the worker can restore a snapshot of class c.
+func (w *Worker) warm(c string) bool { return slices.Contains(w.Classes(), c) }
+
+// fcBin is a Firecracker binary of a version ("" for the newest).
+func (w *Worker) fcBin(version, name string) string {
+	if version == "" {
+		version = w.FCVersion
+	}
+	return filepath.Join(w.Root, "firecracker", version, name)
 }
 func (w *Worker) imageDir(name string) string { return filepath.Join(w.Root, "images", name) }
 func (w *Worker) boxDir(id string) string     { return filepath.Join(w.Root, "boxes", id) }

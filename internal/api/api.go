@@ -432,7 +432,9 @@ type Worker struct {
 	CPUs     int       `json:"cpus,omitempty"`
 	MemMiB   int       `json:"mem_mib,omitempty"`
 	Arch     string    `json:"arch,omitempty"`
-	Disk     Disk      `json:"disk"`
+	// Classes are the snapshot classes it restores warm; Class, the newest, is new boxes'.
+	Classes []string `json:"classes,omitempty"`
+	Disk    Disk     `json:"disk"`
 	Boxes    []Box     `json:"boxes,omitempty"`
 	// ReservedMiB is the memory its awake boxes reserve; set by the server.
 	ReservedMiB int `json:"reserved_mib,omitempty"`

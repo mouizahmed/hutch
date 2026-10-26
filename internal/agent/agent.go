@@ -241,7 +241,7 @@ func handlers(w *worker.Worker, name string, m *monitor, u *uploader) rpc.Mux {
 			if err != nil {
 				return nil, err
 			}
-			info := api.Worker{Name: name, Class: w.Class(), Version: version.String(), CPUs: runtime.NumCPU(), MemMiB: hostMemMiB(),
+			info := api.Worker{Name: name, Class: w.Class(), Classes: w.Classes(), Version: version.String(), CPUs: runtime.NumCPU(), MemMiB: hostMemMiB(),
 				Arch: runtime.GOARCH, Disk: diskUsage(w.Root)}
 			for _, b := range boxes {
 				info.Boxes = append(info.Boxes, toAPI(w, b))

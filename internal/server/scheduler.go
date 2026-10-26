@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 	"sort"
 	"strings"
@@ -39,8 +40,8 @@ type candidate struct {
 	id         string
 	freeMiB    int // memory not reserved by awake boxes, after the host's margin
 	cpus       int
-	diskOK     bool // free disk above worker.disk_reserve
-	class      string
+	diskOK     bool     // free disk above worker.disk_reserve
+	classes    []string // snapshot classes it restores warm
 	elastic    bool
 	hasVersion bool
 }
@@ -54,8 +55,8 @@ func (c candidate) why(n need) string {
 		return fmt.Sprintf("%d vCPUs", c.cpus)
 	case !c.diskOK:
 		return "disk below worker.disk_reserve"
-	case n.strict && n.class != "" && c.class != n.class:
-		return "snapshot class " + c.class
+	case n.strict && n.class != "" && !slices.Contains(c.classes, n.class):
+		return "snapshot class " + strings.Join(c.classes, ", ")
 	}
 	return ""
 }
@@ -77,7 +78,7 @@ func better(a, b candidate, n need) bool {
 	if a.elastic != b.elastic {
 		return !a.elastic
 	}
-	if am, bm := a.class == n.class, b.class == n.class; am != bm {
+	if am, bm := slices.Contains(a.classes, n.class), slices.Contains(b.classes, n.class); am != bm {
 		return am
 	}
 	if a.hasVersion != b.hasVersion {
@@ -152,7 +153,7 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 			freeMiB:    int(float64(w.info.MemMiB)*(1-margin)) - reserved[id] - s.pending[id],
 			cpus:       w.info.CPUs,
 			diskOK:     d.Total == 0 || float64(d.Free) >= reserve*float64(d.Total),
-			class:      w.info.Class,
+			classes:    workerClasses(w.info),
 			elastic:    elastic[id],
 			hasVersion: copies[id],
 		})
@@ -260,4 +261,13 @@ func (s *Server) versionWorker(ctx context.Context, v api.Template, box string, 
 	s.store.addVersionCopy(v.Box, w.id)
 	s.store.event(v.Box, "copied", "to "+w.id)
 	return w, release, nil
+}
+
+// workerClasses are the snapshot classes a worker restores warm (just its one
+// class, for a hutchd from before side-by-side Firecracker versions).
+func workerClasses(w api.Worker) []string {
+	if len(w.Classes) > 0 {
+		return w.Classes
+	}
+	return []string{w.Class}
 }

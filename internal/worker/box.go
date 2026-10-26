@@ -161,8 +161,8 @@ func (w *Worker) copyFromSnapshot(srcID, id string) (*Box, error) {
 	if src.State != Asleep {
 		return nil, fmt.Errorf("box %q must be asleep to fork it", srcID)
 	}
-	if src.Class != w.Class() {
-		return nil, fmt.Errorf("box %q has snapshot class %s, this worker is %s", srcID, src.Class, w.Class())
+	if !w.warm(src.Class) {
+		return nil, fmt.Errorf("box %q has snapshot class %s, this worker runs %s", srcID, src.Class, strings.Join(w.Classes(), ", "))
 	}
 	gen := w.genDir(srcID, src.Generation)
 	dir := w.boxDir(id)
@@ -203,8 +203,8 @@ func (w *Worker) Wake(ctx context.Context, id string) (*Box, error) {
 	if b.State != Asleep {
 		return nil, fmt.Errorf("box %q is %s", id, b.State)
 	}
-	if b.Class != w.Class() {
-		return nil, fmt.Errorf("box %q has snapshot class %s, this worker is %s; it needs a cold boot", id, b.Class, w.Class())
+	if !w.warm(b.Class) {
+		return nil, fmt.Errorf("box %q has snapshot class %s, this worker runs %s; it needs a cold boot", id, b.Class, strings.Join(w.Classes(), ", "))
 	}
 	gen := w.genDir(id, b.Generation)
 	b.BaseMem = filepath.Join(gen, "mem")

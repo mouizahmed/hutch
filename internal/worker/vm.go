@@ -92,9 +92,9 @@ func (w *Worker) startJailer(ctx context.Context, b *Box, s slot, links map[stri
 	defer console.Close()
 	fmt.Fprintf(console, "\n--- hutchd: starting %s at %s ---\n", b.ID, time.Now().UTC().Format(time.RFC3339))
 
-	cmd := exec.Command(w.fcBin("jailer"),
+	cmd := exec.Command(w.fcBin(b.FCVersion, "jailer"),
 		"--id", b.ID,
-		"--exec-file", w.fcBin("firecracker"),
+		"--exec-file", w.fcBin(b.FCVersion, "firecracker"),
 		"--uid", fmt.Sprint(uid), "--gid", fmt.Sprint(uid),
 		"--chroot-base-dir", filepath.Join(w.Root, "jail"),
 		"--netns", s.netnsPath(),

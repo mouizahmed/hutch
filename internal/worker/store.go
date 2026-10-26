@@ -189,7 +189,7 @@ func (w *Worker) Restore(ctx context.Context, id string, store *Store, gen int, 
 	if m.Box == nil || m.Files["rootfs.ext4"] == nil {
 		return nil, fmt.Errorf("%s is not a box snapshot", name)
 	}
-	warm := !m.Box.Archived && m.Box.Class == w.Class()
+	warm := !m.Box.Archived && w.warm(m.Box.Class)
 	tmp := filepath.Join(w.Root, "boxes", ".restore-"+id)
 	os.RemoveAll(tmp)
 	ok := false
