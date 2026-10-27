@@ -95,6 +95,9 @@ func (s *Server) userPutConfig(ctx context.Context, params json.RawMessage, _ *r
 	if conflict {
 		return nil, errors.New("the user layer changed since you looked; run hutch user sync again")
 	}
+	if p.KeepSecrets {
+		return api.UserState{Version: v, Layer: p.Layer}, nil
+	}
 	existing, err := s.store.layerParts(credentialsPrefix)
 	if err != nil {
 		return nil, err

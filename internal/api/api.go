@@ -394,6 +394,8 @@ type UserPutConfigParams struct {
 	Layer       UserLayer `json:"layer"`
 	// MCP secrets split out of config, by adapter; they replace each adapter's "/mcp" part.
 	Secrets map[string][]guestproto.File `json:"secrets,omitempty"`
+	// KeepSecrets leaves the stored MCP secrets alone, for updates that don't carry them.
+	KeepSecrets bool `json:"keep_secrets,omitempty"`
 }
 
 type LoginParams struct {

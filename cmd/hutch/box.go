@@ -60,6 +60,7 @@ func boxCommands() []*cobra.Command {
 			if cfg, err = applyGrants(ctx, sess, cfg); err != nil {
 				return err
 			}
+			ensureGitIdentity(ctx, sess)
 			if cpus == 0 {
 				cpus = int(cfg.Int("size.cpu"))
 			}

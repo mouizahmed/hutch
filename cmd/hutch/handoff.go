@@ -59,6 +59,7 @@ func handoffCommands() []*cobra.Command {
 			if cfg, err = applyGrants(ctx, sess, cfg); err != nil {
 				return err
 			}
+			ensureGitIdentity(ctx, sess)
 			if name == "" {
 				if name, err = newBoxName(ctx, sess); err != nil {
 					return err
@@ -219,9 +220,16 @@ func handoffCommands() []*cobra.Command {
 			}
 
 			fmt.Printf("Committing and pushing %s in %s...\n", b.Branch, id)
-			script := `git add -A && { git diff --cached --quiet || git commit -q -m "WIP (hutch)"; } && git push -q origin "HEAD:refs/heads/$1"`
+			// A box made before it had a git identity commits as this machine's.
+			script := `set -e
+git add -A
+if ! git diff --cached --quiet; then
+  if git config user.email >/dev/null; then git commit -q -m "WIP (hutch)"
+  else git -c "user.name=$2" -c "user.email=$3" commit -q -m "WIP (hutch)"; fi
+fi
+git push -q origin "HEAD:refs/heads/$1"`
 			var stderr bytes.Buffer
-			code, err := rpc.Exec(ctx, sess, api.BoxExec, api.ExecParams{ID: id, Dir: "/workspace", Argv: []string{"sh", "-c", script, "sh", b.Branch}}, io.Discard, &stderr)
+			code, err := rpc.Exec(ctx, sess, api.BoxExec, api.ExecParams{ID: id, Dir: "/workspace", Argv: []string{"sh", "-c", script, "sh", b.Branch, gitGlobal("user.name"), gitGlobal("user.email")}}, io.Discard, &stderr)
 			if err == nil && code != 0 {
 				err = fmt.Errorf("exit %d: %s", code, strings.TrimSpace(stderr.String()))
 			}
@@ -368,7 +376,7 @@ func gitDelta(root string, p *api.ForkParams) error {
 	fmt.Printf("Branch:   %s @ %s (the box takes over this branch)\n", branch, commit[:7])
 	delta := fmt.Sprintf("%d changed, %d untracked", nChanged, len(untracked))
 	if ahead != "0" && ahead != "" {
-		delta = ahead + " commits not on origin, " + delta
+		delta = plural(ahead, "commit") + " not on origin, " + delta
 	}
 	fmt.Printf("Delta:    %s (%s)\n", delta, size(d.Size()))
 	return nil
@@ -586,4 +594,11 @@ func size(n int) string {
 		return fmt.Sprintf("%d KB", n>>10)
 	}
 	return fmt.Sprintf("%d bytes", n)
+}
+
+func plural(n, word string) string {
+	if n == "1" {
+		return n + " " + word
+	}
+	return n + " " + word + "s"
 }

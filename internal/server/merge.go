@@ -16,17 +16,18 @@ var githubAPI = "https://api.github.com"
 // mergeLoop marks boxes whose branch has landed in its base as merged, and
 // notifies once. Nothing is removed: the user removes merged boxes.
 func (s *Server) mergeLoop(ctx context.Context) {
+	var last time.Time
 	for {
-		cfg, err := s.settings()
-		every := 10 * time.Minute
-		if err == nil {
-			every = cfg.Duration("git.merge_check")
-		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(every):
+		case <-time.After(time.Minute):
 		}
+		cfg, err := s.settings()
+		if err != nil || time.Since(last) < cfg.Duration("git.merge_check") {
+			continue
+		}
+		last = time.Now()
 		if err := s.checkMerges(ctx); err != nil {
 			log.Printf("merge check: %v", err)
 		}

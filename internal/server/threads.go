@@ -232,10 +232,9 @@ func (s *Server) threadSend(ctx context.Context, params json.RawMessage, _ *rpc.
 	if err != nil {
 		return nil, err
 	}
+	// A bracketed paste, then Enter a moment later: typed fast, a long message reads
+	// as a paste to agents, which take an Enter inside it as a newline.
 	target := fmt.Sprintf("%s:%d", tmuxSession, p.N)
-	if _, _, err := s.boxRun(ctx, w, p.Box, "tmux", "send-keys", "-t", target, "-l", "--", p.Message); err != nil {
-		return nil, err
-	}
-	_, _, err = s.boxRun(ctx, w, p.Box, "tmux", "send-keys", "-t", target, "Enter")
+	_, _, err = s.boxRun(ctx, w, p.Box, "sh", "-c", `tmux set-buffer -b hutch-send -- "$2" && tmux paste-buffer -p -d -b hutch-send -t "$1" && sleep 0.3 && tmux send-keys -t "$1" Enter`, "sh", target, p.Message)
 	return nil, err
 }

@@ -397,6 +397,9 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 				if err != nil && s.store.removed(br.Box.ID) {
 					continue // a report sent before the box was removed
 				}
+				if err == nil && br.Box.Generation < prev.Generation {
+					continue // a report sent before a snapshot the server already has, like a sleep's
+				}
 				br.Box.Worker = workerID
 				if err := s.store.putBox(br.Box); err != nil {
 					return nil, err

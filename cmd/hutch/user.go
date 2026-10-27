@@ -107,6 +107,20 @@ func collectLayer() (collected, error) {
 	return c, nil
 }
 
+// ensureGitIdentity gives the user layer this machine's git name and email when it
+// has none, so commits in boxes work before the first hutch user sync.
+func ensureGitIdentity(ctx context.Context, sess *yamux.Session) {
+	var st api.UserState
+	if rpc.Call(ctx, sess, api.UserGet, struct{}{}, &st) != nil || st.Layer.GitName != "" || st.Layer.GitEmail != "" {
+		return
+	}
+	st.Layer.GitName, st.Layer.GitEmail = gitGlobal("user.name"), gitGlobal("user.email")
+	if st.Layer.GitName == "" && st.Layer.GitEmail == "" {
+		return
+	}
+	rpc.Call(ctx, sess, api.UserPutConfig, api.UserPutConfigParams{BaseVersion: st.Version, Layer: st.Layer, KeepSecrets: true}, nil)
+}
+
 func gitGlobal(key string) string {
 	out, _ := exec.Command("git", "config", "--global", "--get", key).Output()
 	return strings.TrimSpace(string(out))
@@ -404,6 +418,7 @@ func loginCommand() *cobra.Command {
 		Short:   "Log in to agents and GitHub inside a box; every box gets the logins",
 		GroupID: "setup",
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
+			ensureGitIdentity(ctx, sess)
 			var st api.UserState
 			if err := rpc.Call(ctx, sess, api.UserGet, struct{}{}, &st); err != nil {
 				return err
