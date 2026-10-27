@@ -394,6 +394,9 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 				if err == nil && prev.Worker != workerID {
 					continue // moved off this worker while it was gone; removed when it reconnects
 				}
+				if err != nil && s.store.removed(br.Box.ID) {
+					continue // a report sent before the box was removed
+				}
 				br.Box.Worker = workerID
 				if err := s.store.putBox(br.Box); err != nil {
 					return nil, err

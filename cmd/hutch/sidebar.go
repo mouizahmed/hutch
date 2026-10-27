@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -53,6 +54,8 @@ type sidebar struct {
 	pendingOpen string // box/n to open once it appears
 	states      map[string]string
 	agent       string
+	missing     []string // logins the user layer lacks
+	warned      bool     // n or t was pressed once with the agent's login missing
 	status      string
 	err         error
 	height      int
@@ -64,6 +67,7 @@ type boxesMsg struct {
 	err   error
 }
 type tickMsg struct{}
+type loginsMsg []string
 type doneMsg struct {
 	status string
 	open   string
@@ -108,7 +112,33 @@ func runSidebar(ctx context.Context) error {
 	return err
 }
 
-func (m *sidebar) Init() tea.Cmd { return tea.Batch(m.poll(), tick()) }
+func (m *sidebar) Init() tea.Cmd { return tea.Batch(m.poll(), m.pollLogins(), tick()) }
+
+func (m *sidebar) pollLogins() tea.Cmd {
+	sess := m.sess
+	return func() tea.Msg {
+		var st api.UserState
+		if err := rpc.Call(m.ctx, sess, api.UserGet, struct{}{}, &st); err != nil {
+			return nil
+		}
+		missing, err := missingLogins(st)
+		if err != nil {
+			return nil
+		}
+		return loginsMsg(missing)
+	}
+}
+
+// agentReady reports whether new threads' agent can start logged in, warning once
+// when it can't; pressing the key again goes ahead.
+func (m *sidebar) agentReady() bool {
+	if m.warned || !slices.Contains(m.missing, m.agent) {
+		return true
+	}
+	m.warned = true
+	m.status = m.agent + " isn't logged in, so it would stop at its login: L logs in, or press again to go ahead"
+	return false
+}
 
 func tick() tea.Cmd { return tea.Tick(time.Second/8, func(time.Time) tea.Msg { return tickMsg{} }) }
 
@@ -129,6 +159,9 @@ func (m *sidebar) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds := []tea.Cmd{tick()}
 		if m.frame%16 == 0 {
 			cmds = append(cmds, m.poll())
+		}
+		if m.frame%128 == 0 {
+			cmds = append(cmds, m.pollLogins())
 		}
 		return m, tea.Batch(cmds...)
 	case boxesMsg:
@@ -158,12 +191,17 @@ func (m *sidebar) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+	case loginsMsg:
+		m.missing = msg
+		if len(m.missing) == 0 {
+			m.warned = false
+		}
 	case doneMsg:
 		m.status = msg.status
 		if msg.open != "" {
 			m.pendingOpen = msg.open
 		}
-		return m, m.poll()
+		return m, tea.Batch(m.poll(), m.pollLogins())
 	case tea.KeyMsg:
 		if m.inputFor != "" {
 			return m.updateInput(msg)
@@ -246,13 +284,21 @@ func (m *sidebar) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.show(box, 0)
 			tmuxCmd("select-pane", "-t", m.right).Run()
 		}
+	case "L":
+		if len(m.missing) > 0 {
+			return m, m.popup("Log in", "", append([]string{"login"}, m.missing...)...)
+		}
+		m.status = "every login is in"
 	case "n":
+		if !m.agentReady() {
+			return m, nil
+		}
 		m.inputFor = "new"
 		m.input.Placeholder = "what should the agent do?"
 		m.input.SetValue("")
 		return m, m.input.Focus()
 	case "t":
-		if box != "" {
+		if box != "" && m.agentReady() {
 			m.inputFor = box
 			m.input.Placeholder = "prompt for a new thread in " + box
 			m.input.SetValue("")
@@ -320,7 +366,8 @@ const sidebarHelp = `
   z       sleep the box                    w   workers
   x       remove the box                   m   move the box
   p       pin or unpin the thread          c   serial console
-  u       logins and config                q   quit (boxes keep running)
+  L       log in to agents and GitHub      u   logins and config
+  q       quit (boxes keep running)
 
   press a key`
 
@@ -517,7 +564,12 @@ func (m *sidebar) View() string {
 	if working > 0 {
 		title += fmt.Sprintf(" · %d working", working)
 	}
-	b.WriteString(styleSection.Render(title) + "\n\n")
+	b.WriteString(styleSection.Render(title) + "\n")
+	if len(m.missing) > 0 {
+		b.WriteString(styleWaiting.Render(" ! not logged in: "+strings.Join(m.missing, ", ")) + "\n")
+		b.WriteString(styleDim.Render("   L logs in (a browser opens)") + "\n")
+	}
+	b.WriteString("\n")
 	lines := 0
 	for i, r := range m.rows {
 		line := m.renderRow(r)
@@ -534,10 +586,11 @@ func (m *sidebar) View() string {
 	if m.inputFor != "" {
 		b.WriteString(" " + m.input.View() + "\n" + styleDim.Render(" enter start · esc cancel") + "\n")
 	} else {
+		wrap := lipgloss.NewStyle().Width(sidebarWidth - 2).PaddingLeft(1)
 		if m.err != nil {
-			b.WriteString(styleWaiting.Render(" "+truncate(m.err.Error(), sidebarWidth*2)) + "\n")
+			b.WriteString(wrap.Inherit(styleWaiting).Render(truncate(m.err.Error(), sidebarWidth*3)) + "\n")
 		} else if m.status != "" {
-			b.WriteString(styleDim.Render(" "+truncate(m.status, sidebarWidth*2)) + "\n")
+			b.WriteString(wrap.Inherit(styleDim).Render(truncate(m.status, sidebarWidth*3)) + "\n")
 		}
 		b.WriteString(styleDim.Render(" enter open · n new · t thread · ? keys") + "\n")
 	}

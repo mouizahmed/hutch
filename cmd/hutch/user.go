@@ -330,10 +330,11 @@ func userCommands() *cobra.Command {
 			for _, a := range set.Sorted() {
 				line := fmt.Sprintf("%-8s config: %d files", a.Name, len(st.Layer.Files[a.Name]))
 				if a.Login != "" {
-					if c, ok := logins[a.Name]; ok {
-						line += fmt.Sprintf(", logged in (updated %s)", ago(c.Updated))
-					} else {
-						line += ", not logged in: hutch login " + a.Name
+					switch state := loginState(a, logins); state {
+					case "":
+						line += fmt.Sprintf(", logged in (updated %s)", ago(logins[a.Name].Updated))
+					default:
+						line += ", " + state + ": hutch login " + a.Name
 					}
 				}
 				if _, ok := logins[a.Name+"/mcp"]; ok {
@@ -356,6 +357,44 @@ func userCommands() *cobra.Command {
 
 	userCmd.AddCommand(syncCmd, status)
 	return userCmd
+}
+
+// loginState is "" when the user layer holds an adapter's login with every file
+// the adapter declares, else "not logged in" or "login incomplete".
+func loginState(a *agents.Adapter, logins map[string]api.Credentials) string {
+	c, ok := logins[a.Name]
+	if !ok {
+		return "not logged in"
+	}
+	have := map[string]bool{}
+	for _, f := range c.Files {
+		have[f.Path] = true
+	}
+	for _, src := range a.Credentials {
+		if !have[src.File] {
+			return "login incomplete"
+		}
+	}
+	return ""
+}
+
+// missingLogins lists the adapters with a login that the user layer lacks.
+func missingLogins(st api.UserState) ([]string, error) {
+	set, err := agents.Load(st.Layer.Adapters)
+	if err != nil {
+		return nil, err
+	}
+	logins := map[string]api.Credentials{}
+	for _, c := range st.Credentials {
+		logins[c.Part] = c
+	}
+	var missing []string
+	for _, a := range set.Sorted() {
+		if a.Login != "" && loginState(a, logins) != "" {
+			missing = append(missing, a.Name)
+		}
+	}
+	return missing, nil
 }
 
 func loginCommand() *cobra.Command {
