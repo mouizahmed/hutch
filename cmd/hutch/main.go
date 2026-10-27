@@ -47,6 +47,8 @@ func main() {
 	root.AddCommand(costsCommand(), moveCommand(), resizeCommand(), doctorCommand())
 	root.AddCommand(configCommands(), initCommand(), templateCommands(), projectCommands(), sizesCommand(), userCommands(), loginCommand())
 
+	setHelp(root)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	err := root.ExecuteContext(ctx)
 	stop()
