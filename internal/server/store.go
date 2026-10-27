@@ -133,6 +133,11 @@ CREATE TABLE IF NOT EXISTS billed (
 	usd      REAL NOT NULL,
 	PRIMARY KEY (day, category)
 );
+-- Small facts the server keeps across restarts.
+CREATE TABLE IF NOT EXISTS state (
+	key   TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS events (
 	id      INTEGER PRIMARY KEY,
 	ts      TIMESTAMP NOT NULL,
@@ -422,6 +427,17 @@ func (s *store) billed(from string) ([]api.CostRow, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+func (s *store) state(key string) string {
+	var v string
+	s.db.QueryRow(`SELECT value FROM state WHERE key = ?`, key).Scan(&v)
+	return v
+}
+
+func (s *store) setState(key, value string) error {
+	_, err := s.db.Exec(`INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
 }
 
 // statesSince returns when each box entered its current state.

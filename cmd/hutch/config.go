@@ -379,11 +379,7 @@ func configCommands() *cobra.Command {
 	}
 
 	var setLayer layerFlags
-	set := &cobra.Command{
-		Use:   "set <key> <value>",
-		Short: "Change a setting in one layer (lists are comma-separated)",
-		Args:  cobra.ExactArgs(2),
-		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
+	setOnServer := withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
 			path, err := config.SplitPath(args[0])
 			if err != nil {
 				return err
@@ -403,7 +399,29 @@ func configCommands() *cobra.Command {
 			return editLayer(ctx, sess, layer, func(text []byte) ([]byte, error) {
 				return config.Set(withVersion(text), path, raw)
 			})
-		}),
+		})
+	set := &cobra.Command{
+		Use:   "set <key> <value>",
+		Short: "Change a setting in one layer (lists are comma-separated)",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// The server key says where the server is, so changing it can't go
+			// through the old one, which may be gone.
+			if args[0] == "server" {
+				if err := setUserServer(args[1]); err != nil {
+					return err
+				}
+				// This machine's config, with the new address, is the one to keep.
+				sess, err := dial()
+				if err != nil {
+					fmt.Printf("server = %q; it isn't reachable yet (%v)\n", args[1], err)
+					return nil
+				}
+				defer sess.Close()
+				return syncUserConfig(cmd.Context(), sess, serverTarget(), "mine")
+			}
+			return setOnServer(cmd, args)
+		},
 	}
 	setLayer.register(set)
 

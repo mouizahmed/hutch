@@ -206,3 +206,23 @@ func (a *AWS) LaunchServer(ctx context.Context, spec ServerSpec) (*provider.Node
 
 // Node returns one instance as it is now.
 func (a *AWS) Node(ctx context.Context, id string) (*provider.Node, error) { return a.node(ctx, id) }
+
+// StaticAddress gives an instance an Elastic IP, so its public address survives
+// stops and starts; the CLI reaches the server by it. In use, it costs the same as
+// the public address it replaces.
+func (a *AWS) StaticAddress(ctx context.Context, instance string) (string, error) {
+	p := map[string]string{"Domain": "vpc"}
+	tagParams(p, 1, "elastic-ip", map[string]string{provider.TagFleet: a.cfg.Fleet, "Name": "hutch-server"})
+	var alloc struct {
+		ID string `xml:"allocationId"`
+		IP string `xml:"publicIp"`
+	}
+	if err := a.ec2(ctx, "AllocateAddress", p, &alloc); err != nil {
+		return "", err
+	}
+	if err := a.ec2(ctx, "AssociateAddress", map[string]string{"AllocationId": alloc.ID, "InstanceId": instance}, nil); err != nil {
+		a.ec2(ctx, "ReleaseAddress", map[string]string{"AllocationId": alloc.ID}, nil)
+		return "", err
+	}
+	return alloc.IP, nil
+}

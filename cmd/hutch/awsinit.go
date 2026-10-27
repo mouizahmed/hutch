@@ -197,6 +197,9 @@ func awsInit(ctx context.Context, serverType, binary string) error {
 			return err
 		}
 	}
+	if node.PublicIP, err = a.StaticAddress(ctx, node.ID); err != nil {
+		return fmt.Errorf("static address: %w", err)
+	}
 	target := "ubuntu@" + node.PublicIP
 	ssh := func(stdin io.Reader, stderr io.Writer, script string) error {
 		args := append(client.SSHArgs(), "-o", "StrictHostKeyChecking=accept-new", "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=5", target, script)

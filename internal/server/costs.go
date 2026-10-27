@@ -75,7 +75,13 @@ func (f *fleet) prices(ctx context.Context) (map[string]float64, provider.Rates,
 // costLoop adds what the fleet cost each minute to the ledger, and once a day
 // compares yesterday's estimate with the provider's bill.
 func (s *Server) costLoop(ctx context.Context) {
+	// Costs ran on while the server was down (disks of stopped workers, the
+	// bucket): the first pass covers that gap, without the server's own compute.
 	last := time.Now()
+	if t, err := time.Parse(time.RFC3339, s.store.state("costs.accrued")); err == nil && t.Before(last) {
+		last = t
+	}
+	serverUp := false
 	reconciled := ""
 	for {
 		select {
@@ -89,10 +95,12 @@ func (s *Server) costLoop(ctx context.Context) {
 			last = now
 			continue
 		}
-		if err := s.accrue(ctx, f, now.Sub(last)); err != nil {
+		if err := s.accrue(ctx, f, now.Sub(last), serverUp); err != nil {
 			log.Printf("costs: %v", err)
+		} else {
+			last, serverUp = now, true
+			s.store.setState("costs.accrued", now.UTC().Format(time.RFC3339))
 		}
-		last = now
 		// Cost Explorer lags about a day; check yesterday once it's well past midnight.
 		yesterday := now.UTC().AddDate(0, 0, -1).Format(time.DateOnly)
 		if now.UTC().Hour() >= 12 && reconciled != yesterday {
@@ -108,7 +116,7 @@ func (s *Server) costLoop(ctx context.Context) {
 // accrue adds dt of the fleet's running costs to today's ledger. A worker's price
 // is split across the boxes awake on it by their share of its memory; the rest, and
 // disks, addresses, and the bucket, are fleet overhead (box "").
-func (s *Server) accrue(ctx context.Context, f *fleet, dt time.Duration) error {
+func (s *Server) accrue(ctx context.Context, f *fleet, dt time.Duration, serverUp bool) error {
 	perHour, rates, err := f.prices(ctx)
 	if err != nil {
 		return err
@@ -162,9 +170,11 @@ func (s *Server) accrue(ctx context.Context, f *fleet, dt time.Duration) error {
 	f.nodesMu.Lock()
 	server := f.server
 	f.nodesMu.Unlock()
-	if server != nil && server.State == provider.Running {
-		add[[2]string{"", costCompute}] += perHour[server.Type] * hours
-		add[[2]string{"", costOther}] += rates.IPv4Hour * hours
+	if server != nil {
+		if server.State == provider.Running && serverUp {
+			add[[2]string{"", costCompute}] += perHour[server.Type] * hours
+			add[[2]string{"", costOther}] += rates.IPv4Hour * hours
+		}
 		add[[2]string{"", costStorage}] += float64(f.cfg.ServerDiskGB) * rates.DiskGBMonth * months
 	}
 	add[[2]string{"", costStorage}] += float64(s.bucketBytes.Load()) / (1 << 30) * rates.BucketGBMonth * months
