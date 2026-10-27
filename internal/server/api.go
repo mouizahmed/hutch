@@ -17,6 +17,7 @@ func (s *Server) apiMux() rpc.Mux {
 		api.BoxList:          s.boxList,
 		api.BoxBoot:          s.boxBoot,
 		api.BoxFork:          s.boxFork,
+		api.BoxRelease:       s.boxRelease,
 		api.BoxSleep:         s.onBoxWorker(api.BoxSleep),
 		api.BoxWake:          s.boxWake,
 		api.BoxRm:            s.boxRm,
@@ -195,7 +196,17 @@ func (s *Server) boxFork(ctx context.Context, params json.RawMessage, out *rpc.O
 	if err != nil {
 		return nil, err
 	}
-	return b, s.applyUserLayer(ctx, w, b.ID, p.Credentials)
+	_, stderr := out.Writers()
+	if err := s.linkPath(ctx, w, b.ID, p.Path, stderr); err != nil {
+		return b, err
+	}
+	if err := s.applyUserLayer(ctx, w, b.ID, p.Credentials); err != nil {
+		return b, err
+	}
+	if p.Delta.Size() > 0 {
+		return b, s.extractFiles(ctx, w, b.ID, p.Delta, stderr)
+	}
+	return b, nil
 }
 
 func (s *Server) workerFor(id string) (*workerConn, error) {

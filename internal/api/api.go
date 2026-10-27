@@ -34,6 +34,8 @@ const (
 	BoxArchive = "box.archive" // hutchd only
 	BoxStatus  = "box.status"
 	BoxDial    = "box.dial"
+	// BoxRelease gives a branch a box took over back to the laptop (hutch local).
+	BoxRelease = "box.release"
 
 	UserGet       = "user.get"
 	UserPutConfig = "user.put_config"
@@ -283,6 +285,10 @@ type Box struct {
 	Branch     string    `json:"branch,omitempty"`
 	Base       string    `json:"base,omitempty"`
 	PushError  string    `json:"push_error,omitempty"`
+	// Merged says how the box's branch landed in its base ("PR #12", "in main").
+	Merged string `json:"merged,omitempty"`
+	// Path is the laptop directory /workspace also appears at; threads start there.
+	Path string `json:"path,omitempty"`
 	// PerHour is the box's share of its worker's price while awake (by reserved memory).
 	PerHour float64 `json:"per_hour,omitempty"`
 }
@@ -501,6 +507,11 @@ type ThreadParams struct {
 	Cmd      string `json:"cmd,omitempty"`
 	Prompt   string `json:"prompt,omitempty"`
 	Autonomy string `json:"autonomy,omitempty"` // full or ask
+	// Resume continues this agent session, from Files written first (hutch cloud).
+	Resume string            `json:"resume,omitempty"`
+	Files  []guestproto.File `json:"files,omitempty"`
+	// Dir is where the thread starts, within the box's Path (default: Path).
+	Dir string `json:"dir,omitempty"`
 }
 
 type SendParams struct {
@@ -565,6 +576,29 @@ type ForkParams struct {
 	PushInterval time.Duration `json:"push_interval,omitempty"`
 	Allow        []string      `json:"allow,omitempty"`
 	Store        *Store        `json:"store,omitempty"` // set by the server
+	Path         string        `json:"path,omitempty"`
+	// Branch makes the box take over an existing branch at Commit instead of
+	// starting hutch/<id> (hutch cloud), with Delta applied.
+	Branch string `json:"branch,omitempty"`
+	Commit string `json:"commit,omitempty"`
+	Delta  *Delta `json:"delta,omitempty"`
+}
+
+// Delta is local work a box starts with: commits origin lacks, as a bundle of
+// HEAD; staged and unstaged changes, as binary diffs; and untracked files, or a
+// whole directory outside a project, as a tar extracted into /workspace.
+type Delta struct {
+	Bundle   []byte `json:"bundle,omitempty"`
+	Staged   []byte `json:"staged,omitempty"`
+	Unstaged []byte `json:"unstaged,omitempty"`
+	Files    []byte `json:"files,omitempty"`
+}
+
+func (d *Delta) Size() int {
+	if d == nil {
+		return 0
+	}
+	return len(d.Bundle) + len(d.Staged) + len(d.Unstaged) + len(d.Files)
 }
 
 type IDParams struct {

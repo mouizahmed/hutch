@@ -175,6 +175,8 @@ var migrations = []string{
 	`ALTER TABLE tokens ADD COLUMN node_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE workers ADD COLUMN draining INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE templates ADD COLUMN params TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE boxes ADD COLUMN path TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE box_git ADD COLUMN merged TEXT NOT NULL DEFAULT ''`,
 }
 
 func openStore(path string, userKey durable.Key) (*store, error) {
@@ -470,9 +472,9 @@ func (s *store) deleteBox(id string) error {
 func (s *store) box(id string) (api.Box, error) {
 	var b api.Box
 	err := s.db.QueryRow(`SELECT id, worker_id, state, image, vcpus, mem_mib, generation, class, reach_ip, created,
-		COALESCE(m.project_id, ''), COALESCE(m.kind, ''), COALESCE(g.branch, ''), COALESCE(g.base, '')
+		COALESCE(m.project_id, ''), COALESCE(m.kind, ''), COALESCE(g.branch, ''), COALESCE(g.base, ''), path, COALESCE(g.merged, '')
 		FROM boxes LEFT JOIN box_meta m ON m.box_id = boxes.id LEFT JOIN box_git g ON g.box_id = boxes.id WHERE id = ?`, id).
-		Scan(&b.ID, &b.Worker, &b.State, &b.Image, &b.VCPUs, &b.MemMiB, &b.Generation, &b.Class, &b.ReachIP, &b.Created, &b.Project, &b.Kind, &b.Branch, &b.Base)
+		Scan(&b.ID, &b.Worker, &b.State, &b.Image, &b.VCPUs, &b.MemMiB, &b.Generation, &b.Class, &b.ReachIP, &b.Created, &b.Project, &b.Kind, &b.Branch, &b.Base, &b.Path, &b.Merged)
 	if errors.Is(err, sql.ErrNoRows) {
 		return b, fmt.Errorf("no box %q", id)
 	}
@@ -481,7 +483,7 @@ func (s *store) box(id string) (api.Box, error) {
 
 func (s *store) boxes() ([]api.Box, error) {
 	rows, err := s.db.Query(`SELECT id, worker_id, state, image, vcpus, mem_mib, generation, class, reach_ip, created,
-		COALESCE(m.project_id, ''), COALESCE(m.kind, ''), COALESCE(g.branch, ''), COALESCE(g.base, '')
+		COALESCE(m.project_id, ''), COALESCE(m.kind, ''), COALESCE(g.branch, ''), COALESCE(g.base, ''), path, COALESCE(g.merged, '')
 		FROM boxes LEFT JOIN box_meta m ON m.box_id = boxes.id LEFT JOIN box_git g ON g.box_id = boxes.id ORDER BY created`)
 	if err != nil {
 		return nil, err
@@ -490,7 +492,7 @@ func (s *store) boxes() ([]api.Box, error) {
 	var bs []api.Box
 	for rows.Next() {
 		var b api.Box
-		if err := rows.Scan(&b.ID, &b.Worker, &b.State, &b.Image, &b.VCPUs, &b.MemMiB, &b.Generation, &b.Class, &b.ReachIP, &b.Created, &b.Project, &b.Kind, &b.Branch, &b.Base); err != nil {
+		if err := rows.Scan(&b.ID, &b.Worker, &b.State, &b.Image, &b.VCPUs, &b.MemMiB, &b.Generation, &b.Class, &b.ReachIP, &b.Created, &b.Project, &b.Kind, &b.Branch, &b.Base, &b.Path, &b.Merged); err != nil {
 			return nil, err
 		}
 		bs = append(bs, b)
@@ -822,9 +824,32 @@ func (s *store) boxCredentials(box string) ([]string, error) {
 	return creds, json.Unmarshal([]byte(data), &creds)
 }
 
+func (s *store) setBoxPath(box, path string) error {
+	_, err := s.db.Exec(`UPDATE boxes SET path = ? WHERE id = ?`, path, box)
+	return err
+}
+
+// branchOwner returns the box that owns a project's branch, if any.
+func (s *store) branchOwner(project, branch string) (string, error) {
+	var id string
+	err := s.db.QueryRow(`SELECT g.box_id FROM box_git g JOIN box_meta m ON m.box_id = g.box_id
+		WHERE m.project_id = ? AND g.branch = ?`, project, branch).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return id, err
+}
+
+// setBoxGit records a box's branch; a new branch isn't merged yet.
 func (s *store) setBoxGit(box, branch, base string) error {
 	_, err := s.db.Exec(`INSERT INTO box_git (box_id, branch, base) VALUES (?, ?, ?)
-		ON CONFLICT(box_id) DO UPDATE SET branch = excluded.branch, base = excluded.base`, box, branch, base)
+		ON CONFLICT(box_id) DO UPDATE SET branch = excluded.branch, base = excluded.base,
+			merged = CASE WHEN box_git.branch = excluded.branch THEN box_git.merged ELSE '' END`, box, branch, base)
+	return err
+}
+
+func (s *store) setMerged(box, how string) error {
+	_, err := s.db.Exec(`UPDATE box_git SET merged = ? WHERE box_id = ?`, how, box)
 	return err
 }
 

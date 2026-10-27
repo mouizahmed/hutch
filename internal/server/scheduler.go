@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"io"
 	"slices"
-	"sync"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/rpc"

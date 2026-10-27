@@ -16,7 +16,6 @@ import (
 	"github.com/mouizahmed/hutch/internal/agents"
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/config"
-	"github.com/mouizahmed/hutch/internal/names"
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
@@ -48,16 +47,11 @@ func boxCommands() []*cobra.Command {
 		GroupID: "boxes",
 		Args:    cobra.MaximumNArgs(1),
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
+			var err error
 			if name == "" {
-				boxes, err := listBoxes(ctx, sess)
-				if err != nil {
+				if name, err = newBoxName(ctx, sess); err != nil {
 					return err
 				}
-				taken := map[string]bool{}
-				for _, b := range boxes {
-					taken[b.ID] = true
-				}
-				name = names.New(taken)
 			}
 			cfg, err := loadConfig(ctx, sess)
 			if err != nil {
@@ -85,7 +79,7 @@ func boxCommands() []*cobra.Command {
 					return fmt.Errorf("%w\n  hutch console %s", err, name)
 				}
 			} else if from == "" && repo != nil {
-				p := api.ForkParams{Project: repo.ID, Base: cfg.String("base"), ID: name, Idle: idle, Credentials: cfg.List("credentials"),
+				p := api.ForkParams{Project: repo.ID, Path: repo.Root, Base: cfg.String("base"), ID: name, Idle: idle, Credentials: cfg.List("credentials"),
 					PushInterval: cfg.Duration("git.push_interval"), Allow: cfg.List("network.allow")}
 				if err := checkAllow(p.Allow); err != nil {
 					return err
@@ -138,7 +132,11 @@ func boxCommands() []*cobra.Command {
 				if b.Kind == api.BoxVersion {
 					continue
 				}
-				fmt.Fprintf(tw, "%s\t\t%s\t%d vCPU, %s\t%s\t%s\t%s\n", b.ID, b.State, b.VCPUs, mib(b.MemMiB), b.Worker, perHour(b.PerHour), ago(b.Created))
+				state := b.State
+				if b.Merged != "" {
+					state += " ✓ merged"
+				}
+				fmt.Fprintf(tw, "%s\t\t%s\t%d vCPU, %s\t%s\t%s\t%s\n", b.ID, state, b.VCPUs, mib(b.MemMiB), b.Worker, perHour(b.PerHour), ago(b.Created))
 				if b.PushError != "" {
 					msg, _, _ := strings.Cut(b.PushError, "\n")
 					fmt.Fprintf(tw, "  ! push of %s failed: %s\t\t\t\t\t\t\n", b.Branch, msg)

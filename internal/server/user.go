@@ -155,9 +155,13 @@ func (s *Server) applyUserLayer(ctx context.Context, w *workerConn, box string, 
 			hasGH = hasGH || c.Part == "gh"
 		}
 	}
+	dirs := []string{workspace}
+	if b, err := s.store.box(box); err == nil && b.Path != "" {
+		dirs = append(dirs, b.Path)
+	}
 	for _, a := range set.Sorted() {
 		for _, seed := range a.Seed {
-			data, err := seedData(seed)
+			data, err := seedData(seed, dirs)
 			if err != nil {
 				return fmt.Errorf("adapter %s: seed %s: %w", a.Name, seed.File, err)
 			}
@@ -203,17 +207,36 @@ func (s *Server) applyUserLayer(ctx context.Context, w *workerConn, box string, 
 	return s.run(ctx, w, box, api.ExecParams{Argv: []string{"sh", "-ec", strings.Join(script, "\n"), "sh", l.GitName, l.GitEmail}}, io.Discard, io.Discard)
 }
 
-// seedData encodes a seed for merging: JSON or TOML by the file's extension.
-func seedData(seed agents.Seed) ([]byte, error) {
+// seedData encodes a seed for merging: JSON or TOML by the file's extension. A
+// "{workspace}" key stands for each directory the box's threads may run in.
+func seedData(seed agents.Seed, dirs []string) ([]byte, error) {
+	merge := expandWorkspace(seed.Merge, dirs)
 	switch {
 	case strings.HasSuffix(seed.File, ".json"):
-		return json.Marshal(seed.Merge)
+		return json.Marshal(merge)
 	case strings.HasSuffix(seed.File, ".toml"):
 		var b bytes.Buffer
-		err := toml.NewEncoder(&b).Encode(seed.Merge)
+		err := toml.NewEncoder(&b).Encode(merge)
 		return b.Bytes(), err
 	}
 	return nil, errors.New("seeds must be .json or .toml files")
+}
+
+func expandWorkspace(m map[string]any, dirs []string) map[string]any {
+	out := map[string]any{}
+	for k, v := range m {
+		if sub, ok := v.(map[string]any); ok {
+			v = expandWorkspace(sub, dirs)
+		}
+		if k != "{workspace}" {
+			out[k] = v
+			continue
+		}
+		for _, d := range dirs {
+			out[d] = v
+		}
+	}
+	return out
 }
 
 // installAgents runs every agent adapter's install command and the user's

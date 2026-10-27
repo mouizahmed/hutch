@@ -32,6 +32,8 @@ func main() {
 		Version:       version.String(),
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		Args:          cobra.NoArgs,
+		RunE:          runTUI,
 	}
 	root.PersistentFlags().StringVar(&flagServerData, "server-data", client.DefaultDataDir(), "data directory of a server on this machine")
 	root.PersistentFlags().MarkHidden("server-data")
@@ -42,10 +44,12 @@ func main() {
 	root.AddCommand(sessionCommands()...)
 	root.AddCommand(threadCommands()...)
 	root.AddCommand(gitCommands()...)
+	root.AddCommand(handoffCommands()...)
+	root.AddCommand(forwardCommands()...)
 	root.AddCommand(statusCommand())
 	root.AddCommand(setupCommands()...)
 	root.AddCommand(costsCommand(), moveCommand(), resizeCommand(), doctorCommand())
-	root.AddCommand(configCommands(), initCommand(), templateCommands(), projectCommands(), sizesCommand(), userCommands(), loginCommand())
+	root.AddCommand(configCommands(), initCommand(), templateCommands(), projectCommands(), sizesCommand(), userCommands(), loginCommand(), tuiCommand())
 
 	setHelp(root)
 

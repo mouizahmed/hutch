@@ -44,8 +44,8 @@ type Server struct {
 	lastBackup time.Time
 	backedUp   int64
 	gcMu       sync.Mutex
-	moving   sync.Map // box ID → *sync.Mutex, held while a box moves off a lost worker
-	copying  sync.Map // "<version>@<worker>" → *sync.Mutex, held while a template copies there
+	moving     sync.Map // box ID → *sync.Mutex, held while a box moves off a lost worker
+	copying    sync.Map // "<version>@<worker>" → *sync.Mutex, held while a template copies there
 	// pending is memory held on each worker for boxes being placed, and starting
 	// the boxes being placed or woken; guarded by mu.
 	pending  map[string]int
@@ -75,6 +75,8 @@ type Server struct {
 	syncing    map[string]bool
 	// pushErrors holds each box's latest failed branch push.
 	pushErrors map[string]string
+	// threadWatch decides when a thread's stop is worth a notification, by box/n.
+	threadWatch map[string]*threadWatch
 }
 
 type workerConn struct {
@@ -108,7 +110,7 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, store: st, ca: ca, master: master, workers: map[string]*workerConn{}, pending: map[string]int{}, prestarted: map[string]bool{}, missing: map[string]time.Time{}, peaks: map[string]int{}, relieving: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{},
+	s := &Server{cfg: cfg, store: st, ca: ca, master: master, workers: map[string]*workerConn{}, pending: map[string]int{}, prestarted: map[string]bool{}, missing: map[string]time.Time{}, peaks: map[string]int{}, relieving: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{}, threadWatch: map[string]*threadWatch{},
 		fileHashes: map[string]map[string]string{}, syncing: map[string]bool{}, pushErrors: map[string]string{}}
 	b, bcfg, err := loadBucket(cfg.Dir)
 	if err != nil {
@@ -144,6 +146,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.costLoop(ctx)
 	go s.bucketSizeLoop(ctx)
 	go s.maxAwakeLoop(ctx)
+	go s.mergeLoop(ctx)
 	select {
 	case <-ctx.Done():
 		return nil
@@ -420,6 +423,7 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 					s.pushErrors[br.Box.ID] = br.Push.Error
 				}
 				s.mu.Unlock()
+				s.watchThreads(br.Box.ID, states)
 				s.watchReport(br)
 			}
 			return nil, nil

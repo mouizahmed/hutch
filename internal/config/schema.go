@@ -93,6 +93,8 @@ var Keys = []*Key{
 	{Path: "network.domains", Kind: List, Layers: project,
 		Doc: "domains boxes may reach when network.egress is allowlist"},
 
+	{Path: "git.merge_check", Kind: Duration, Default: "10m", Min: "1m", Max: "24h", Layers: server,
+		Doc: "how often the server checks whether boxes' branches are merged (GitHub pull requests, or contained in the base)"},
 	{Path: "git.push_interval", Kind: Duration, Default: "1m", Min: "10s", Max: "1h", Layers: project,
 		Doc: "a box pushes its branch at most this often after new commits"},
 	{Path: "template.build_timeout", Kind: Duration, Default: "1h", Min: "1m", Max: "24h", Layers: project,
@@ -167,8 +169,10 @@ var Keys = []*Key{
 		Doc: "USD a day of estimated cloud cost (workers, disks, addresses, bucket); past it, boxes queue; 0 means no limit"},
 	{Path: "costs.reconcile_tolerance", Kind: Percent, Default: "10%", Min: "1%", Max: "100%", Layers: server,
 		Doc: "a day's bill differing from the estimate by more than this notifies you"},
-	{Path: "notify", Kind: String, Layers: user,
+	{Path: "notify.command", Kind: String, Layers: user,
 		Doc: "command the server runs on events, with HUTCH_EVENT, HUTCH_BOX, HUTCH_TITLE, HUTCH_MESSAGE set"},
+	{Path: "notify.waiting_after", Kind: Duration, Default: "2m", Min: "0s", Max: "24h", Layers: user,
+		Doc: "a thread that stops working notifies you once it has waited or been exited this long"},
 	{Path: "gc.grace", Kind: Duration, Default: "24h", Min: "1h", Max: "30d", Layers: server,
 		Doc: "chunks younger than this are never deleted, so a sweep can't race an upload"},
 }

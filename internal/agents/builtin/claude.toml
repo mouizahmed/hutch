@@ -26,7 +26,7 @@ transcript = "claude"
 # First-run prompts a box would otherwise stop at.
 [[seed]]
 file  = "~/.claude.json"
-merge = { hasCompletedOnboarding = true, projects = { "/workspace" = { hasTrustDialogAccepted = true } } }
+merge = { hasCompletedOnboarding = true, projects = { "{workspace}" = { hasTrustDialogAccepted = true } } }
 
 [[seed]]
 file  = "~/.claude/settings.json"

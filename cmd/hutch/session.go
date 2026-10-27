@@ -53,7 +53,7 @@ func sessionCommands() []*cobra.Command {
 			}
 			argv := []string{"tmux", "new-session", "-A", "-s", agentSession}
 			if n > 0 {
-				argv = []string{"tmux", "attach-session", "-t", fmt.Sprintf("%s:%d", agentSession, n)}
+				argv = viewArgv(n, false)
 			}
 			return terminal(ctx, sess, box, argv)
 		}),

@@ -12,4 +12,4 @@ transcript  = "codex"
 
 [[seed]]
 file  = "~/.codex/config.toml"
-merge = { tui = { screen_reader_detection_done = true }, projects = { "/workspace" = { trust_level = "trusted" } } }
+merge = { tui = { screen_reader_detection_done = true }, projects = { "{workspace}" = { trust_level = "trusted" } } }

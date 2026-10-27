@@ -185,7 +185,11 @@ func (s *Server) bootTemplate(ctx context.Context, proj api.Project, p api.Templ
 		return b, w, err
 	}
 	step(stdout, "clone %s", p.CloneURL)
-	if err := s.run(ctx, w, id, api.ExecParams{Argv: []string{"git", "clone", "-q", p.CloneURL, workspace}}, stdout, stderr); err != nil {
+	var msg bytes.Buffer
+	if err := s.run(ctx, w, id, api.ExecParams{Argv: []string{"git", "clone", "-q", p.CloneURL, workspace}}, stdout, io.MultiWriter(stderr, &msg)); err != nil {
+		if strings.Contains(msg.String(), "could not read Username") {
+			err = fmt.Errorf("%w; a private repository needs a GitHub login: hutch login gh", err)
+		}
 		return b, w, fmt.Errorf("clone: %w", err)
 	}
 	return b, w, nil
@@ -360,6 +364,13 @@ func (s *Server) forkProject(ctx context.Context, p api.ForkParams, stdout, stde
 	if len(versions) == 0 {
 		return api.Box{}, errors.New("this project has no template yet: hutch template snapshot (or hutch new --from base)")
 	}
+	if p.Branch != "" {
+		if owner, err := s.store.branchOwner(p.Project, p.Branch); err != nil {
+			return api.Box{}, err
+		} else if owner != "" {
+			return api.Box{}, fmt.Errorf("%s already has %s; a branch belongs to one box (hutch local %s gives it back)", owner, p.Branch, owner)
+		}
+	}
 	v := versions[0]
 	w, release, source, err := s.versionWorker(ctx, v, p.ID, stderr)
 	if err != nil {
@@ -375,10 +386,22 @@ func (s *Server) forkProject(ctx context.Context, p api.ForkParams, stdout, stde
 	if err := s.store.putMeta(b.ID, boxMeta{project: p.Project, commit: v.Commit, version: v.Version}); err != nil {
 		return b, err
 	}
+	if err := s.linkPath(ctx, w, b.ID, p.Path, stderr); err != nil {
+		return b, err
+	}
 	if err := s.applyUserLayer(ctx, w, b.ID, p.Credentials); err != nil {
 		return b, err
 	}
-	if b.Branch, b.Base, err = s.checkoutBranch(ctx, w, b.ID, "hutch/"+b.ID, p.Base, p.PushInterval, stderr); err != nil {
+	if p.Branch != "" {
+		step(stdout, "your changes")
+		if b.Branch, b.Base, err = s.takeOverBranch(ctx, w, b.ID, p, stderr); err != nil {
+			s.removeBox(ctx, b.ID)
+			return api.Box{}, err
+		}
+	} else {
+		b.Branch, b.Base, err = s.checkoutBranch(ctx, w, b.ID, "hutch/"+b.ID, p.Base, p.PushInterval, stderr)
+	}
+	if err != nil {
 		return b, err
 	}
 	if s.run(ctx, w, b.ID, api.ExecParams{Dir: workspace, Argv: []string{"test", "-f", ".hutch/on-create.sh"}}, io.Discard, io.Discard) == nil {
@@ -420,15 +443,7 @@ echo "$base"`, "sh", branch, base}}, &out, stderr); err != nil {
 		return "", "", fmt.Errorf("checkout: %w", err)
 	}
 	base = strings.TrimSpace(out.String())
-	if err := s.store.setBoxGit(box, branch, base); err != nil {
-		return "", "", err
-	}
-	conf, _ := json.Marshal(guestproto.PushConfig{Dir: workspace, Branch: branch, Interval: interval})
-	if err := rpc.Call(ctx, w.sess, api.BoxFiles, api.FilesParams{ID: box, Files: guestproto.Files{User: "root",
-		Files: []guestproto.File{{Path: guestproto.PushConfigPath, Mode: 0o644, Data: conf}}}}, nil); err != nil {
-		return "", "", fmt.Errorf("push config: %w", err)
-	}
-	return branch, base, nil
+	return branch, base, s.setPush(ctx, w, box, branch, base, interval)
 }
 
 // removeBox deletes a box on its worker and in the bucket, and forgets it. A box

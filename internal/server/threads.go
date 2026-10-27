@@ -49,10 +49,24 @@ func (s *Server) threadNew(ctx context.Context, params json.RawMessage, _ *rpc.O
 		return nil, err
 	}
 	var sessionID string
-	if a := set[p.Agent]; p.Cmd == "" && a != nil && a.ChoosesSession() {
-		sessionID = newUUID()
+	var argv []string
+	if p.Resume != "" {
+		sessionID = p.Resume
+		argv, err = set.ResumeArgv(p.Agent, p.Autonomy, p.Resume)
+	} else {
+		if a := set[p.Agent]; p.Cmd == "" && a != nil && a.ChoosesSession() {
+			sessionID = newUUID()
+		}
+		argv, err = set.Argv(p.Agent, p.Cmd, p.Prompt, p.Autonomy, sessionID)
 	}
-	argv, err := set.Argv(p.Agent, p.Cmd, p.Prompt, p.Autonomy, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	b, err := s.store.box(p.Box)
+	if err != nil {
+		return nil, err
+	}
+	dir, err := threadDir(b, p.Dir)
 	if err != nil {
 		return nil, err
 	}
@@ -64,6 +78,9 @@ func (s *Server) threadNew(ctx context.Context, params json.RawMessage, _ *rpc.O
 	if err != nil {
 		return nil, err
 	}
+	if err := s.writeFiles(ctx, w, p.Box, p.Files); err != nil {
+		return nil, fmt.Errorf("session files: %w", err)
+	}
 
 	_, code, err := s.boxRun(ctx, w, p.Box, "tmux", "has-session", "-t", tmuxSession)
 	if err != nil && code < 0 {
@@ -71,9 +88,9 @@ func (s *Server) threadNew(ctx context.Context, params json.RawMessage, _ *rpc.O
 	}
 	var tmux []string
 	if code == 0 {
-		tmux = []string{"tmux", "new-window", "-t", tmuxSession + ":", "-n", name, "-c", "/workspace", "-P", "-F", "#{window_index}", "--"}
+		tmux = []string{"tmux", "new-window", "-t", tmuxSession + ":", "-n", name, "-c", dir, "-P", "-F", "#{window_index}", "--"}
 	} else {
-		tmux = []string{"tmux", "new-session", "-d", "-s", tmuxSession, "-x", "200", "-y", "50", "-n", name, "-c", "/workspace", "-P", "-F", "#{window_index}", "--"}
+		tmux = []string{"tmux", "new-session", "-d", "-s", tmuxSession, "-x", "200", "-y", "50", "-n", name, "-c", dir, "-P", "-F", "#{window_index}", "--"}
 	}
 	out, code, err := s.boxRun(ctx, w, p.Box, append(tmux, argv...)...)
 	if err != nil {
@@ -86,7 +103,11 @@ func (s *Server) threadNew(ctx context.Context, params json.RawMessage, _ *rpc.O
 	if err != nil {
 		return nil, fmt.Errorf("tmux window index %q: %w", out, err)
 	}
-	t := api.Thread{Box: p.Box, N: n, Agent: name, Title: agents.Title(p.Agent, p.Cmd, p.Prompt), Created: time.Now().UTC(), SessionID: sessionID}
+	title := agents.Title(p.Agent, p.Cmd, p.Prompt)
+	if p.Resume != "" {
+		title = p.Agent + " session from your laptop"
+	}
+	t := api.Thread{Box: p.Box, N: n, Agent: name, Title: title, Created: time.Now().UTC(), SessionID: sessionID}
 	if a := set[p.Agent]; p.Cmd == "" && a != nil && a.Transcript != "" && a.Transcript != "none" {
 		if err := s.registerThread(ctx, w, p.Box, a, t); err != nil {
 			return nil, err
@@ -189,7 +210,12 @@ func (s *Server) threadResume(ctx context.Context, params json.RawMessage, _ *rp
 	if strings.TrimSpace(out) == "0" {
 		return nil, fmt.Errorf("%s/%d is still running", p.Box, p.N)
 	}
-	cmd := append([]string{"tmux", "respawn-pane", "-t", target, "-c", "/workspace", "--"}, argv...)
+	b, err := s.store.box(p.Box)
+	if err != nil {
+		return nil, err
+	}
+	dir, _ := threadDir(b, "")
+	cmd := append([]string{"tmux", "respawn-pane", "-t", target, "-c", dir, "--"}, argv...)
 	if _, code, err := s.boxRun(ctx, w, p.Box, cmd...); err != nil || code != 0 {
 		return nil, fmt.Errorf("respawn: exit %d %v", code, err)
 	}

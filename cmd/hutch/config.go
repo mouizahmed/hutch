@@ -380,26 +380,26 @@ func configCommands() *cobra.Command {
 
 	var setLayer layerFlags
 	setOnServer := withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
-			path, err := config.SplitPath(args[0])
-			if err != nil {
-				return err
-			}
-			k := config.Lookup(path)
-			if k == nil {
-				return fmt.Errorf("unknown key %s", args[0])
-			}
-			raw, err := k.FromString(args[1])
-			if err != nil {
-				return fmt.Errorf("%s: %w", args[0], err)
-			}
-			if _, err := k.Parse(raw); err != nil {
-				return fmt.Errorf("%s: %w", args[0], err)
-			}
-			layer := setLayer.layer(k)
-			return editLayer(ctx, sess, layer, func(text []byte) ([]byte, error) {
-				return config.Set(withVersion(text), path, raw)
-			})
+		path, err := config.SplitPath(args[0])
+		if err != nil {
+			return err
+		}
+		k := config.Lookup(path)
+		if k == nil {
+			return fmt.Errorf("unknown key %s", args[0])
+		}
+		raw, err := k.FromString(args[1])
+		if err != nil {
+			return fmt.Errorf("%s: %w", args[0], err)
+		}
+		if _, err := k.Parse(raw); err != nil {
+			return fmt.Errorf("%s: %w", args[0], err)
+		}
+		layer := setLayer.layer(k)
+		return editLayer(ctx, sess, layer, func(text []byte) ([]byte, error) {
+			return config.Set(withVersion(text), path, raw)
 		})
+	})
 	set := &cobra.Command{
 		Use:   "set <key> <value>",
 		Short: "Change a setting in one layer (lists are comma-separated)",
