@@ -116,6 +116,8 @@ func Run(ctx context.Context, id Identity, w *worker.Worker, name string) error 
 	if err != nil {
 		return fmt.Errorf("not enrolled (run `hutchd enroll`): %w", err)
 	}
+	// A host out-of-memory kill of hutchd would leave boxes unmanaged; kill VMs first.
+	os.WriteFile("/proc/self/oom_score_adj", []byte("-900"), 0)
 	u := newUploader(w)
 	m := newMonitor(w, u)
 	mux, streams := handlers(w, name, m, u), streamHandlers(w)

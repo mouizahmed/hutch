@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
+	"maps"
 	"time"
 
 	"github.com/mouizahmed/hutch/internal/api"
@@ -239,4 +241,52 @@ func (s *Server) boxResize(ctx context.Context, params json.RawMessage, out *rpc
 		return nil, err
 	}
 	return s.store.box(p.ID)
+}
+
+// relieve moves the working box using the most memory off a worker under memory
+// pressure, one move at a time per worker.
+func (s *Server) relieve(w *workerConn) {
+	s.mu.Lock()
+	if s.relieving[w.id] {
+		s.mu.Unlock()
+		return
+	}
+	s.relieving[w.id] = true
+	peaks := maps.Clone(s.peaks)
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.relieving, w.id)
+		s.mu.Unlock()
+	}()
+	boxes, err := s.store.boxes()
+	if err != nil {
+		return
+	}
+	var pick api.Box
+	for _, b := range boxes {
+		if b.Worker != w.id || b.State != "running" || b.Kind != "" {
+			continue
+		}
+		if _, err := s.storeOf(b); err != nil {
+			continue
+		}
+		if peaks[b.ID] > peaks[pick.ID] || pick.ID == "" {
+			pick = b
+		}
+	}
+	if pick.ID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	log.Printf("memory: moving %s off %s", pick.ID, w.info.Name)
+	r, err := s.move(ctx, pick.ID, "", io.Discard, io.Discard)
+	if err != nil {
+		log.Printf("memory: move %s: %v", pick.ID, err)
+		return
+	}
+	msg := fmt.Sprintf("%s moved %s from %s to %s: memory pressure", pick.ID, r.Kind, r.From, r.To)
+	s.store.event(pick.ID, "moved", msg)
+	s.notify("moved", pick.ID, "Box moved", msg)
 }

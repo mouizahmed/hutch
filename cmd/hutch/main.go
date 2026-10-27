@@ -60,11 +60,16 @@ func main() {
 	}
 }
 
-// serverTarget is the server's SSH target: $HUTCH_SERVER, else the user config's
-// server key; empty means a server on this machine.
+// serverTarget is the server's SSH target: $HUTCH_SERVER, else a server running
+// on this machine (empty), else the user config's server key. The user config
+// syncs between machines, so on the server itself its server key names the server
+// from elsewhere.
 func serverTarget() string {
 	if t := os.Getenv("HUTCH_SERVER"); t != "" {
 		return t
+	}
+	if _, err := os.Stat(server.SocketPath(flagServerData)); err == nil {
+		return ""
 	}
 	d, err := config.ReadFile(config.User, config.UserPath())
 	if err != nil {

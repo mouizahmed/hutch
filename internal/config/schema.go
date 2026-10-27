@@ -35,6 +35,7 @@ const (
 	Percent
 	Enum
 	List
+	Float
 )
 
 // Key is one setting in the schema. Values are kept as TOML decodes them (string,
@@ -103,6 +104,14 @@ var Keys = []*Key{
 		Doc: "template versions kept per project, besides those boxes were forked from"},
 	{Path: "worker.memory_margin", Kind: Percent, Default: "10%", Min: "0%", Max: "50%", Layers: server,
 		Doc: "RAM held back for the host on every worker"},
+	{Path: "worker.overcommit", Kind: Float, Default: 1.0, Min: "1", Max: "4", Layers: server,
+		Doc: "1 means every box reserves its full size, and nothing is ever slept or moved for memory; above 1, boxes are placed by measured peak use, with their full sizes allowed up to this multiple of a worker's memory, and boxes may be slept or moved under pressure"},
+	{Path: "worker.memory_high", Kind: Percent, Default: "80%", Min: "50%", Max: "95%", Layers: server,
+		Doc: "with overcommit: past this share of a worker's memory, it takes no new boxes, reclaims guest memory, sleeps idle boxes, then moves working ones"},
+	{Path: "worker.memory_critical", Kind: Percent, Default: "90%", Min: "60%", Max: "98%", Layers: server,
+		Doc: "with overcommit: past this, with nowhere to move, the least recently active working box sleeps and you're notified"},
+	{Path: "worker.peak_window", Kind: Duration, Default: "1h", Min: "5m", Max: "7d", Layers: server,
+		Doc: "with overcommit: a box counts at its highest measured memory use over this window"},
 	{Path: "worker.disk_reserve", Kind: Percent, Default: "10%", Min: "0%", Max: "50%", Layers: server,
 		Doc: "free disk below which a worker takes no new boxes"},
 	{Path: "idle.check_interval", Kind: Duration, Default: "15s", Min: "1s", Max: "5m", Layers: server,
@@ -225,6 +234,18 @@ func (k *Key) parse(raw any) (any, error) {
 			return n, nil
 		}
 		return nil, fmt.Errorf("want a whole number, got %s", Display(raw))
+	case Float:
+		switch n := raw.(type) {
+		case float64:
+			return n, nil
+		case int64:
+			return float64(n), nil
+		case string:
+			if f, err := strconv.ParseFloat(n, 64); err == nil {
+				return f, nil
+			}
+		}
+		return nil, fmt.Errorf("want a number, got %s", Display(raw))
 	case List:
 		items, ok := raw.([]any)
 		if !ok {
@@ -296,6 +317,8 @@ func (k *Key) FromString(s string) (any, error) {
 		return strconv.ParseBool(s)
 	case Int:
 		return strconv.ParseInt(s, 10, 64)
+	case Float:
+		return strconv.ParseFloat(s, 64)
 	case List:
 		items := []any{}
 		for _, it := range strings.Split(s, ",") {

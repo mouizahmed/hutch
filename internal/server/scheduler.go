@@ -101,16 +101,27 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 		return nil, nil, err
 	}
 	margin, reserve := cfg.Percent("worker.memory_margin")/100, cfg.Percent("worker.disk_reserve")/100
+	overcommit, high := cfg.Float("worker.overcommit"), cfg.Percent("worker.memory_high")
 	boxes, err := s.store.boxes()
 	if err != nil {
 		return nil, nil, err
 	}
-	reserved := map[string]int{}
+	// reserved is what awake boxes take: their full sizes, or with overcommit their
+	// measured peaks (full size until measured); promised is always full sizes.
+	reserved, promised := map[string]int{}, map[string]int{}
+	s.mu.Lock()
 	for _, b := range boxes {
-		if b.State == "running" {
+		if b.State != "running" {
+			continue
+		}
+		promised[b.Worker] += b.MemMiB
+		if p := s.peaks[b.ID]; overcommit > 1 && p > 0 {
+			reserved[b.Worker] += min(p, b.MemMiB)
+		} else {
 			reserved[b.Worker] += b.MemMiB
 		}
 	}
+	s.mu.Unlock()
 	ws, err := s.store.workers()
 	if err != nil {
 		return nil, nil, err
@@ -150,9 +161,17 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 			continue
 		}
 		d := w.info.Disk
+		free := int(float64(w.info.MemMiB)*(1-margin)) - reserved[id]
+		if overcommit > 1 {
+			free = min(free, int(float64(w.info.MemMiB)*overcommit)-promised[id])
+			// A worker under memory pressure takes nothing new.
+			if w.memTotal > 0 && 100*float64(w.memTotal-w.memAvailable)/float64(w.memTotal) >= high {
+				free = 0
+			}
+		}
 		cs = append(cs, candidate{
 			id:         id,
-			freeMiB:    int(float64(w.info.MemMiB)*(1-margin)) - reserved[id] - s.pending[id],
+			freeMiB:    free - s.pending[id],
 			cpus:       w.info.CPUs,
 			diskOK:     d.Total == 0 || float64(d.Free) >= reserve*float64(d.Total),
 			classes:    workerClasses(w.info),

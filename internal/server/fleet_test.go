@@ -61,3 +61,57 @@ providers.stopped_pool = 2
 		t.Fatalf("calls %v, want %v", p.Calls, want)
 	}
 }
+
+// Overcommit decides when a worker can run out of memory: by default every box
+// counts at full size; above 1, at its measured peak (full size until measured),
+// with full sizes capped at the multiple, and nothing lands on a worker under pressure.
+func TestOvercommitPlacement(t *testing.T) {
+	s, err := New(Config{Dir: t.TempDir(), Listen: "127.0.0.1:0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := func(conf string) {
+		d, _ := s.store.config("server")
+		if _, _, err := s.store.putConfig("server", d.Version, "version = 1\n"+conf); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.store.addWorker("w", "w", "")
+	w := &workerConn{id: "w", info: api.Worker{ID: "w", MemMiB: 16384, CPUs: 8, Classes: []string{"c"}}, memTotal: 16384, memAvailable: 12000}
+	s.workers["w"] = w
+	now := time.Now()
+	for _, id := range []string{"a", "b", "c"} {
+		s.store.putBox(api.Box{ID: id, Worker: "w", State: "running", MemMiB: 4096, Created: now})
+	}
+	box := need{memMiB: 4096, vcpus: 2}
+	fits := func() bool {
+		_, release, err := s.place(box, "")
+		if err == nil {
+			release()
+		}
+		return err == nil
+	}
+	if fits() {
+		t.Fatal("a fourth 4 GB box fit 16 GB at full size")
+	}
+	set("worker.overcommit = 1.5\n")
+	if fits() {
+		t.Fatal("placed by peaks before any were measured")
+	}
+	s.peaks = map[string]int{"a": 1024, "b": 1024, "c": 1024}
+	if !fits() {
+		t.Fatal("boxes using 1 GB each left no room under overcommit")
+	}
+	for _, id := range []string{"d", "e", "f"} {
+		s.store.putBox(api.Box{ID: id, Worker: "w", State: "running", MemMiB: 4096, Created: now})
+		s.peaks[id] = 512
+	}
+	if fits() {
+		t.Fatal("full sizes went past 1.5 times the worker's memory")
+	}
+	s.store.deleteBox("f")
+	w.memAvailable = 2000
+	if fits() {
+		t.Fatal("placed on a worker under memory pressure")
+	}
+}

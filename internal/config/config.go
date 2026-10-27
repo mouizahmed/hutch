@@ -306,6 +306,8 @@ func (c *Config) Size(path string) int64 { return c.must(path).(int64) }
 
 func (c *Config) Percent(path string) float64 { return c.must(path).(float64) }
 
+func (c *Config) Float(path string) float64 { return c.must(path).(float64) }
+
 func (c *Config) List(path string) []string {
 	v, _ := c.must(path).([]string)
 	return v

@@ -137,6 +137,38 @@ func (c *Client) PutBalloon(ctx context.Context, b Balloon) error {
 	return c.do(ctx, http.MethodPut, "/balloon", b)
 }
 
+// SetBalloon inflates or deflates the balloon to amount MiB: memory taken from the
+// guest and given back to the host.
+func (c *Client) SetBalloon(ctx context.Context, amountMiB int) error {
+	return c.do(ctx, http.MethodPatch, "/balloon", map[string]int{"amount_mib": amountMiB})
+}
+
+// BalloonStats is the guest's own view of its memory, in bytes.
+type BalloonStats struct {
+	TargetMiB int   `json:"target_mib"`
+	ActualMiB int   `json:"actual_mib"`
+	Available int64 `json:"available_memory"`
+	Total     int64 `json:"total_memory"`
+}
+
+func (c *Client) BalloonStats(ctx context.Context) (BalloonStats, error) {
+	var st BalloonStats
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost/balloon/statistics", nil)
+	if err != nil {
+		return st, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return st, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		msg, _ := io.ReadAll(resp.Body)
+		return st, fmt.Errorf("firecracker balloon statistics: %s: %s", resp.Status, bytes.TrimSpace(msg))
+	}
+	return st, json.NewDecoder(resp.Body).Decode(&st)
+}
+
 func (c *Client) Start(ctx context.Context) error {
 	return c.do(ctx, http.MethodPut, "/actions", map[string]string{"action_type": "InstanceStart"})
 }

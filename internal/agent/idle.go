@@ -20,6 +20,13 @@ type boxActivity struct {
 	lastActive time.Time
 	cpu        time.Duration
 	sampled    time.Time
+	// For memory pressure: recent memory samples and the latest, whether a
+	// thread is working or a terminal attached, and whether its balloon is inflated.
+	samples   []memSample
+	memMiB    int
+	working   bool
+	attached  bool
+	reclaimed bool
 }
 
 // monitor checks running boxes, puts idle ones to sleep, and reports to the server
@@ -107,6 +114,7 @@ func (m *monitor) check(ctx context.Context, server *atomic.Pointer[yamux.Sessio
 			delete(m.seen, id)
 		}
 	}
+	m.relieve(ctx, boxes, &report)
 	report.Disk = diskUsage(m.w.Root)
 	report.Requests = m.uploads.requests()
 	for _, b := range boxes {
@@ -151,6 +159,8 @@ func (m *monitor) checkBox(ctx context.Context, b *worker.Box) (api.BoxReport, b
 		m.seen[b.ID] = a
 	}
 	r := api.BoxReport{Box: toAPI(m.w, b)}
+	a.memMiB, r.PeakMiB = m.measure(b, a)
+	r.MemMiB = a.memMiB
 
 	if cpu, err := m.w.CPUTime(b); err == nil {
 		if !a.sampled.IsZero() {
@@ -172,9 +182,11 @@ func (m *monitor) checkBox(ctx context.Context, b *worker.Box) (api.BoxReport, b
 		return r, false
 	}
 	r.Files, r.Push = st.Files, st.Push
-	if st.Clients > 0 || st.Sessions > 0 {
+	a.attached = st.Clients > 0 || st.Sessions > 0
+	if a.attached {
 		a.lastActive = now
 	}
+	a.working = false
 	window := m.settings.Load().WorkingWindow
 	for _, th := range st.Threads {
 		out := time.Unix(th.LastOutput, 0)
@@ -186,6 +198,9 @@ func (m *monitor) checkBox(ctx context.Context, b *worker.Box) (api.BoxReport, b
 			state = th.Hint
 		case now.Sub(out) < window:
 			state = api.ThreadWorking
+		}
+		if state == api.ThreadWorking {
+			a.working = true
 		}
 		// An agent waiting on a slow model call prints nothing but is busy.
 		if !th.Dead && th.Hint == api.ThreadWorking {

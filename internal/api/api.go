@@ -218,6 +218,12 @@ type WorkerSettingsParams struct {
 	Refresh time.Duration     `json:"refresh"`
 	Bucket  *bucket.Config    `json:"bucket,omitempty"`
 	Keys    map[string][]byte `json:"keys,omitempty"` // project ID → key
+	// Overcommit above 1 turns on memory pressure handling, at these shares of the
+	// worker's memory, in percent; boxes count at their peak over PeakWindow.
+	Overcommit     float64       `json:"overcommit,omitempty"`
+	MemoryHigh     float64       `json:"memory_high,omitempty"`
+	MemoryCritical float64       `json:"memory_critical,omitempty"`
+	PeakWindow     time.Duration `json:"peak_window,omitempty"`
 }
 
 // Store places a box's snapshots in the bucket (see worker.Store).
@@ -429,6 +435,12 @@ type Report struct {
 	// Requests counts bucket requests since hutchd started, by price tier, for
 	// cost estimates.
 	Requests [2]int64 `json:"requests"`
+	// The worker's memory in MiB, and, under overcommit, "high" when it asks the
+	// server to move a working box off it, and the boxes it slept at critical.
+	MemTotal     int      `json:"mem_total,omitempty"`
+	MemAvailable int      `json:"mem_available,omitempty"`
+	Pressure     string   `json:"pressure,omitempty"`
+	ForceSlept   []string `json:"force_slept,omitempty"`
 }
 
 type BoxReport struct {
@@ -437,6 +449,10 @@ type BoxReport struct {
 	LastActive time.Time         `json:"last_active"`
 	Files      map[string]string `json:"files,omitempty"` // hashes of watched files
 	Push       *guestproto.Push  `json:"push,omitempty"`
+	// MemMiB is the host memory the box's VM holds now; PeakMiB its highest
+	// over the peak window.
+	MemMiB  int `json:"mem_mib,omitempty"`
+	PeakMiB int `json:"peak_mib,omitempty"`
 }
 
 type ThreadState struct {

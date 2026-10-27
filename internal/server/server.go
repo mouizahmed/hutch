@@ -53,6 +53,10 @@ type Server struct {
 	// missing holds when each elastic worker's instance was first missing from the
 	// provider's listing; guarded by mu.
 	missing map[string]time.Time
+	// peaks holds each awake box's peak memory use as last reported, and relieving
+	// the workers a box is being moved off for memory; guarded by mu.
+	peaks     map[string]int
+	relieving map[string]bool
 	// Bucket requests not yet in the ledger, and the server's own count when last
 	// read; guarded by mu. bucketBytes is the bucket's size, measured hourly.
 	requests, ownRequests [2]int64
@@ -79,6 +83,8 @@ type workerConn struct {
 	projects  map[string]bool
 	uploading int
 	requests  [2]int64 // its bucket requests as last reported
+	// Its memory and how much is available, in MiB, as last reported.
+	memTotal, memAvailable int
 }
 
 func SocketPath(dir string) string { return filepath.Join(dir, "api.sock") }
@@ -99,7 +105,7 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, store: st, ca: ca, master: master, workers: map[string]*workerConn{}, pending: map[string]int{}, prestarted: map[string]bool{}, missing: map[string]time.Time{}, threadStates: map[string]map[int]api.ThreadState{},
+	s := &Server{cfg: cfg, store: st, ca: ca, master: master, workers: map[string]*workerConn{}, pending: map[string]int{}, prestarted: map[string]bool{}, missing: map[string]time.Time{}, peaks: map[string]int{}, relieving: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{},
 		fileHashes: map[string]map[string]string{}, syncing: map[string]bool{}, pushErrors: map[string]string{}}
 	b, bcfg, err := loadBucket(cfg.Dir)
 	if err != nil {
@@ -353,10 +359,26 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 					w.info.Disk = r.Disk
 				}
 				w.uploading = r.Uploading
+				w.memTotal, w.memAvailable = r.MemTotal, r.MemAvailable
+			}
+			for _, br := range r.Boxes {
+				if br.PeakMiB > 0 && br.Box.State == "running" {
+					s.peaks[br.Box.ID] = br.PeakMiB
+				} else {
+					delete(s.peaks, br.Box.ID)
+				}
 			}
 			s.mu.Unlock()
 			if w != nil {
 				s.countRequests(w, r.Requests)
+				if r.Pressure == "high" {
+					go s.relieve(w)
+				}
+			}
+			for _, id := range r.ForceSlept {
+				msg := fmt.Sprintf("%s was put to sleep: worker %s's memory passed worker.memory_critical; it wakes when you use it", id, workerID)
+				s.store.event(id, "force-slept", msg)
+				s.notify("force-slept", id, "Box put to sleep", msg)
 			}
 			for _, br := range r.Boxes {
 				prev, err := s.store.box(br.Box.ID)

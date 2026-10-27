@@ -38,7 +38,8 @@ type vm struct {
 	api  *firecracker.Client
 }
 
-func (w *Worker) vsockPath(id string) string { return filepath.Join(w.jailRoot(id), jailVsock) }
+func (w *Worker) vsockPath(id string) string   { return filepath.Join(w.jailRoot(id), jailVsock) }
+func (w *Worker) jailAPIPath(id string) string { return filepath.Join(w.jailRoot(id), jailAPI) }
 
 // startJailer prepares the chroot with hard links to the box's files and starts
 // Firecracker in it, detached. The serial console goes to console.log and reads
