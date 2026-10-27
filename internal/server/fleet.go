@@ -469,11 +469,23 @@ func (s *Server) teardown(ctx context.Context, f *fleet, empty map[string]time.T
 			continue
 		}
 		if !ok {
-			// Destroyed outside Hutch: its boxes restore elsewhere.
-			s.store.setWorkerGone(w.ID)
-			s.store.event("", "gone", w.Name+": its instance no longer exists")
+			// Destroyed outside Hutch: its boxes restore elsewhere. Listings lag
+			// launches, so only an instance missing for a while is gone.
+			s.mu.Lock()
+			since, seen := s.missing[w.ID]
+			if !seen {
+				s.missing[w.ID] = now
+			}
+			s.mu.Unlock()
+			if seen && now.Sub(since) >= 5*time.Minute {
+				s.store.setWorkerGone(w.ID)
+				s.store.event("", "gone", w.Name+": its instance no longer exists")
+			}
 			continue
 		}
+		s.mu.Lock()
+		delete(s.missing, w.ID)
+		s.mu.Unlock()
 		if n.State != provider.Stopped {
 			continue
 		}
