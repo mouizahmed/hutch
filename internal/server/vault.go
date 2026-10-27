@@ -224,6 +224,7 @@ func (s *Server) backup(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	changes, _ := s.store.changes()
 	tmp := filepath.Join(s.cfg.Dir, "backup.db")
 	os.Remove(tmp)
 	defer os.Remove(tmp)
@@ -254,6 +255,7 @@ func (s *Server) backup(ctx context.Context) error {
 	if err := st.PutManifest(ctx, k, fmt.Sprintf("server/backups/%016d", now.UnixMilli()), m); err != nil {
 		return err
 	}
+	s.lastBackup, s.backedUp = now, changes
 	cfg, err := s.settings()
 	if err != nil {
 		return err

@@ -131,6 +131,8 @@ var Keys = []*Key{
 		Doc: "snapshots kept in the bucket per box"},
 	{Path: "backup.interval", Kind: Duration, Default: "1m", Min: "10s", Max: "1h", Layers: server,
 		Doc: "how often the server backs up its database to the bucket, when it changed"},
+	{Path: "backup.warn_after", Kind: Duration, Default: "5m", Min: "1m", Max: "24h", Layers: server,
+		Doc: "hutch doctor warns when changes have waited this long for a backup"},
 	{Path: "retention.backups", Kind: Duration, Default: "30d", Min: "1d", Max: "3650d", Layers: server,
 		Doc: "server backups are kept this long: all from the last hour, then one per hour for a day, then one per day"},
 	{Path: "gc.interval", Kind: Duration, Default: "24h", Min: "1h", Max: "30d", Layers: server,

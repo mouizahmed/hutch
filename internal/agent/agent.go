@@ -274,6 +274,7 @@ func handlers(w *worker.Worker, name string, m *monitor, u *uploader) rpc.Mux {
 			m.kick()
 			return nil, nil
 		},
+		api.WorkerDoctor: func(context.Context, json.RawMessage, *rpc.Out) (any, error) { return doctor(w), nil },
 		api.BoxRename: box(func(ctx context.Context, params json.RawMessage) (*worker.Box, error) {
 			var p api.RenameParams
 			if err := rpc.Decode(params, &p); err != nil {

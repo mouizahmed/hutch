@@ -75,7 +75,24 @@ const (
 	WorkerRm    = "worker.rm"
 	Prestart    = "fleet.prestart"
 	FleetInfo   = "fleet.info"
+	Doctor       = "doctor"        // the server's checks
+	WorkerDoctor = "worker.doctor" // hutchd only
 )
+
+// Check is one hutch doctor result: Status ok, warn, or fail, with a fix for the others.
+type Check struct {
+	Area   string `json:"area"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Detail string `json:"detail,omitempty"`
+	Fix    string `json:"fix,omitempty"`
+}
+
+// DoctorResult is the server's checks and its version.
+type DoctorResult struct {
+	Version string  `json:"version"`
+	Checks  []Check `json:"checks"`
+}
 
 // Fleet describes the elastic workers the server starts; empty without a provider.
 type Fleet struct {

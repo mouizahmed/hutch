@@ -40,7 +40,10 @@ type Server struct {
 	vault    atomic.Pointer[vault]
 	recorded sync.Map // projects whose ID record is in the bucket
 	backupMu sync.Mutex
-	gcMu     sync.Mutex
+	// The last backup's time and the changes it covered; guarded by backupMu.
+	lastBackup time.Time
+	backedUp   int64
+	gcMu       sync.Mutex
 	moving   sync.Map // box ID → *sync.Mutex, held while a box moves off a lost worker
 	copying  sync.Map // "<version>@<worker>" → *sync.Mutex, held while a template copies there
 	// pending is memory held on each worker for boxes being placed, and starting
