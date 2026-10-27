@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"slices"
 	"sort"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/hashicorp/yamux"
 
 	"github.com/mouizahmed/hutch/internal/api"
@@ -19,23 +21,30 @@ import (
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
-const sidebarWidth = 40
+// sidebarWidth is the sidebar's width in columns; tmux keeps it there on resize.
+const sidebarWidth = 44
 
 type rowKind int
 
 const (
-	rowSection rowKind = iota
-	rowBox
+	rowHeader rowKind = iota // "Boxes ────"
+	rowDay                   // TODAY
+	rowBlank
+	rowBox // a box with several threads, or none
 	rowThread
 )
 
 type row struct {
 	kind   rowKind
 	label  string
+	right  string
 	box    api.Box
 	thread api.Thread
 	indent bool
+	at     time.Time
 }
+
+func (r row) selectable() bool { return r.kind == rowBox || r.kind == rowThread }
 
 type sidebar struct {
 	ctx      context.Context
@@ -58,8 +67,13 @@ type sidebar struct {
 	warned      bool     // n or t was pressed once with the agent's login missing
 	status      string
 	err         error
+	width       int
 	height      int
 	frame       int
+	offset      int  // first list row on screen
+	listTop     int  // screen line of the first list row
+	focused     bool // the sidebar pane has focus
+	branch      string
 }
 
 type boxesMsg struct {
@@ -74,12 +88,14 @@ type doneMsg struct {
 }
 
 var (
-	styleSection = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Bold(true)
+	styleBold    = lipgloss.NewStyle().Bold(true)
 	styleDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	styleCursor  = lipgloss.NewStyle().Background(lipgloss.Color("236"))
-	styleShown   = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
+	styleRule    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	stylePath    = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
+	styleCursor  = lipgloss.NewStyle().Background(lipgloss.Color("252")).Foreground(lipgloss.Color("235"))
+	styleBlurred = lipgloss.NewStyle().Background(lipgloss.Color("238"))
+	styleWorking = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
 	styleWaiting = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	styleMerged  = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
 	spinner      = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 )
 
@@ -94,11 +110,20 @@ func runSidebar(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("tmux split-window: %w", err)
 	}
+	right := strings.TrimSpace(string(out))
 	tmuxCmd("resize-pane", "-t", pane, "-x", fmt.Sprint(sidebarWidth)).Run()
-	m := &sidebar{ctx: ctx, exe: exe, cwd: cwd, right: strings.TrimSpace(string(out)), states: map[string]string{}, agent: "claude"}
+	for _, hook := range []string{"client-resized", "window-resized"} {
+		tmuxCmd("set-hook", "-g", hook, "resize-pane -t "+pane+" -x "+fmt.Sprint(sidebarWidth)).Run()
+	}
+	tmuxCmd("select-pane", "-t", pane, "-T", "hutch").Run()
+	tmuxCmd("select-pane", "-t", right, "-T", "").Run()
+	m := &sidebar{ctx: ctx, exe: exe, cwd: cwd, right: right, states: map[string]string{}, agent: "claude", width: sidebarWidth, focused: true}
+	if b, err := exec.Command("git", "-C", cwd, "symbolic-ref", "--short", "-q", "HEAD").Output(); err == nil {
+		m.branch = strings.TrimSpace(string(b))
+	}
 	m.input = textinput.New()
 	m.input.CharLimit = 2000
-	m.input.Width = sidebarWidth - 4
+	m.input.Prompt = "› "
 	if m.sess, err = connect(); err != nil {
 		return err
 	}
@@ -108,7 +133,7 @@ func runSidebar(ctx context.Context) error {
 		// box doesn't wait for one.
 		go rpc.Call(ctx, m.sess, api.Prestart, api.PrestartParams{VCPUs: int(cfg.Int("size.cpu")), MemMiB: int(cfg.Size("size.memory") >> 20)}, nil)
 	}
-	_, err = tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx)).Run()
+	_, err = tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx), tea.WithMouseCellMotion(), tea.WithReportFocus()).Run()
 	return err
 }
 
@@ -153,7 +178,14 @@ func (m *sidebar) poll() tea.Cmd {
 func (m *sidebar) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.height = msg.Height
+		m.width, m.height = msg.Width, msg.Height
+		m.input.Width = msg.Width - 4
+	case tea.FocusMsg:
+		m.focused = true
+	case tea.BlurMsg:
+		m.focused = false
+	case tea.MouseMsg:
+		return m.updateMouse(msg)
 	case tickMsg:
 		m.frame++
 		cmds := []tea.Cmd{tick()}
@@ -268,6 +300,7 @@ func (m *sidebar) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			n = r.box.Threads[0].N
 		}
 		m.show(box, n)
+		m.selectThread(box, n)
 		tmuxCmd("select-pane", "-t", m.right).Run()
 	case "f12":
 		if m.showBox == "" {
@@ -379,7 +412,24 @@ func (m *sidebar) show(box string, n int) {
 		m.lastThread = n
 	}
 	m.showBox, m.showN = box, n
+	title := "shell · " + box
+	for _, b := range m.boxes {
+		for _, t := range b.Threads {
+			if b.ID == box && t.N == n {
+				title = agentLabel(t.Agent) + " · " + target
+			}
+		}
+	}
+	tmuxCmd("select-pane", "-t", m.right, "-T", title).Run()
 	m.respawn(shellJoin(m.exe, "tui", "connect", target))
+}
+
+// agentLabel is how an agent's name reads in titles: claude → Claude.
+func agentLabel(a string) string {
+	if a == "" {
+		return a
+	}
+	return strings.ToUpper(a[:1]) + a[1:]
 }
 
 func (m *sidebar) respawn(cmd string) {
@@ -441,93 +491,108 @@ func (m *sidebar) notifyChanges(boxes []api.Box) {
 	}
 }
 
-// build lays out rows: pinned threads, then boxes by last activity in day
-// sections, then template boxes. A box with one thread is that thread's row.
+// build lays out rows: pinned threads, then boxes by last activity in day groups,
+// then the template box. A box with one thread is that thread's row.
 func (m *sidebar) build() {
-	var pinned []row
 	type entry struct {
 		at   time.Time
 		rows []row
 	}
+	var pinned, template []row
 	var entries []entry
-	var template []row
+	templateState := ""
 	for _, b := range m.boxes {
 		if b.Kind == api.BoxVersion {
 			continue
 		}
 		at := b.Created
-		var rows []row
 		var threads []api.Thread
 		for _, t := range b.Threads {
 			if t.Created.After(at) {
 				at = t.Created
 			}
 			if t.Pinned {
-				pinned = append(pinned, row{kind: rowThread, box: b, thread: t, label: t.Title})
+				pinned = append(pinned, row{kind: rowThread, box: b, thread: t, label: t.Title, at: t.Created})
 				continue
 			}
 			threads = append(threads, t)
 		}
-		switch {
-		case len(threads) == 1:
-			rows = append(rows, row{kind: rowThread, box: b, thread: threads[0], label: threads[0].Title})
-		default:
+		var rows []row
+		if len(threads) == 1 {
+			rows = append(rows, row{kind: rowThread, box: b, thread: threads[0], label: threads[0].Title, at: at})
+		} else {
 			label := b.ID
 			if len(threads) > 1 {
 				label = fmt.Sprintf("▾ %s (%d threads)", b.ID, len(threads))
 			}
-			rows = append(rows, row{kind: rowBox, box: b, label: label})
+			rows = append(rows, row{kind: rowBox, box: b, label: label, at: at})
 			for _, t := range threads {
-				rows = append(rows, row{kind: rowThread, box: b, thread: t, label: t.Title, indent: true})
+				rows = append(rows, row{kind: rowThread, box: b, thread: t, label: t.Title, indent: true, at: t.Created})
 			}
 		}
 		if b.Kind == api.BoxTemplate {
 			template = append(template, rows...)
+			templateState = boxStateWord(b)
 			continue
 		}
 		entries = append(entries, entry{at, rows})
 	}
 	sort.SliceStable(entries, func(i, j int) bool { return entries[i].at.After(entries[j].at) })
+
 	selected := m.selected()
-	m.rows = nil
+	m.rows = []row{{kind: rowHeader, label: "Boxes"}}
 	if len(pinned) > 0 {
-		m.rows = append(m.rows, row{kind: rowSection, label: "PINNED"})
+		m.rows = append(m.rows, row{kind: rowDay, label: "PINNED"})
 		m.rows = append(m.rows, pinned...)
 	}
 	now := time.Now()
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	section := ""
+	day := ""
 	for _, e := range entries {
-		s := "OLDER"
+		d := "OLDER"
 		switch {
 		case !e.at.Before(today):
-			s = "TODAY"
+			d = "TODAY"
 		case !e.at.Before(today.AddDate(0, 0, -1)):
-			s = "YESTERDAY"
+			d = "YESTERDAY"
 		}
-		if s != section {
-			section = s
-			m.rows = append(m.rows, row{kind: rowSection, label: s})
+		if d != day {
+			if day != "" || len(pinned) > 0 {
+				m.rows = append(m.rows, row{kind: rowBlank})
+			}
+			day = d
+			m.rows = append(m.rows, row{kind: rowDay, label: d})
 		}
 		m.rows = append(m.rows, e.rows...)
 	}
 	if len(template) > 0 {
-		m.rows = append(m.rows, row{kind: rowSection, label: "TEMPLATE"})
+		m.rows = append(m.rows, row{kind: rowBlank}, row{kind: rowHeader, label: "Template box", right: templateState})
 		m.rows = append(m.rows, template...)
 	}
-	m.cursor = 0
+	m.cursor = -1
 	for i, r := range m.rows {
-		if r.kind != rowSection && r.box.ID == selected.box.ID && r.thread.N == selected.thread.N {
+		if r.selectable() && r.box.ID == selected.box.ID && r.thread.N == selected.thread.N {
 			m.cursor = i
 		}
 	}
-	if m.cursor == 0 {
+	if m.cursor < 0 {
+		m.cursor = 0
 		m.move(1)
 	}
 }
 
+func boxStateWord(b api.Box) string {
+	switch b.State {
+	case "running":
+		return "awake"
+	case "":
+		return ""
+	}
+	return b.State
+}
+
 func (m *sidebar) selected() row {
-	if m.cursor < len(m.rows) {
+	if m.cursor >= 0 && m.cursor < len(m.rows) {
 		return m.rows[m.cursor]
 	}
 	return row{}
@@ -535,7 +600,7 @@ func (m *sidebar) selected() row {
 
 func (m *sidebar) selectThread(box string, n int) {
 	for i, r := range m.rows {
-		if r.box.ID == box && r.thread.N == n {
+		if r.selectable() && r.box.ID == box && r.thread.N == n {
 			m.cursor = i
 		}
 	}
@@ -543,81 +608,164 @@ func (m *sidebar) selectThread(box string, n int) {
 
 func (m *sidebar) move(d int) {
 	for i := m.cursor + d; i >= 0 && i < len(m.rows); i += d {
-		if m.rows[i].kind != rowSection {
+		if m.rows[i].selectable() {
 			m.cursor = i
 			return
 		}
 	}
 }
 
+// updateMouse selects and opens a row on click, and moves with the wheel.
+func (m *sidebar) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case msg.Button == tea.MouseButtonWheelUp:
+		m.move(-1)
+	case msg.Button == tea.MouseButtonWheelDown:
+		m.move(1)
+	case msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress:
+		i := msg.Y - m.listTop + m.offset
+		if i >= 0 && i < len(m.rows) && m.rows[i].selectable() && msg.Y >= m.listTop {
+			m.cursor = i
+			return m.updateKey(tea.KeyMsg{Type: tea.KeyEnter})
+		}
+	}
+	return m, nil
+}
+
 func (m *sidebar) View() string {
-	var b strings.Builder
-	title := " hutch"
+	w := max(m.width, 20)
+	var top []string
+	path := m.cwd
+	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(path, home) {
+		path = "~" + strings.TrimPrefix(path, home)
+	}
+	head := " " + stylePath.Render(truncate(path, w-4))
+	if m.branch != "" && lipgloss.Width(head)+len(m.branch)+4 < w {
+		head += styleDim.Render("  ⎇ " + m.branch)
+	}
+	top = append(top, head)
 	working := 0
-	for _, x := range m.boxes {
-		for _, t := range x.Threads {
+	for _, b := range m.boxes {
+		for _, t := range b.Threads {
 			if t.State == api.ThreadWorking {
 				working++
 			}
 		}
 	}
+	right := ""
 	if working > 0 {
-		title += fmt.Sprintf(" · %d working", working)
+		right = styleWorking.Render(fmt.Sprintf("%d working", working))
 	}
-	b.WriteString(styleSection.Render(title) + "\n")
+	top = append(top, spread(" "+styleBold.Render("boxes")+styleDim.Render(" · threads"), right, w-1), "")
 	if len(m.missing) > 0 {
-		b.WriteString(styleWaiting.Render(" ! not logged in: "+strings.Join(m.missing, ", ")) + "\n")
-		b.WriteString(styleDim.Render("   L logs in (a browser opens)") + "\n")
+		top = append(top, styleWaiting.Render(truncate(" ! not logged in: "+strings.Join(m.missing, ", "), w-1)),
+			styleDim.Render(truncate("   L logs in (a browser opens)", w-1)), "")
 	}
-	b.WriteString("\n")
+
+	var bottom []string
+	wrap := lipgloss.NewStyle().Width(w - 2).PaddingLeft(1)
+	switch {
+	case m.inputFor != "":
+		label := "New task"
+		if m.inputFor != "new" {
+			label = "New thread in " + m.inputFor
+		}
+		bottom = append(bottom, styleRule.Render(strings.Repeat("─", w-1)), " "+styleBold.Render(label), " "+m.input.View(), styleDim.Render(" enter starts · esc cancels"))
+	case m.err != nil:
+		bottom = append(bottom, wrap.Inherit(styleWaiting).Render(truncate(m.err.Error(), w*3)))
+	case m.status != "":
+		bottom = append(bottom, wrap.Inherit(styleDim).Render(truncate(m.status, w*3)))
+	}
+
+	height := m.height - len(top) - len(bottom)
+	if height < 3 {
+		height = 3
+	}
+	list := m.rows
+	if len(list) <= 1 {
+		list = nil
+	}
+	// Keep the cursor on screen, a row of context past it where there is one.
+	if m.cursor < m.offset+1 {
+		m.offset = max(m.cursor-1, 0)
+	}
+	if m.cursor > m.offset+height-2 {
+		m.offset = m.cursor - height + 2
+	}
+	m.offset = max(min(m.offset, len(list)-height), 0)
+	m.listTop = len(top)
+
+	var b strings.Builder
+	for _, l := range top {
+		b.WriteString(l + "\n")
+	}
 	lines := 0
-	for i, r := range m.rows {
-		line := m.renderRow(r)
+	if len(list) == 0 {
+		b.WriteString(styleDim.Render(" No boxes yet. n starts a task.") + "\n")
+		lines++
+	}
+	for i := m.offset; i < len(list) && lines < height; i++ {
+		if lines == height-1 && i < len(list)-1 {
+			b.WriteString(styleDim.Render(spread("", fmt.Sprintf("↓ %d more", len(list)-i), w-1)) + "\n")
+			lines++
+			break
+		}
+		line := m.renderRow(list[i], w-1)
 		if i == m.cursor {
-			line = styleCursor.Render(padRight(line, sidebarWidth-1))
+			st := styleCursor
+			if !m.focused {
+				st = styleBlurred
+			}
+			line = st.Render(padRight(lipgloss.NewStyle().UnsetForeground().Render(stripStyle(line)), w-1))
 		}
 		b.WriteString(line + "\n")
 		lines++
 	}
-	if len(m.rows) == 0 && m.err == nil {
-		b.WriteString(styleDim.Render(" No boxes yet: n starts a task.") + "\n")
+	for ; lines < height; lines++ {
+		b.WriteString("\n")
 	}
-	b.WriteString("\n")
-	if m.inputFor != "" {
-		b.WriteString(" " + m.input.View() + "\n" + styleDim.Render(" enter start · esc cancel") + "\n")
-	} else {
-		wrap := lipgloss.NewStyle().Width(sidebarWidth - 2).PaddingLeft(1)
-		if m.err != nil {
-			b.WriteString(wrap.Inherit(styleWaiting).Render(truncate(m.err.Error(), sidebarWidth*3)) + "\n")
-		} else if m.status != "" {
-			b.WriteString(wrap.Inherit(styleDim).Render(truncate(m.status, sidebarWidth*3)) + "\n")
-		}
-		b.WriteString(styleDim.Render(" enter open · n new · t thread · ? keys") + "\n")
+	for _, l := range bottom {
+		b.WriteString(l + "\n")
 	}
-	return b.String()
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
-func (m *sidebar) renderRow(r row) string {
-	if r.kind == rowSection {
-		return " " + styleSection.Render(r.label)
+func (m *sidebar) renderRow(r row, w int) string {
+	switch r.kind {
+	case rowBlank:
+		return ""
+	case rowDay:
+		return " " + styleDim.Render(r.label)
+	case rowHeader:
+		left := " " + styleBold.Render(r.label) + " "
+		right := ""
+		if r.right != "" {
+			right = " " + styleDim.Render(r.right)
+		}
+		fill := w - lipgloss.Width(left) - lipgloss.Width(right)
+		return left + styleRule.Render(strings.Repeat("─", max(fill, 0))) + right
 	}
 	b := r.box
-	mark := ""
+	bullet := styleDim.Render("·")
 	switch {
 	case b.Merged != "":
-		mark = styleMerged.Render("✓")
+		bullet = styleWorking.Render("✓")
 	case b.State == "asleep":
-		mark = styleDim.Render("zz")
+		bullet = styleDim.Render("z")
 	case b.State == "archived":
-		mark = styleDim.Render("▫")
+		bullet = styleDim.Render("▫")
 	case b.State == "queued":
-		mark = styleDim.Render("⏸")
-	case r.kind == rowThread && r.thread.State == api.ThreadWorking:
-		mark = spinner[m.frame%len(spinner)]
-	case r.kind == rowThread && r.thread.State == api.ThreadWaiting:
-		mark = styleWaiting.Render("●")
-	case r.kind == rowThread && r.thread.State == api.ThreadExited:
-		mark = styleDim.Render("×")
+		bullet = styleDim.Render("⏸")
+	case r.kind == rowBox:
+		bullet = ""
+	case r.thread.State == api.ThreadWorking:
+		bullet = styleWorking.Render(spinner[m.frame%len(spinner)])
+	case r.thread.State == api.ThreadWaiting:
+		bullet = styleWaiting.Render("●")
+	}
+	indent := " "
+	if r.indent {
+		indent = "   "
 	}
 	label := r.label
 	if r.kind == rowThread && !r.indent {
@@ -627,17 +775,52 @@ func (m *sidebar) renderRow(r row) string {
 	if r.kind == rowThread && r.thread.Agent != m.agent {
 		tag = " [" + r.thread.Agent + "]"
 	}
-	indent := " "
-	if r.indent {
-		indent = "   "
+	age := shortAge(r.at)
+	left := indent
+	if bullet != "" {
+		left += bullet + " "
 	}
-	room := sidebarWidth - 1 - len([]rune(indent)) - lipgloss.Width(mark) - lipgloss.Width(tag) - 2
-	text := indent + truncate(label, room) + styleDim.Render(tag)
-	if r.box.ID == m.showBox && (r.kind == rowThread && r.thread.N == m.showN || r.kind == rowBox && m.showN == 0) {
-		text = indent + styleShown.Render(truncate(label, room)) + styleDim.Render(tag)
+	room := w - lipgloss.Width(left) - len([]rune(tag)) - len(age) - 2
+	text := truncate(label, room)
+	shown := b.ID == m.showBox && (r.kind == rowThread && r.thread.N == m.showN || r.kind == rowBox && m.showN == 0)
+	switch {
+	case shown:
+		text = styleBold.Render(text)
+	case r.kind == rowBox:
+		text = styleDim.Render(text)
 	}
-	return padRight(text, sidebarWidth-2-lipgloss.Width(mark)) + mark
+	return spread(left+text+styleDim.Render(tag), styleDim.Render(age), w)
 }
+
+// spread puts right at the right edge of a line of width w.
+func spread(left, right string, w int) string {
+	gap := w - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + right
+}
+
+// shortAge is how long ago, in at most three characters: now, 12m, 4h, 6d, 3w.
+func shortAge(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case t.IsZero():
+		return ""
+	case d < time.Minute:
+		return "now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	case d < 14*24*time.Hour:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+	return fmt.Sprintf("%dw", int(d.Hours()/24/7))
+}
+
+// stripStyle removes styling, so a selected row takes the selection's colors.
+func stripStyle(s string) string { return ansi.Strip(s) }
 
 func truncate(s string, n int) string {
 	r := []rune(s)

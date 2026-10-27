@@ -100,16 +100,21 @@ set -g set-titles on
 set -g set-titles-string hutch
 set -g bell-action any
 set -g visual-bell off
-set -g pane-border-style fg=colour238
-set -g pane-active-border-style fg=colour39
+set -g pane-border-lines single
+set -g pane-border-indicators off
+set -g pane-border-style fg=colour240
+set -g pane-active-border-style fg=colour240
+set -g pane-border-status top
+set -g pane-border-format "#[fg=colour250]#{?pane_title, #{pane_title} ,}"
 set -g status on
 set -g status-position bottom
 set -g status-style bg=default,fg=colour244
-set -g status-left ""
+set -g status-justify left
+set -g status-left " Ctrl-] sidebar ↔ right · Ctrl-\\ agent ↔ shell · ? keys"
+set -g status-left-length 120
+set -g status-right ""
 set -g window-status-format ""
 set -g window-status-current-format ""
-set -g status-right " Ctrl-] sidebar/agent · Ctrl-\\ agent/shell · ? keys "
-set -g status-right-length 100
 bind -n C-] select-pane -t :.+
 bind -n 'C-\' send-keys -t '{left}' F12
 `
