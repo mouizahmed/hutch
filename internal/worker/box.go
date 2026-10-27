@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -70,8 +71,13 @@ func growDisk(path string, size int64) error {
 	if err := os.Truncate(path, size); err != nil {
 		return err
 	}
-	if err := run("e2fsck", "-fp", path); err != nil {
-		return err
+	// A snapshot's disk was never unmounted: e2fsck replays its journal and exits 1
+	// (errors corrected) or 2; only 4 and up are failures.
+	if out, err := exec.Command("e2fsck", "-fp", path).CombinedOutput(); err != nil {
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() >= 4 {
+			return fmt.Errorf("e2fsck %s: %v: %s", path, err, out)
+		}
 	}
 	return run("resize2fs", "-f", path)
 }

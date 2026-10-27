@@ -300,3 +300,54 @@ func (w *Worker) coldWake(ctx context.Context, b *Box) (*Box, error) {
 	}
 	return b, nil
 }
+
+// Resize changes a sleeping box's size. Its memory snapshot no longer fits the VM,
+// so it is dropped as in Archive and the next wake is a cold boot. Disks only grow.
+func (w *Worker) Resize(id string, vcpus, memMiB int, diskBytes int64) (*Box, error) {
+	unlock, err := w.lock(id)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	b, err := w.load(id)
+	if err != nil {
+		return nil, err
+	}
+	if b.State != Asleep && b.State != Archived {
+		return nil, fmt.Errorf("box %q is %s", id, b.State)
+	}
+	rootfs := filepath.Join(w.boxDir(id), "rootfs.ext4")
+	if diskBytes > 0 {
+		fi, err := os.Stat(rootfs)
+		if err != nil {
+			return nil, err
+		}
+		if diskBytes < fi.Size() {
+			return nil, fmt.Errorf("disks only grow: %s is %d GB", id, fi.Size()>>30)
+		}
+		if err := growDisk(rootfs, diskBytes); err != nil {
+			return nil, err
+		}
+	}
+	gen := w.genDir(id, b.Generation+1)
+	if err := os.MkdirAll(gen, 0o755); err != nil {
+		return nil, err
+	}
+	if err := clone(rootfs, filepath.Join(gen, "rootfs.ext4")); err != nil {
+		os.RemoveAll(gen)
+		return nil, err
+	}
+	prev := b.Generation
+	if vcpus > 0 {
+		b.VCPUs = vcpus
+	}
+	if memMiB > 0 {
+		b.MemMiB = memMiB
+	}
+	b.State, b.Generation = Archived, prev+1
+	if err := w.save(b); err != nil {
+		return nil, err
+	}
+	os.RemoveAll(w.genDir(id, prev))
+	return b, nil
+}

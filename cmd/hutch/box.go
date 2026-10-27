@@ -40,6 +40,7 @@ func listBoxes(ctx context.Context, sess *yamux.Session) ([]api.Box, error) {
 func boxCommands() []*cobra.Command {
 	var name, from, image string
 	var cpus, memMiB int
+	var dryRun bool
 	var agent agentFlags
 	newCmd := &cobra.Command{
 		Use:     `new ["<prompt>"]`,
@@ -89,6 +90,9 @@ func boxCommands() []*cobra.Command {
 				if err := checkAllow(p.Allow); err != nil {
 					return err
 				}
+				if dryRun {
+					return printPlan(ctx, sess, cfg, p, agent)
+				}
 				if err := rpc.CallOutput(ctx, sess, api.BoxFork, p, &b, os.Stdout, os.Stderr); err != nil {
 					return err
 				}
@@ -116,6 +120,7 @@ func boxCommands() []*cobra.Command {
 	newCmd.Flags().IntVar(&cpus, "cpus", 0, "vCPUs (with --image; default: size.cpu)")
 	newCmd.Flags().IntVar(&memMiB, "mem", 0, "memory in MiB (with --image; default: size.memory)")
 	newCmd.MarkFlagsMutuallyExclusive("from", "image")
+	newCmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what would happen (worker, template, logins, network) and start nothing")
 
 	ls := &cobra.Command{
 		Use:     "ls",
@@ -437,4 +442,107 @@ func moveCommand() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&to, "to", "", "worker to move to (default: the scheduler's choice)")
 	return cmd
+}
+
+func resizeCommand() *cobra.Command {
+	var cpus int
+	var memory, disk string
+	cmd := &cobra.Command{
+		Use:   "resize <box>",
+		Short: "Change one box's CPUs, memory, or disk (a cold boot; agents resume)",
+		Long: `Change one box's size. It applies with a cold boot: running processes restart
+and agents resume through their adapters. CPU and memory can go up or down; the
+disk only grows. If the box no longer fits its worker, it moves to one that fits.`,
+		GroupID: "boxes",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p := api.ResizeParams{ID: args[0], VCPUs: cpus}
+			if memory != "" {
+				n, err := config.ParseSize(memory)
+				if err != nil {
+					return fmt.Errorf("--memory: %w", err)
+				}
+				p.MemMiB = int(n >> 20)
+			}
+			if disk != "" {
+				n, err := config.ParseSize(disk)
+				if err != nil {
+					return fmt.Errorf("--disk: %w", err)
+				}
+				p.DiskBytes = n
+			}
+			if p.VCPUs == 0 && p.MemMiB == 0 && p.DiskBytes == 0 {
+				return fmt.Errorf("give --cpu, --memory, or --disk")
+			}
+			sess, err := connect()
+			if err != nil {
+				return err
+			}
+			defer sess.Close()
+			return rpc.CallOutput(cmd.Context(), sess, api.BoxResize, p, nil, os.Stdout, os.Stderr)
+		},
+	}
+	cmd.Flags().IntVar(&cpus, "cpu", 0, "vCPUs")
+	cmd.Flags().StringVar(&memory, "memory", "", "memory, like 16G")
+	cmd.Flags().StringVar(&disk, "disk", "", "disk, like 100G (only grows)")
+	return cmd
+}
+
+// printPlan shows what hutch new would do: where the box goes and why, and what
+// it would get.
+func printPlan(ctx context.Context, sess *yamux.Session, cfg *config.Config, p api.ForkParams, agent agentFlags) error {
+	var plan api.Plan
+	if err := rpc.Call(ctx, sess, api.BoxPlan, p, &plan); err != nil {
+		return err
+	}
+	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	where := plan.Worker
+	if where == "" {
+		where = "-"
+	} else {
+		where += " (" + plan.Kind + ")"
+	}
+	cost := "$0 (persistent)"
+	if plan.PerHour > 0 {
+		cost = fmt.Sprintf("$%.3f/h (its share of the worker)", plan.PerHour)
+	} else if plan.Kind == "elastic" {
+		cost = "elastic worker time"
+	}
+	agentName := agent.agent
+	if agentName == "" && agent.cmd == "" {
+		agentName = cfg.String("default_agent")
+	}
+	if agent.cmd != "" {
+		agentName = "command: " + agent.cmd
+	}
+	egress := cfg.String("network.egress")
+	if egress == "allowlist" {
+		egress += " (" + strings.Join(cfg.List("network.domains"), ", ") + ")"
+	}
+	allow := strings.Join(p.Allow, ", ")
+	if allow == "" {
+		allow = "none"
+	}
+	rows := [][2]string{
+		{"Worker", where},
+		{"Why", plan.Why},
+		{"Start", "warm, from the template snapshot (" + plan.Class + ")"},
+		{"Template", plan.Template},
+		{"Size", plan.Size},
+		{"Cost", cost},
+		{"Agent", agentName},
+		{"Autonomy", cfg.String("autonomy")},
+		{"Logins", strings.Join(p.Credentials, ", ")},
+		{"Egress", egress},
+		{"Private targets", allow},
+	}
+	for _, r := range rows {
+		fmt.Fprintf(tw, "%s\t%s\n", r[0], r[1])
+	}
+	tw.Flush()
+	for _, w := range plan.Warnings {
+		fmt.Printf("warning: %s\n", w)
+	}
+	fmt.Println("Nothing was started (--dry-run).")
+	return nil
 }

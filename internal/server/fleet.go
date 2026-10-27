@@ -407,7 +407,6 @@ func (s *Server) teardown(ctx context.Context, f *fleet, empty map[string]time.T
 			awake[b.Worker]++
 		}
 	}
-	after := cfg.Duration("providers.teardown_after")
 	terminate := cfg.String("providers.empty_worker") == "terminate"
 	now := time.Now()
 	for _, w := range workers {
@@ -417,6 +416,13 @@ func (s *Server) teardown(ctx context.Context, f *fleet, empty map[string]time.T
 		s.mu.Lock()
 		c := s.workers[w.ID]
 		busy := c == nil || awake[w.ID] > 0 || s.pending[w.ID] > 0 || c.uploading > 0
+		// A worker started early waits providers.prestart_timeout for its first box.
+		after := cfg.Duration("providers.teardown_after")
+		if busy {
+			delete(s.prestarted, w.ID)
+		} else if s.prestarted[w.ID] {
+			after = cfg.Duration("providers.prestart_timeout")
+		}
 		s.mu.Unlock()
 		if busy {
 			delete(empty, w.ID)
@@ -645,4 +651,43 @@ func instanceMetadata(ctx context.Context) (metadata, error) {
 	}
 	md.securityGroup, _, _ = strings.Cut(groups, "\n")
 	return md, nil
+}
+
+// prestart starts a worker in the background when providers.prestart is on, none
+// has room for a box of the given size, and limits allow it. It returns at once.
+func (s *Server) prestart(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+	var p api.PrestartParams
+	if err := rpc.Decode(params, &p); err != nil {
+		return nil, err
+	}
+	f := s.fleet.Load()
+	v, err := s.limits("providers.prestart")
+	if err != nil || f == nil || v != true {
+		return nil, err
+	}
+	n := need{memMiB: p.MemMiB, vcpus: p.VCPUs}
+	if _, release, err := s.place(n, ""); err == nil {
+		release()
+		return nil, nil
+	}
+	go func() {
+		ctx := context.Background()
+		before := map[string]bool{}
+		for _, w := range s.connectedWorkers() {
+			before[w.id] = true
+		}
+		if err := s.grow(ctx, f, n, io.Discard); err != nil {
+			log.Printf("prestart: %v", err)
+			return
+		}
+		s.mu.Lock()
+		for id := range s.workers {
+			if !before[id] {
+				s.prestarted[id] = true
+				log.Printf("prestarted worker %s", id)
+			}
+		}
+		s.mu.Unlock()
+	}()
+	return nil, nil
 }

@@ -26,7 +26,7 @@ func (s *Server) workerLost(id string) (bool, time.Duration, error) {
 	}
 	for _, w := range ws {
 		if w.ID == id {
-			return time.Since(w.LastSeen) >= after, after, nil
+			return w.Gone || time.Since(w.LastSeen) >= after, after, nil
 		}
 	}
 	return true, after, nil

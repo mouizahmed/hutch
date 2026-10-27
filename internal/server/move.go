@@ -177,3 +177,66 @@ func (s *Server) workerRm(ctx context.Context, params json.RawMessage, _ *rpc.Ou
 	}
 	return nil, fmt.Errorf("no worker %s", p.ID)
 }
+
+// boxResize changes a box's size with a cold boot: it sleeps (a snapshot), drops
+// its memory, takes the new size, and wakes, on another worker if it no longer
+// fits its own. Its agents resume through their adapters.
+func (s *Server) boxResize(ctx context.Context, params json.RawMessage, out *rpc.Out) (any, error) {
+	var p api.ResizeParams
+	if err := rpc.Decode(params, &p); err != nil {
+		return nil, err
+	}
+	stdout, stderr := out.Writers()
+	b, err := s.store.box(p.ID)
+	if err != nil {
+		return nil, err
+	}
+	if b.Kind != "" {
+		return nil, fmt.Errorf("%s is a template box; change the project size instead", p.ID)
+	}
+	n := need{memMiB: b.MemMiB, vcpus: b.VCPUs}
+	if p.MemMiB > 0 {
+		n.memMiB = p.MemMiB
+	}
+	if p.VCPUs > 0 {
+		n.vcpus = p.VCPUs
+	}
+	if err := s.checkFits(ctx, n); err != nil {
+		return nil, err
+	}
+	w, b, err := s.boxWorker(ctx, b)
+	if err != nil {
+		return nil, err
+	}
+	awake := b.State == "running"
+	if awake {
+		fmt.Fprintf(stdout, "Snapshotting %s...\n", p.ID)
+		if _, err := s.callForBox(ctx, w, api.BoxSleep, api.IDParams{ID: p.ID}); err != nil {
+			return nil, err
+		}
+	}
+	nb, err := s.callForBox(ctx, w, api.BoxResize, p)
+	if err != nil {
+		return nil, err
+	}
+	s.store.event(p.ID, "resized", fmt.Sprintf("%d vCPU, %s", nb.VCPUs, mib(nb.MemMiB)))
+	fmt.Fprintf(stdout, "%s is now %d vCPU, %s.\n", p.ID, nb.VCPUs, mib(nb.MemMiB))
+	if !awake {
+		return nb, nil
+	}
+	// It wakes where it fits: its own worker if there's room, else another.
+	if _, release, err := s.place(n, w.id); err == nil {
+		release()
+	} else {
+		fmt.Fprintf(stdout, "It no longer fits %s; moving it.\n", w.info.Name)
+		if _, err := s.move(ctx, p.ID, "", stdout, stderr); err != nil {
+			return nil, err
+		}
+		return s.store.box(p.ID)
+	}
+	fmt.Fprintf(stdout, "Booting %s with its new size...\n", p.ID)
+	if _, err := s.awake(ctx, p.ID); err != nil {
+		return nil, err
+	}
+	return s.store.box(p.ID)
+}

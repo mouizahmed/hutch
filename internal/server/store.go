@@ -291,6 +291,7 @@ func (s *store) putBox(b api.Box) error {
 		INSERT INTO boxes (id, worker_id, state, image, vcpus, mem_mib, generation, class, reach_ip, created, updated)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET worker_id = excluded.worker_id, state = excluded.state, generation = excluded.generation,
+			vcpus = excluded.vcpus, mem_mib = excluded.mem_mib,
 			class = excluded.class, reach_ip = excluded.reach_ip, updated = excluded.updated,
 			state_since = CASE WHEN boxes.state = excluded.state THEN boxes.state_since ELSE excluded.updated END`,
 		b.ID, b.Worker, b.State, b.Image, b.VCPUs, b.MemMiB, b.Generation, b.Class, b.ReachIP, b.Created, time.Now().UTC())

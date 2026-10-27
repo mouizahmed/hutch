@@ -48,6 +48,8 @@ type Server struct {
 	pending  map[string]int
 	starting int
 	fleet    atomic.Pointer[fleet]
+	// prestarted holds workers started early that no box has landed on yet; guarded by mu.
+	prestarted map[string]bool
 	// Bucket requests not yet in the ledger, and the server's own count when last
 	// read; guarded by mu. bucketBytes is the bucket's size, measured hourly.
 	requests, ownRequests [2]int64
@@ -94,7 +96,7 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, store: st, ca: ca, master: master, workers: map[string]*workerConn{}, pending: map[string]int{}, threadStates: map[string]map[int]api.ThreadState{},
+	s := &Server{cfg: cfg, store: st, ca: ca, master: master, workers: map[string]*workerConn{}, pending: map[string]int{}, prestarted: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{},
 		fileHashes: map[string]map[string]string{}, syncing: map[string]bool{}, pushErrors: map[string]string{}}
 	b, bcfg, err := loadBucket(cfg.Dir)
 	if err != nil {

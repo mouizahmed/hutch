@@ -167,7 +167,7 @@ func (s *Server) build(ctx context.Context, proj api.Project, p api.TemplatePara
 func (s *Server) bootTemplate(ctx context.Context, proj api.Project, p api.TemplateParams, stdout, stderr io.Writer) (api.Box, *workerConn, error) {
 	id := templateBoxID(proj)
 	n := need{memMiB: p.MemMiB, vcpus: p.VCPUs}
-	if err := s.checkFits(n); err != nil {
+	if err := s.checkFits(ctx, n); err != nil {
 		return api.Box{}, nil, err
 	}
 	w, release, err := s.placeWait(ctx, n, "", id, stderr)

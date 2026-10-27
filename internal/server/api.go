@@ -49,8 +49,11 @@ func (s *Server) apiMux() rpc.Mux {
 		api.ProviderAdd:      s.providerAdd,
 		api.CostsGet:         s.costsReport,
 		api.BoxMove:          s.boxMove,
+		api.BoxResize:        s.boxResize,
+		api.BoxPlan:          s.boxPlan,
 		api.WorkerDrain:      s.workerDrain,
 		api.WorkerRm:         s.workerRm,
+		api.Prestart:         s.prestart,
 		api.WorkerList:       s.workerList,
 		api.TokenCreate:      s.tokenCreate,
 	}
@@ -147,7 +150,7 @@ func (s *Server) boxBoot(ctx context.Context, params json.RawMessage, out *rpc.O
 		return nil, fmt.Errorf("box %q already exists", p.ID)
 	}
 	n := need{memMiB: p.MemMiB, vcpus: p.VCPUs}
-	if err := s.checkFits(n); err != nil {
+	if err := s.checkFits(ctx, n); err != nil {
 		return nil, err
 	}
 	_, stderr := out.Writers()

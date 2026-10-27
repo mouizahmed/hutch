@@ -291,6 +291,13 @@ func handlers(w *worker.Worker, name string, m *monitor, u *uploader) rpc.Mux {
 			return w.Restore(ctx, p.ID, toStore(&p.Store), p.Generation, s, k)
 		}),
 		api.BoxArchive: byID(func(_ context.Context, id string) (*worker.Box, error) { return w.Archive(id) }),
+		api.BoxResize: box(func(ctx context.Context, params json.RawMessage) (*worker.Box, error) {
+			var p api.ResizeParams
+			if err := rpc.Decode(params, &p); err != nil {
+				return nil, err
+			}
+			return w.Resize(p.ID, p.VCPUs, p.MemMiB, p.DiskBytes)
+		}),
 		api.BoxFiles: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
 			var p api.FilesParams
 			if err := rpc.Decode(params, &p); err != nil {

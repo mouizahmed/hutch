@@ -29,6 +29,8 @@ const (
 	BoxRename  = "box.rename"  // hutchd only
 	BoxFiles   = "box.files"   // hutchd only
 	BoxRestore = "box.restore" // hutchd only
+	BoxResize  = "box.resize"
+	BoxPlan    = "box.plan"
 	BoxArchive = "box.archive" // hutchd only
 	BoxStatus  = "box.status"
 	BoxDial    = "box.dial"
@@ -71,7 +73,35 @@ const (
 	BoxMove     = "box.move"
 	WorkerDrain = "worker.drain"
 	WorkerRm    = "worker.rm"
+	Prestart    = "fleet.prestart"
 )
+
+// PrestartParams asks for a worker with room for a box of this size, started in
+// the background when providers.prestart is on.
+type PrestartParams struct {
+	VCPUs  int `json:"vcpus"`
+	MemMiB int `json:"mem_mib"`
+}
+
+// Plan is what hutch new would do, without doing it.
+type Plan struct {
+	Template string   `json:"template"` // "v3 (recipe @ 1a2b3c)"
+	Size     string   `json:"size"`
+	Worker   string   `json:"worker,omitempty"`
+	Kind     string   `json:"kind,omitempty"` // persistent or elastic
+	Why      string   `json:"why"`
+	Class    string   `json:"class,omitempty"`
+	PerHour  float64  `json:"per_hour,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// ResizeParams changes a box's size; zero values keep what it has.
+type ResizeParams struct {
+	ID        string `json:"id"`
+	VCPUs     int    `json:"vcpus,omitempty"`
+	MemMiB    int    `json:"mem_mib,omitempty"`
+	DiskBytes int64  `json:"disk_bytes,omitempty"`
+}
 
 type MoveParams struct {
 	ID string `json:"id"`
