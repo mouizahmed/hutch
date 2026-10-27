@@ -378,6 +378,9 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 					go s.relieve(w)
 				}
 			}
+			for _, c := range r.Crashed {
+				go s.recoverCrash(workerID, c)
+			}
 			for _, id := range r.ForceSlept {
 				msg := fmt.Sprintf("%s was put to sleep: worker %s's memory passed worker.memory_critical; it wakes when you use it", id, workerID)
 				s.store.event(id, "force-slept", msg)

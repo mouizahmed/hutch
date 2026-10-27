@@ -118,11 +118,13 @@ func Run(ctx context.Context, id Identity, w *worker.Worker, name string) error 
 	}
 	// A host out-of-memory kill of hutchd would leave boxes unmanaged; kill VMs first.
 	os.WriteFile("/proc/self/oom_score_adj", []byte("-900"), 0)
+	w.Recover(ctx)
 	u := newUploader(w)
 	m := newMonitor(w, u)
 	mux, streams := handlers(w, name, m, u), streamHandlers(w)
 	var server atomic.Pointer[yamux.Session]
 	go m.run(ctx, &server)
+	go m.watchPressure(ctx)
 	go u.run(ctx)
 	backoff := time.Second
 	for ctx.Err() == nil {

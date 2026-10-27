@@ -241,6 +241,8 @@ type WorkerSettingsParams struct {
 	MemoryHigh     float64       `json:"memory_high,omitempty"`
 	MemoryCritical float64       `json:"memory_critical,omitempty"`
 	PeakWindow     time.Duration `json:"peak_window,omitempty"`
+	// PressureStall: memory stalls this long within a second trigger a check at once.
+	PressureStall time.Duration `json:"pressure_stall,omitempty"`
 }
 
 // Store places a box's snapshots in the bucket (see worker.Store).
@@ -460,6 +462,15 @@ type Report struct {
 	MemAvailable int      `json:"mem_available,omitempty"`
 	Pressure     string   `json:"pressure,omitempty"`
 	ForceSlept   []string `json:"force_slept,omitempty"`
+	Crashed      []Crash  `json:"crashed,omitempty"`
+}
+
+// Crash is a box whose VM died and was rolled back to its snapshot from Since
+// (asleep or archived), or failed when it had none.
+type Crash struct {
+	Box   string    `json:"box"`
+	State string    `json:"state"`
+	Since time.Time `json:"since"`
 }
 
 type BoxReport struct {

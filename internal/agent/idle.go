@@ -81,6 +81,17 @@ func (m *monitor) check(ctx context.Context, server *atomic.Pointer[yamux.Sessio
 	var report api.Report
 	running := map[string]bool{}
 	for _, b := range boxes {
+		if b.State == worker.Running && !m.w.Alive(b) {
+			// Its VM died: most likely the kernel killed it when memory ran out.
+			if rb, err := m.w.RollBack(b.ID); err != nil {
+				log.Printf("roll back %s: %v", b.ID, err)
+			} else {
+				log.Printf("%s's VM died; rolled back to snapshot %d (%s)", b.ID, rb.Generation, rb.State)
+				report.Boxes = append(report.Boxes, api.BoxReport{Box: toAPI(m.w, rb)})
+				report.Crashed = append(report.Crashed, api.Crash{Box: b.ID, State: string(rb.State), Since: b.Checkpointed})
+			}
+			continue
+		}
 		if !m.w.Alive(b) {
 			continue
 		}

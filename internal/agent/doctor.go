@@ -59,6 +59,13 @@ func doctor(w *worker.Worker) []api.Check {
 	}
 	add("XFS with reflink", reflink, w.Root, fmt.Sprintf("put %s on XFS made with mkfs.xfs -m reflink=1", w.Root))
 
+	err = pressureEvents()
+	detail := ""
+	if err != nil {
+		detail = err.Error()
+	}
+	add("memory pressure events", err == nil, detail, "boot with psi=1 (or a kernel with CONFIG_PSI), so overcommit reacts at once rather than at the next check")
+
 	classes := w.Classes()
 	add("Firecracker", len(classes) > 0, strings.Join(classes, ", "), "install a Firecracker release under "+filepath.Join(w.Root, "firecracker"))
 	return out

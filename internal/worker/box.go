@@ -350,6 +350,19 @@ func (w *Worker) syncGuest(ctx context.Context, b *Box) {
 	(&guestproto.Client{UDSPath: w.vsockPath(b.ID)}).Exec(ctx, guestproto.Exec{Argv: []string{"sync"}, User: "root"}, io.Discard, io.Discard)
 }
 
+// Recover resumes running boxes whose VMs a hutchd stopped mid-snapshot left paused.
+func (w *Worker) Recover(ctx context.Context) {
+	boxes, err := w.List()
+	if err != nil {
+		return
+	}
+	for _, b := range boxes {
+		if w.Alive(b) {
+			w.running(b).api.Resume(ctx)
+		}
+	}
+}
+
 func (w *Worker) running(b *Box) *vm {
 	return &vm{w: w, box: b, slot: slot(b.Slot), jail: w.jailRoot(b.ID), api: firecracker.NewClient(filepath.Join(w.jailRoot(b.ID), jailAPI))}
 }
@@ -362,6 +375,7 @@ func (w *Worker) running(b *Box) *vm {
 func (w *Worker) snapshotGen(ctx context.Context, b *Box, m *vm) (cleanup func(), err error) {
 	prev := b.Generation
 	gen := w.genDir(b.ID, prev+1)
+	os.RemoveAll(gen) // left by a snapshot hutchd didn't finish
 	w.syncGuest(ctx, b)
 	state, diff, err := m.snapshot(ctx)
 	fail := func(err error) (func(), error) {

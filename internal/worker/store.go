@@ -351,3 +351,46 @@ func (w *Worker) Resize(id string, vcpus, memMiB int, diskBytes int64) (*Box, er
 	os.RemoveAll(w.genDir(id, prev))
 	return b, nil
 }
+
+// RollBack resets a box whose VM died (killed when the worker ran out of memory)
+// to its newest snapshot: memory and the disk copy taken with it, so they match.
+// It is then asleep, or archived if that snapshot kept only the disk. A box never
+// snapshotted can't be rolled back and is marked failed.
+func (w *Worker) RollBack(id string) (*Box, error) {
+	unlock, err := w.lock(id)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	b, err := w.load(id)
+	if err != nil {
+		return nil, err
+	}
+	if b.State != Running || w.Alive(b) {
+		return nil, fmt.Errorf("box %q is %s", id, b.State)
+	}
+	w.killFirecracker(b)
+	if b.Slot != 0 {
+		slot(b.Slot).teardown()
+	}
+	b.Slot, b.BaseMem = 0, ""
+	gen := w.genDir(id, b.Generation)
+	disk := filepath.Join(gen, "rootfs.ext4")
+	if _, err := os.Stat(disk); b.Generation == 0 || err != nil {
+		b.State = Failed
+		return b, w.save(b)
+	}
+	rootfs := filepath.Join(w.boxDir(id), "rootfs.ext4")
+	os.Remove(rootfs + ".rollback")
+	if err := clone(disk, rootfs+".rollback"); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(rootfs+".rollback", rootfs); err != nil {
+		return nil, err
+	}
+	b.State = Asleep
+	if _, err := os.Stat(filepath.Join(gen, "mem")); err != nil {
+		b.State = Archived
+	}
+	return b, w.save(b)
+}

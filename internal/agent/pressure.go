@@ -4,7 +4,9 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"os"
 	"sort"
 	"time"
 
@@ -45,6 +47,7 @@ func (m *monitor) measure(b *worker.Box, a *boxActivity) (now, peak int) {
 // to move a working box, and past the critical mark, sleep the least recently
 // active working box. It runs on the worker, so it works while the server is down.
 func (m *monitor) relieve(ctx context.Context, boxes []*worker.Box, report *api.Report) {
+	m.killOrder(boxes)
 	total, avail := worker.HostMemory()
 	report.MemTotal, report.MemAvailable = total, avail
 	s := m.settings.Load()
@@ -123,5 +126,23 @@ func (m *monitor) relieve(ctx context.Context, boxes []*worker.Box, report *api.
 	sort.Slice(working, func(i, j int) bool { return m.seen[working[i].ID].lastActive.Before(m.seen[working[j].ID].lastActive) })
 	if sleep(working[0], "least recently active, memory critical") {
 		report.ForceSlept = append(report.ForceSlept, working[0].ID)
+	}
+}
+
+// killOrder tells the kernel which VM to kill if memory runs out faster than
+// pressure handling can react: idle boxes before working ones. hutchd itself is
+// never chosen before them.
+func (m *monitor) killOrder(boxes []*worker.Box) {
+	window := m.settings.Load().WorkingWindow
+	for _, b := range boxes {
+		a := m.seen[b.ID]
+		if !m.w.Alive(b) || a == nil {
+			continue
+		}
+		adj := "600"
+		if a.working || a.attached || time.Since(a.lastActive) < window {
+			adj = "100"
+		}
+		os.WriteFile(fmt.Sprintf("/proc/%d/oom_score_adj", b.PID), []byte(adj), 0)
 	}
 }

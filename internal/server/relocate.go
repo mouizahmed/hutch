@@ -299,3 +299,23 @@ func (s *Server) resumeThreads(ctx context.Context, w *workerConn, box string) {
 		s.store.event(box, api.ThreadResume, strconv.Itoa(t.N))
 	}
 }
+
+// recoverCrash tells you a box's VM died and wakes it from the snapshot it was
+// rolled back to, so its agents carry on from there.
+func (s *Server) recoverCrash(workerID string, c api.Crash) {
+	if c.State == "failed" {
+		msg := fmt.Sprintf("%s's VM died on %s before it had any snapshot; it can't be recovered (its pushed commits are on origin)", c.Box, workerID)
+		s.store.event(c.Box, "crashed", msg)
+		s.notify("crashed", c.Box, "Box lost", msg)
+		return
+	}
+	msg := fmt.Sprintf("%s's VM died on %s (most likely out of memory); rolled back to its snapshot from %s ago and waking it",
+		c.Box, workerID, time.Since(c.Since).Round(time.Second))
+	s.store.event(c.Box, "crashed", msg)
+	s.notify("crashed", c.Box, "Box rolled back", msg)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	if _, err := s.awake(ctx, c.Box); err != nil {
+		log.Printf("wake %s after its crash: %v", c.Box, err)
+	}
+}

@@ -30,6 +30,9 @@ const (
 	jailLog    = "/firecracker.log"
 )
 
+// vmmOverheadMiB is what a Firecracker process needs beyond its guest's memory.
+const vmmOverheadMiB = 256
+
 type vm struct {
 	w    *Worker
 	box  *Box
@@ -100,6 +103,9 @@ func (w *Worker) startJailer(ctx context.Context, b *Box, s slot, links map[stri
 		"--chroot-base-dir", filepath.Join(w.Root, "jail"),
 		"--netns", s.netnsPath(),
 		"--cgroup-version", "2",
+		// A VM holds at most its memory plus the VMM's own: a runaway one is
+		// throttled, not allowed to take the worker's memory.
+		"--cgroup", fmt.Sprintf("memory.high=%d", int64(b.MemMiB+vmmOverheadMiB)<<20),
 		"--", "--api-sock", jailAPI, "--log-path", jailLog)
 	cmd.Stdin = stdin
 	cmd.Stdout = console

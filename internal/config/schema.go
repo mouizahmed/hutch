@@ -110,6 +110,8 @@ var Keys = []*Key{
 		Doc: "with overcommit: past this share of a worker's memory, it takes no new boxes, reclaims guest memory, sleeps idle boxes, then moves working ones"},
 	{Path: "worker.memory_critical", Kind: Percent, Default: "90%", Min: "60%", Max: "98%", Layers: server,
 		Doc: "with overcommit: past this, with nowhere to move, the least recently active working box sleeps and you're notified"},
+	{Path: "worker.pressure_stall", Kind: Duration, Default: "50ms", Min: "10ms", Max: "1s", Layers: server,
+		Doc: "with overcommit: when tasks on a worker stall on memory this long within a second, it handles pressure at once instead of at the next check"},
 	{Path: "worker.peak_window", Kind: Duration, Default: "1h", Min: "5m", Max: "7d", Layers: server,
 		Doc: "with overcommit: a box counts at its highest measured memory use over this window"},
 	{Path: "worker.disk_reserve", Kind: Percent, Default: "10%", Min: "0%", Max: "50%", Layers: server,

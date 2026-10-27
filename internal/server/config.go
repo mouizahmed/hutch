@@ -85,7 +85,7 @@ func (s *Server) sendWorkerSettings(ctx context.Context, w *workerConn) {
 	p := api.WorkerSettingsParams{IdleInterval: c.Duration("idle.check_interval"), WorkingWindow: c.Duration("threads.working_window"),
 		Checkpoint: c.Duration("checkpoint.interval"), ChunkCache: c.Percent("worker.chunk_cache"), Refresh: c.Duration("gc.grace") / 2,
 		Overcommit: c.Float("worker.overcommit"), MemoryHigh: c.Percent("worker.memory_high"), MemoryCritical: c.Percent("worker.memory_critical"),
-		PeakWindow: c.Duration("worker.peak_window")}
+		PeakWindow: c.Duration("worker.peak_window"), PressureStall: c.Duration("worker.pressure_stall")}
 	if v := s.vault.Load(); v != nil {
 		cfg := v.cfg
 		p.Bucket = &cfg
