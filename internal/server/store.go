@@ -91,6 +91,14 @@ CREATE TABLE IF NOT EXISTS box_git (
 	branch TEXT NOT NULL,
 	base   TEXT NOT NULL
 );
+-- A template version built again for another snapshot class, as its own box.
+CREATE TABLE IF NOT EXISTS template_builds (
+	project_id TEXT NOT NULL,
+	version    INTEGER NOT NULL,
+	class      TEXT NOT NULL,
+	box_id     TEXT NOT NULL,
+	PRIMARY KEY (project_id, version, class)
+);
 -- Workers holding a template version besides the one in boxes (boxes.worker_id).
 CREATE TABLE IF NOT EXISTS version_copies (
 	box_id    TEXT NOT NULL,
@@ -161,6 +169,7 @@ var migrations = []string{
 	`ALTER TABLE workers ADD COLUMN gone INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE tokens ADD COLUMN node_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE workers ADD COLUMN draining INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE templates ADD COLUMN params TEXT NOT NULL DEFAULT ''`,
 }
 
 func openStore(path string, userKey durable.Key) (*store, error) {
@@ -843,8 +852,55 @@ func (s *store) versionsInUse(project string) (map[int]bool, map[string]bool, er
 }
 
 func (s *store) deleteTemplate(project string, version int) error {
+	if _, err := s.db.Exec(`DELETE FROM template_builds WHERE project_id = ? AND version = ?`, project, version); err != nil {
+		return err
+	}
 	_, err := s.db.Exec(`DELETE FROM templates WHERE project_id = ? AND version = ?`, project, version)
 	return err
+}
+
+// setTemplateParams keeps how a version was built, to build it again for another class.
+func (s *store) setTemplateParams(project string, version int, params string) error {
+	_, err := s.db.Exec(`UPDATE templates SET params = ? WHERE project_id = ? AND version = ?`, params, project, version)
+	return err
+}
+
+func (s *store) templateParams(project string, version int) (string, error) {
+	var p string
+	err := s.db.QueryRow(`SELECT params FROM templates WHERE project_id = ? AND version = ?`, project, version).Scan(&p)
+	return p, err
+}
+
+type templateBuild struct{ class, box string }
+
+// templateBuilds lists a version's builds: the original and any for other classes.
+func (s *store) templateBuilds(project string, version int) ([]templateBuild, error) {
+	rows, err := s.db.Query(`SELECT b.class, t.box_id FROM templates t JOIN boxes b ON b.id = t.box_id WHERE t.project_id = ? AND t.version = ?
+		UNION ALL SELECT class, box_id FROM template_builds WHERE project_id = ? AND version = ?`, project, version, project, version)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []templateBuild
+	for rows.Next() {
+		var b templateBuild
+		if err := rows.Scan(&b.class, &b.box); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+func (s *store) addTemplateBuild(project string, version int, class, box string) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO template_builds (project_id, version, class, box_id) VALUES (?, ?, ?, ?)`, project, version, class, box)
+	return err
+}
+
+// buildVersion finds which version and class a per-class build box is.
+func (s *store) buildVersion(box string) (project string, version int, class string, err error) {
+	err = s.db.QueryRow(`SELECT project_id, version, class FROM template_builds WHERE box_id = ?`, box).Scan(&project, &version, &class)
+	return
 }
 
 func (s *store) projects() ([]string, error) {

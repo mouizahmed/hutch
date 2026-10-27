@@ -85,22 +85,21 @@ func (s *Server) templateBuild(ctx context.Context, params json.RawMessage, out 
 		return nil, err
 	}
 	stdout, stderr := out.Writers()
-	return s.build(ctx, proj, p, stdout, stderr)
+	return s.build(ctx, proj, p, templateBoxID(proj), stdout, stderr)
 }
 
 // build runs the recipe at p.Commit in a fresh VM, the project's template box,
 // replacing any template box there was. A failed build leaves the box to inspect.
-func (s *Server) build(ctx context.Context, proj api.Project, p api.TemplateParams, stdout, stderr io.Writer) (api.Box, error) {
+func (s *Server) build(ctx context.Context, proj api.Project, p api.TemplateParams, id string, stdout, stderr io.Writer) (api.Box, error) {
 	ctx, cancel := context.WithTimeout(ctx, p.BuildTimeout)
 	defer cancel()
-	id := templateBoxID(proj)
 	if _, err := s.store.box(id); err == nil {
 		fmt.Fprintf(stdout, "Replacing the template box %s; changes made in it by hand are discarded.\n", id)
 		if err := s.removeBox(ctx, id); err != nil {
 			return api.Box{}, err
 		}
 	}
-	b, w, err := s.bootTemplate(ctx, proj, p, stdout, stderr)
+	b, w, err := s.bootTemplate(ctx, proj, p, id, stdout, stderr)
 	if err != nil {
 		return b, err
 	}
@@ -164,13 +163,12 @@ func (s *Server) build(ctx context.Context, proj api.Project, p api.TemplatePara
 
 // bootTemplate cold boots the project's template box from the base image with the
 // repository cloned at /workspace.
-func (s *Server) bootTemplate(ctx context.Context, proj api.Project, p api.TemplateParams, stdout, stderr io.Writer) (api.Box, *workerConn, error) {
-	id := templateBoxID(proj)
+func (s *Server) bootTemplate(ctx context.Context, proj api.Project, p api.TemplateParams, id string, stdout, stderr io.Writer) (api.Box, *workerConn, error) {
 	n := need{memMiB: p.MemMiB, vcpus: p.VCPUs}
 	if err := s.checkFits(ctx, n); err != nil {
 		return api.Box{}, nil, err
 	}
-	w, release, err := s.placeWait(ctx, n, "", id, stderr)
+	w, release, err := s.placeWait(ctx, n, p.Worker, id, stderr)
 	if err != nil {
 		return api.Box{}, nil, err
 	}
@@ -215,7 +213,7 @@ func (s *Server) templateSnapshot(ctx context.Context, params json.RawMessage, o
 	}
 	if m.verified && m.commit == p.Commit && m.secrets == digest && b.State == "running" {
 		fmt.Fprintf(stdout, "Using the build of %.12s in %s.\n", p.Commit, id)
-	} else if _, err := s.build(ctx, proj, p, stdout, stderr); err != nil {
+	} else if _, err := s.build(ctx, proj, p, id, stdout, stderr); err != nil {
 		return nil, err
 	}
 	w, err := s.workerFor(id)
@@ -260,6 +258,9 @@ func (s *Server) templateSnapshot(ctx context.Context, params json.RawMessage, o
 	t := api.Template{Project: proj.ID, Version: n, Commit: p.Commit, Box: vid, VCPUs: vb.VCPUs, MemMiB: vb.MemMiB, Created: time.Now().UTC(), Secrets: built.secrets}
 	if err := s.store.addTemplate(t); err != nil {
 		return nil, err
+	}
+	if params, err := json.Marshal(p); err == nil {
+		s.store.setTemplateParams(proj.ID, n, string(params))
 	}
 	fmt.Fprintf(stdout, "\nTemplate v%d = recipe @ %.12s\n", n, p.Commit)
 	s.pruneVersions(ctx, proj.ID)
@@ -322,7 +323,7 @@ func (s *Server) templateBox(ctx context.Context, params json.RawMessage, out *r
 	}
 	stdout, stderr := out.Writers()
 	if len(versions) == 0 {
-		b, w, err := s.bootTemplate(ctx, proj, p, stdout, stderr)
+		b, w, err := s.bootTemplate(ctx, proj, p, id, stdout, stderr)
 		if err != nil {
 			return b, err
 		}
@@ -330,12 +331,12 @@ func (s *Server) templateBox(ctx context.Context, params json.RawMessage, out *r
 		return b, err
 	}
 	v := versions[0]
-	w, release, err := s.versionWorker(ctx, v, id, stderr)
+	w, release, source, err := s.versionWorker(ctx, v, id, stderr)
 	if err != nil {
 		return nil, err
 	}
 	defer release()
-	b, err := s.callForBox(ctx, w, api.BoxFork, api.ForkParams{Source: v.Box, ID: id, Idle: p.Idle, Allow: p.Allow})
+	b, err := s.callForBox(ctx, w, api.BoxFork, api.ForkParams{Source: source, ID: id, Idle: p.Idle, Allow: p.Allow})
 	if err != nil {
 		return nil, err
 	}
@@ -360,13 +361,13 @@ func (s *Server) forkProject(ctx context.Context, p api.ForkParams, stdout, stde
 		return api.Box{}, errors.New("this project has no template yet: hutch template snapshot (or hutch new --from base)")
 	}
 	v := versions[0]
-	w, release, err := s.versionWorker(ctx, v, p.ID, stderr)
+	w, release, source, err := s.versionWorker(ctx, v, p.ID, stderr)
 	if err != nil {
 		return api.Box{}, err
 	}
 	defer release()
 	s.hostProject(ctx, w, p.Project)
-	p.Source, p.Store = v.Box, s.boxStore(p.Project, p.ID)
+	p.Source, p.Store = source, s.boxStore(p.Project, p.ID)
 	b, err := s.callForBox(ctx, w, api.BoxFork, p)
 	if err != nil {
 		return b, err
@@ -535,6 +536,12 @@ func (s *Server) pruneVersions(ctx context.Context, project string) {
 		if err := s.removeBox(ctx, v.Box); err != nil {
 			log.Printf("prune %s v%d: %v", project, v.Version, err)
 			continue
+		}
+		builds, _ := s.store.templateBuilds(project, v.Version)
+		for _, b := range builds {
+			if b.box != v.Box {
+				s.removeBox(ctx, b.box)
+			}
 		}
 		s.store.deleteTemplate(project, v.Version)
 		log.Printf("pruned template %s v%d", project, v.Version)

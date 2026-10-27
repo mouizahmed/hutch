@@ -96,6 +96,9 @@ func (s *Server) storeOf(b api.Box) (*api.Store, error) {
 				return s.versionStore(b.Project, b.Class, v.Version), nil
 			}
 		}
+		if project, version, class, err := s.store.buildVersion(b.ID); err == nil {
+			return s.versionStore(project, class, version), nil
+		}
 	}
 	if b.Kind != "" || b.Project == "" {
 		return nil, fmt.Errorf("%s isn't stored in the bucket", b.ID)

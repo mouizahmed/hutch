@@ -331,6 +331,8 @@ type TemplateParams struct {
 	Allow        []string      `json:"allow,omitempty"`
 	BuildTimeout time.Duration `json:"build_timeout"`
 	QuietTimeout time.Duration `json:"quiet_timeout"`
+	// Worker pins the build to one worker: a template built for its snapshot class.
+	Worker string `json:"worker,omitempty"`
 }
 
 type ProjectParams struct {

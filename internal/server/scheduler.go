@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -245,63 +246,173 @@ func (s *Server) checkFits(ctx context.Context, n need) error {
 		n, strings.Join(candidates, "; "))
 }
 
-// versionWorker returns a worker with a copy of a template version that can take
-// a fork of it, copying the version there from the bucket when the chosen worker
-// doesn't have it. release frees the fork's reservation.
-func (s *Server) versionWorker(ctx context.Context, v api.Template, box string, out io.Writer) (*workerConn, func(), error) {
-	src, err := s.store.box(v.Box)
-	if err != nil {
-		return nil, nil, err
-	}
-	n := need{memMiB: v.MemMiB, vcpus: v.VCPUs, class: src.Class, strict: true, version: v.Box}
+// versionWorker returns a worker that can take a fork of template version v, and
+// the build to fork from. It prefers a worker of a snapshot class the version has
+// a build for, copying that build there from the bucket if the worker doesn't have
+// it. When no worker runs any of those classes, it builds the version again for
+// the class of a worker with room (starting one if needed): the same recipe commit,
+// since snapshots don't cross classes. release frees the fork's reservation.
+func (s *Server) versionWorker(ctx context.Context, v api.Template, box string, out io.Writer) (*workerConn, func(), string, error) {
+	n := need{memMiB: v.MemMiB, vcpus: v.VCPUs}
 	if err := s.checkFits(ctx, n); err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
-	w, release, err := s.placeWait(ctx, n, "", box, out)
+	for attempt := 0; attempt < 2; attempt++ {
+		builds, err := s.store.templateBuilds(v.Project, v.Version)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		for _, b := range builds {
+			bn := n
+			bn.class, bn.strict, bn.version = b.class, true, b.box
+			if w, release, err := s.place(bn, ""); err == nil {
+				if err := s.copyVersion(ctx, w, v, b.box); err != nil {
+					release()
+					return nil, nil, "", err
+				}
+				return w, release, b.box, nil
+			}
+		}
+		if attempt == 0 {
+			for _, b := range builds {
+				if !s.canStart(ctx, b.class) {
+					continue
+				}
+				bn := n
+				bn.class, bn.strict, bn.version = b.class, true, b.box
+				w, release, err := s.placeWait(ctx, bn, "", box, out)
+				if err != nil {
+					return nil, nil, "", err
+				}
+				if err := s.copyVersion(ctx, w, v, b.box); err != nil {
+					release()
+					return nil, nil, "", err
+				}
+				return w, release, b.box, nil
+			}
+		}
+		w, release, err := s.placeWait(ctx, n, "", box, out)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		release()
+		// A worker just started may run one of the version's classes after all.
+		have := false
+		for _, b := range builds {
+			have = have || slices.Contains(workerClasses(w.info), b.class)
+		}
+		if have {
+			continue
+		}
+		if _, err := s.buildForClass(ctx, v, w, out); err != nil {
+			return nil, nil, "", err
+		}
+	}
+	return nil, nil, "", fmt.Errorf("no worker can run template v%d", v.Version)
+}
+
+// canStart reports whether a stopped elastic worker of snapshot class c can be
+// started within limits.cloud_workers: faster than building a template again.
+func (s *Server) canStart(ctx context.Context, c string) bool {
+	f := s.fleet.Load()
+	if f == nil || int64(s.cloudRunning(ctx, f)) >= s.limitInt("limits.cloud_workers") {
+		return false
+	}
+	ws, err := s.store.workers()
 	if err != nil {
-		return nil, nil, err
+		return false
 	}
-	// Boxes forked at once onto a new worker copy the template there once.
-	mu, _ := s.copying.LoadOrStore(v.Box+"@"+w.id, &sync.Mutex{})
+	for _, w := range ws {
+		if !w.Gone && w.Node != "" && !w.Stopped.IsZero() && slices.Contains(workerClasses(w), c) {
+			return true
+		}
+	}
+	return false
+}
+
+// copyVersion makes sure a worker has a template build, copying it from the bucket.
+func (s *Server) copyVersion(ctx context.Context, w *workerConn, v api.Template, buildBox string) error {
+	// Boxes forked at once onto a new worker copy the build there once.
+	mu, _ := s.copying.LoadOrStore(buildBox+"@"+w.id, &sync.Mutex{})
 	mu.(*sync.Mutex).Lock()
 	defer mu.(*sync.Mutex).Unlock()
-	have, err := s.store.versionWorkers(v.Box)
+	have, err := s.store.versionWorkers(buildBox)
 	if err != nil {
-		release()
-		return nil, nil, err
+		return err
 	}
-	for _, id := range have {
-		if id == w.id {
-			return w, release, nil
-		}
+	if slices.Contains(have, w.id) {
+		return nil
+	}
+	src, err := s.store.box(buildBox)
+	if err != nil {
+		return err
 	}
 	store, err := s.storeOf(src)
 	if err == nil {
 		var gen int
 		if gen, err = s.latestGeneration(ctx, store); err == nil {
 			s.hostProject(ctx, w, v.Project)
-			err = rpc.Call(ctx, w.sess, api.BoxRestore, api.RestoreParams{ID: v.Box, Store: *store, Generation: gen}, nil)
+			err = rpc.Call(ctx, w.sess, api.BoxRestore, api.RestoreParams{ID: buildBox, Store: *store, Generation: gen}, nil)
 			if err != nil && strings.Contains(err.Error(), "already exists") {
 				err = nil // the worker has it; the server hadn't recorded it
 			}
 		}
 	}
 	if err != nil {
-		release()
-		return nil, nil, fmt.Errorf("copy template v%d to %s: %w", v.Version, w.info.Name, err)
+		return fmt.Errorf("copy template v%d to %s: %w", v.Version, w.info.Name, err)
 	}
-	s.store.addVersionCopy(v.Box, w.id)
-	s.store.event(v.Box, "copied", "to "+w.id)
-	return w, release, nil
+	s.store.addVersionCopy(buildBox, w.id)
+	s.store.event(buildBox, "copied", "to "+w.id)
+	return nil
 }
 
-// workerClasses are the snapshot classes a worker restores warm (just its one
-// class, for a hutchd from before side-by-side Firecracker versions).
-func workerClasses(w api.Worker) []string {
-	if len(w.Classes) > 0 {
-		return w.Classes
+// buildForClass builds template version v again on worker w, for its snapshot
+// class, from the recipe and settings v was built with.
+func (s *Server) buildForClass(ctx context.Context, v api.Template, w *workerConn, out io.Writer) (string, error) {
+	proj, err := s.store.project(v.Project)
+	if err != nil {
+		return "", err
 	}
-	return []string{w.Class}
+	raw, err := s.store.templateParams(v.Project, v.Version)
+	if err != nil || raw == "" {
+		return "", fmt.Errorf("template v%d can't be built for snapshot class %s: it predates per-class builds; run hutch template snapshot", v.Version, w.info.Class)
+	}
+	var p api.TemplateParams
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		return "", err
+	}
+	p.Worker = w.id
+	class := w.info.Class
+	tag := fmt.Sprintf("%x", sha256.Sum256([]byte(class)))[:6]
+	id, buildID := fmt.Sprintf("%s-v%d-%s", proj.Slug, v.Version, tag), fmt.Sprintf("%s-v%d-%s-build", proj.Slug, v.Version, tag)
+	fmt.Fprintf(out, "No worker runs template v%d's snapshot class; building it for %s on %s (a few minutes, once).\n", v.Version, class, w.info.Name)
+	if _, err := s.store.box(buildID); err == nil {
+		s.removeBox(ctx, buildID)
+	}
+	if _, err := s.build(ctx, proj, p, buildID, out, out); err != nil {
+		return "", err
+	}
+	if err := s.waitQuiet(ctx, w, buildID, p.QuietTimeout); err != nil {
+		return "", err
+	}
+	s.run(ctx, w, buildID, api.ExecParams{User: "root", Argv: []string{"sh", "-c", "sync; echo 3 > /proc/sys/vm/drop_caches"}}, io.Discard, io.Discard)
+	if _, err := s.callForBox(ctx, w, api.BoxSleep, api.IDParams{ID: buildID}); err != nil {
+		return "", err
+	}
+	s.hostProject(ctx, w, proj.ID)
+	if _, err := s.callForBox(ctx, w, api.BoxRename, api.RenameParams{ID: buildID, NewID: id, Store: s.versionStore(proj.ID, class, v.Version)}); err != nil {
+		return "", err
+	}
+	built, _ := s.store.meta(buildID)
+	s.store.deleteBox(buildID)
+	if err := s.store.putMeta(id, boxMeta{project: proj.ID, kind: api.BoxVersion, commit: v.Commit, secrets: built.secrets}); err != nil {
+		return "", err
+	}
+	if err := s.store.addTemplateBuild(proj.ID, v.Version, class, id); err != nil {
+		return "", err
+	}
+	s.store.event(id, "built", fmt.Sprintf("template v%d for %s", v.Version, class))
+	return id, nil
 }
 
 // boxPlan says what forking the project's newest template would do: which worker
@@ -404,4 +515,13 @@ func (s *Server) fitWarnings(ctx context.Context, n need) []string {
 		}
 	}
 	return out
+}
+
+// workerClasses are the snapshot classes a worker restores warm (just its one
+// class, for a hutchd from before side-by-side Firecracker versions).
+func workerClasses(w api.Worker) []string {
+	if len(w.Classes) > 0 {
+		return w.Classes
+	}
+	return []string{w.Class}
 }
