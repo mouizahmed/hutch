@@ -143,9 +143,13 @@ func (m *monitor) check(ctx context.Context, server *atomic.Pointer[yamux.Sessio
 }
 
 // dueCheckpoint reports whether a stored box has been active since its last
-// checkpoint, at least checkpoint.interval ago.
+// checkpoint, at least checkpoint.interval ago; for a box never snapshotted,
+// checkpoint.first_after, so it soon has a snapshot to recover from.
 func (m *monitor) dueCheckpoint(b *worker.Box) bool {
 	every := m.settings.Load().Checkpoint
+	if first := m.settings.Load().FirstCheckpoint; b.Generation == 0 && first > 0 {
+		every = first
+	}
 	a := m.seen[b.ID]
 	return b.Store != nil && every > 0 && a != nil && time.Since(b.Checkpointed) >= every && a.lastActive.After(b.Checkpointed)
 }

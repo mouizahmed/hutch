@@ -130,8 +130,9 @@ func (m *monitor) relieve(ctx context.Context, boxes []*worker.Box, report *api.
 }
 
 // killOrder tells the kernel which VM to kill if memory runs out faster than
-// pressure handling can react: idle boxes before working ones. hutchd itself is
-// never chosen before them.
+// pressure handling can react, by what each would lose: idle boxes with a snapshot
+// first, then working ones with a snapshot, and boxes with none (nothing to roll
+// back to) last. hutchd itself is never chosen before them.
 func (m *monitor) killOrder(boxes []*worker.Box) {
 	window := m.settings.Load().WorkingWindow
 	for _, b := range boxes {
@@ -140,8 +141,11 @@ func (m *monitor) killOrder(boxes []*worker.Box) {
 			continue
 		}
 		adj := "600"
-		if a.working || a.attached || time.Since(a.lastActive) < window {
-			adj = "100"
+		switch {
+		case b.Generation == 0:
+			adj = "0"
+		case a.working || a.attached || time.Since(a.lastActive) < window:
+			adj = "300"
 		}
 		os.WriteFile(fmt.Sprintf("/proc/%d/oom_score_adj", b.PID), []byte(adj), 0)
 	}

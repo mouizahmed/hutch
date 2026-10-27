@@ -121,6 +121,8 @@ var Keys = []*Key{
 	{Path: "threads.working_window", Kind: Duration, Default: "15s", Min: "1s", Max: "10m", Layers: server,
 		Doc: "a thread with output this recent counts as working"},
 
+	{Path: "checkpoint.first_after", Kind: Duration, Default: "2m", Min: "30s", Max: "24h", Layers: server,
+		Doc: "a new box takes its first checkpoint after this long active, so it soon has a snapshot to recover from"},
 	{Path: "checkpoint.interval", Kind: Duration, Default: "15m", Min: "1m", Max: "24h", Layers: server,
 		Doc: "awake, active boxes are snapshotted to the bucket this often: the most work losing a worker loses"},
 	{Path: "archive_after", Kind: Duration, Default: "30d", Min: "1d", Max: "3650d", Layers: user,

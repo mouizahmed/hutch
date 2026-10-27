@@ -66,15 +66,15 @@ const (
 	WorkerReport   = "worker.report"
 	TokenCreate    = "token.create"
 
-	ServerInit  = "server.init"
-	ServerGC    = "server.gc"
-	ProviderAdd = "provider.add"
-	CostsGet    = "costs.get"
-	BoxMove     = "box.move"
-	WorkerDrain = "worker.drain"
-	WorkerRm    = "worker.rm"
-	Prestart    = "fleet.prestart"
-	FleetInfo   = "fleet.info"
+	ServerInit   = "server.init"
+	ServerGC     = "server.gc"
+	ProviderAdd  = "provider.add"
+	CostsGet     = "costs.get"
+	BoxMove      = "box.move"
+	WorkerDrain  = "worker.drain"
+	WorkerRm     = "worker.rm"
+	Prestart     = "fleet.prestart"
+	FleetInfo    = "fleet.info"
 	Doctor       = "doctor"        // the server's checks
 	WorkerDoctor = "worker.doctor" // hutchd only
 )
@@ -226,9 +226,10 @@ type ConfigPutResult struct {
 // WorkerSettingsParams carries the server-layer keys hutchd uses, and the bucket
 // with the keys of the projects it hosts. hutchd keeps them in memory only.
 type WorkerSettingsParams struct {
-	IdleInterval  time.Duration `json:"idle_interval"`
-	WorkingWindow time.Duration `json:"working_window"`
-	Checkpoint    time.Duration `json:"checkpoint"`
+	IdleInterval    time.Duration `json:"idle_interval"`
+	WorkingWindow   time.Duration `json:"working_window"`
+	Checkpoint      time.Duration `json:"checkpoint"`
+	FirstCheckpoint time.Duration `json:"first_checkpoint"`
 	// ChunkCache is the share of the worker's disk downloaded chunks may use, in percent.
 	ChunkCache float64 `json:"chunk_cache"`
 	// Refresh is half the GC grace period: older chunks are written again when reused.
@@ -521,7 +522,7 @@ type Worker struct {
 	// Classes are the snapshot classes it restores warm; Class, the newest, is new boxes'.
 	Classes []string `json:"classes,omitempty"`
 	Disk    Disk     `json:"disk"`
-	Boxes    []Box     `json:"boxes,omitempty"`
+	Boxes   []Box    `json:"boxes,omitempty"`
 	// ReservedMiB is the memory its awake boxes reserve; set by the server.
 	ReservedMiB int `json:"reserved_mib,omitempty"`
 	// Node is the cloud instance of a provisioned worker ("" for persistent ones).
