@@ -718,5 +718,15 @@ func (s *Server) fleetInfo(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (
 	if err != nil {
 		return nil, err
 	}
-	return api.Fleet{WorkerType: wtype, VCPUs: t.VCPUs, MemMiB: t.MemMiB, PerHour: t.PerHour}, nil
+	// Instances report less memory than their type's nominal size; use what this
+	// fleet's workers reported, when one has connected.
+	mem := t.MemMiB
+	if ws, err := s.store.workers(); err == nil {
+		for _, w := range ws {
+			if w.Node != "" && w.MemMiB > 0 && w.MemMiB <= t.MemMiB && w.MemMiB > t.MemMiB*9/10 {
+				mem = w.MemMiB
+			}
+		}
+	}
+	return api.Fleet{WorkerType: wtype, VCPUs: t.VCPUs, MemMiB: mem, PerHour: t.PerHour}, nil
 }
