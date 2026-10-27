@@ -429,8 +429,8 @@ func sizesCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			var ws []api.Worker
-			if err := rpc.Call(ctx, sess, api.WorkerList, struct{}{}, &ws); err != nil {
+			targets, err := fitTargets(ctx, sess)
+			if err != nil {
 				return err
 			}
 			margin := cfg.Percent("worker.memory_margin") / 100
@@ -438,7 +438,7 @@ func sizesCommand() *cobra.Command {
 				CPU     int            `json:"cpu"`
 				Memory  string         `json:"memory"`
 				Current bool           `json:"current,omitempty"`
-				Fits    map[string]int `json:"fits"` // boxes of this size per online worker, by name
+				Fits    map[string]int `json:"fits"` // boxes of this size per persistent worker and the elastic type, by name
 			}
 			var opts []option
 			project := boxSize{int(cfg.Int("size.cpu")), int(cfg.Size("size.memory") >> 20)}
@@ -448,10 +448,8 @@ func sizesCommand() *cobra.Command {
 			}
 			for _, sz := range options {
 				o := option{CPU: sz.cpu, Memory: mib(sz.memMiB), Fits: map[string]int{}, Current: sz == project}
-				for _, w := range ws {
-					if w.Online && w.MemMiB > 0 {
-						o.Fits[w.Name] = int(float64(w.MemMiB) * (1 - margin) / float64(sz.memMiB))
-					}
+				for _, t := range targets {
+					o.Fits[t.name] = t.perWorker(sz, margin)
 				}
 				opts = append(opts, o)
 			}

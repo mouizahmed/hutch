@@ -74,7 +74,16 @@ const (
 	WorkerDrain = "worker.drain"
 	WorkerRm    = "worker.rm"
 	Prestart    = "fleet.prestart"
+	FleetInfo   = "fleet.info"
 )
+
+// Fleet describes the elastic workers the server starts; empty without a provider.
+type Fleet struct {
+	WorkerType string  `json:"worker_type,omitempty"`
+	VCPUs      int     `json:"vcpus,omitempty"`
+	MemMiB     int     `json:"mem_mib,omitempty"`
+	PerHour    float64 `json:"per_hour,omitempty"`
+}
 
 // PrestartParams asks for a worker with room for a box of this size, started in
 // the background when providers.prestart is on.

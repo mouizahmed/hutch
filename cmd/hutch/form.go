@@ -127,8 +127,8 @@ func confirmSettings(ctx context.Context, sess *yamux.Session, repo *config.Repo
 // projectForm asks for the project settings, preselecting the current values (the
 // agent's proposals) with its reasons, and returns the keys that changed.
 func projectForm(ctx context.Context, sess *yamux.Session, cfg *config.Config, text []byte, proj api.Project) (map[string]any, error) {
-	var ws []api.Worker
-	if err := rpc.Call(ctx, sess, api.WorkerList, struct{}{}, &ws); err != nil {
+	targets, err := fitTargets(ctx, sess)
+	if err != nil {
 		return nil, err
 	}
 	margin := cfg.Percent("worker.memory_margin") / 100
@@ -146,21 +146,27 @@ func projectForm(ctx context.Context, sess *yamux.Session, cfg *config.Config, t
 		sizeOpts = append(slices.Clone(sizeOpts), cur)
 	}
 	var sizeChoices []huh.Option[string]
+	unfit := map[string]bool{}
 	for _, sz := range sizeOpts {
 		var fits []string
-		for _, w := range ws {
-			if w.Online && w.MemMiB > 0 {
-				fits = append(fits, fmt.Sprintf("%d on %s", int(float64(w.MemMiB)*(1-margin)/float64(sz.memMiB)), w.Name))
+		for _, t := range targets {
+			if n := t.perWorker(sz, margin); n > 0 {
+				fits = append(fits, fmt.Sprintf("%d on %s", n, t.name))
 			}
 		}
 		label := fmt.Sprintf("%d vCPU, %s", sz.cpu, mib(sz.memMiB))
-		if len(fits) > 0 {
+		value := fmt.Sprintf("%d/%d", sz.cpu, sz.memMiB)
+		switch {
+		case len(fits) > 0:
 			label += "   fits " + strings.Join(fits, ", ")
+		case len(targets) > 0:
+			label += "   fits no worker"
+			unfit[value] = true
 		}
 		if sz == cur {
 			label += "   (current)"
 		}
-		sizeChoices = append(sizeChoices, huh.NewOption(label, fmt.Sprintf("%d/%d", sz.cpu, sz.memMiB)))
+		sizeChoices = append(sizeChoices, huh.NewOption(label, value))
 	}
 	sizeDesc := []string{"Every box in this project gets this size; changing it later rebuilds the template snapshot."}
 	if r := reason("size.cpu"); r != "" {
@@ -190,7 +196,13 @@ func projectForm(ctx context.Context, sess *yamux.Session, cfg *config.Config, t
 	ok := true
 
 	form := huh.NewForm(
-		huh.NewGroup(huh.NewSelect[string]().Title("Box size").Description(strings.Join(sizeDesc, "\n")).Options(sizeChoices...).Value(&size)),
+		huh.NewGroup(huh.NewSelect[string]().Title("Box size").Description(strings.Join(sizeDesc, "\n")).Options(sizeChoices...).Value(&size).
+			Validate(func(v string) error {
+				if unfit[v] {
+					return fmt.Errorf("no worker can hold this size; pick a smaller one or a larger providers.aws.worker_type")
+				}
+				return nil
+			})),
 		huh.NewGroup(huh.NewSelect[string]().Title("Disk").Description(join("Sparse: only written blocks use space. Changing it applies to new boxes.", reason("disk.size"))).Options(diskOpts...).Value(&diskVal)),
 		huh.NewGroup(huh.NewSelect[string]().Title("Agent").Description(join("Started by hutch new without --agent or --cmd.", reason("default_agent"))).Options(agentOpts...).Value(&agentVal)),
 		huh.NewGroup(huh.NewSelect[string]().Title("Sleep").Description(join("A box sleeps after this long without activity; waking takes about a second.", reason("idle_timeout"))).Options(idleOpts...).Value(&idleVal)),
@@ -285,4 +297,40 @@ func orEmpty(v any) any {
 		return []any{}
 	}
 	return v
+}
+
+// fitTarget is a worker a box size is judged against: an online persistent worker,
+// or the elastic worker type.
+type fitTarget struct {
+	name         string
+	cpus, memMiB int
+}
+
+func fitTargets(ctx context.Context, sess *yamux.Session) ([]fitTarget, error) {
+	var ws []api.Worker
+	if err := rpc.Call(ctx, sess, api.WorkerList, struct{}{}, &ws); err != nil {
+		return nil, err
+	}
+	var out []fitTarget
+	for _, w := range ws {
+		if w.Online && w.Node == "" && w.MemMiB > 0 {
+			out = append(out, fitTarget{w.Name, w.CPUs, w.MemMiB})
+		}
+	}
+	var f api.Fleet
+	if err := rpc.Call(ctx, sess, api.FleetInfo, struct{}{}, &f); err != nil {
+		return nil, err
+	}
+	if f.WorkerType != "" {
+		out = append(out, fitTarget{f.WorkerType + " (elastic)", f.VCPUs, f.MemMiB})
+	}
+	return out, nil
+}
+
+// perWorker is how many boxes of a size fit on a target, after the host's margin.
+func (t fitTarget) perWorker(sz boxSize, margin float64) int {
+	if sz.cpu > t.cpus {
+		return 0
+	}
+	return int(float64(t.memMiB) * (1 - margin) / float64(sz.memMiB))
 }

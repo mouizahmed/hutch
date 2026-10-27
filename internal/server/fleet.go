@@ -703,3 +703,20 @@ func (s *Server) prestart(ctx context.Context, params json.RawMessage, _ *rpc.Ou
 	}()
 	return nil, nil
 }
+
+func (s *Server) fleetInfo(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any, error) {
+	f := s.fleet.Load()
+	if f == nil {
+		return api.Fleet{}, nil
+	}
+	cfg, err := s.settings()
+	if err != nil {
+		return nil, err
+	}
+	wtype := cfg.String("providers.aws.worker_type")
+	t, err := f.instanceType(ctx, wtype)
+	if err != nil {
+		return nil, err
+	}
+	return api.Fleet{WorkerType: wtype, VCPUs: t.VCPUs, MemMiB: t.MemMiB, PerHour: t.PerHour}, nil
+}

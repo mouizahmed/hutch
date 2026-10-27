@@ -54,6 +54,7 @@ func (s *Server) apiMux() rpc.Mux {
 		api.WorkerDrain:      s.workerDrain,
 		api.WorkerRm:         s.workerRm,
 		api.Prestart:         s.prestart,
+		api.FleetInfo:        s.fleetInfo,
 		api.WorkerList:       s.workerList,
 		api.TokenCreate:      s.tokenCreate,
 	}
