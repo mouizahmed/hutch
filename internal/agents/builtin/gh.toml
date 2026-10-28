@@ -1,4 +1,5 @@
 # A login, not an agent: GitHub access for git and gh in every box.
 name        = "gh"
-login       = "gh auth login --hostname github.com --git-protocol https --web"
+# No prompts: hutch-guest sets up git credentials from the login in every box.
+login       = "GH_PROMPT_DISABLED=1 gh auth login --hostname github.com --git-protocol https --web"
 credentials = ["~/.config/gh/hosts.yml"]
