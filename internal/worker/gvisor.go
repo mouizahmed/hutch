@@ -250,12 +250,12 @@ func (w *Worker) startSandbox(ctx context.Context, b *Box, from string, guestTim
 	if b.PID, err = w.sandboxPID(b); err != nil {
 		return fail(err)
 	}
+	if err := w.guestRestore(ctx, b, guestTimeout); err != nil {
+		return fail(fmt.Errorf("guest: %w", err))
+	}
 	b.State, b.Checkpointed = Running, time.Now().UTC()
 	if err := w.save(b); err != nil {
 		return fail(err)
-	}
-	if err := w.guestRestore(ctx, b, guestTimeout); err != nil {
-		return fail(fmt.Errorf("guest: %w", err))
 	}
 	return nil
 }

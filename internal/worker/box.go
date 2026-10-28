@@ -275,12 +275,13 @@ func (w *Worker) start(ctx context.Context, b *Box, links map[string]string, boo
 	if err := boot(m); err != nil {
 		return fail(err)
 	}
+	if err := w.guestRestore(ctx, b, guestTimeout); err != nil {
+		return fail(fmt.Errorf("guest: %w", err))
+	}
+	// Running only once the guest answers, so no report sees a box whose start fails.
 	b.State, b.Checkpointed = Running, time.Now().UTC()
 	if err := w.save(b); err != nil {
 		return fail(err)
-	}
-	if err := w.guestRestore(ctx, b, guestTimeout); err != nil {
-		return fail(fmt.Errorf("guest: %w", err))
 	}
 	return nil
 }
@@ -481,6 +482,9 @@ func (w *Worker) Remove(id string) error {
 	defer unlock()
 	b, err := w.load(id)
 	if err != nil {
+		if _, serr := os.Stat(w.boxDir(id)); errors.Is(serr, os.ErrNotExist) {
+			return nil // already gone, as after a failed start
+		}
 		return err
 	}
 	w.stop(b)
