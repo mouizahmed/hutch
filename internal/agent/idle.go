@@ -220,7 +220,9 @@ func (m *monitor) checkBox(ctx context.Context, b *worker.Box) (api.BoxReport, b
 		if !th.Dead && th.Hint == api.ThreadWorking {
 			a.lastActive = now
 		}
-		if !th.Dead && out.After(a.lastActive) {
+		// An agent that reports its own state is believed over its screen, where
+		// a waiting agent may still print tips.
+		if !th.Dead && th.Hint == "" && out.After(a.lastActive) {
 			a.lastActive = out
 		}
 		r.Threads = append(r.Threads, api.ThreadState{N: th.N, State: state, LastOutput: out,
