@@ -154,10 +154,10 @@ func (w *Worker) writeSpec(b *Box, s slot) error {
 	spec := map[string]any{
 		"ociVersion": "1.0.0",
 		"process": map[string]any{
-			"user": map[string]any{"uid": 0, "gid": 0},
-			"args": []string{"/usr/local/bin/hutch-guest", "init", "--listen", fmt.Sprintf("tcp:0.0.0.0:%d", guestproto.Port), "--backend", "gvisor"},
-			"env":  []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "TERM=xterm-256color", "HUTCH_GUEST_TOKEN=" + w.token},
-			"cwd":  "/",
+			"user":         map[string]any{"uid": 0, "gid": 0},
+			"args":         []string{"/usr/local/bin/hutch-guest", "init", "--listen", fmt.Sprintf("tcp:0.0.0.0:%d", guestproto.Port), "--backend", "gvisor"},
+			"env":          []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "TERM=xterm-256color", "HUTCH_GUEST_TOKEN=" + w.token},
+			"cwd":          "/",
 			"capabilities": map[string]any{"bounding": caps, "effective": caps, "permitted": caps, "inheritable": caps, "ambient": caps},
 			"rlimits":      []map[string]any{{"type": "RLIMIT_NOFILE", "hard": 1048576, "soft": 1048576}},
 		},
