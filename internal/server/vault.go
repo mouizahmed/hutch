@@ -352,7 +352,7 @@ func Restore(ctx context.Context, dir string, cfg bucket.Config, passphrase stri
 	if err != nil {
 		return time.Time{}, err
 	}
-	_, err = db.db.Exec(`UPDATE workers SET gone = 1`)
+	_, err = db.db.Exec(`UPDATE workers SET gone = 1; UPDATE boxes SET state = 'asleep' WHERE state = 'running'`)
 	db.db.Close()
 	if err != nil {
 		return time.Time{}, err
