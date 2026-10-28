@@ -20,7 +20,7 @@ func TestParseRejects(t *testing.T) {
 		text, want string
 	}{
 		{User, "idle_timout = \"5m\"", "unknown key idle_timout"},
-		{Project, "server = \"me@host\"", "can't be set in the project config"},
+		{Project, "machine = \"me@host\"", "can't be set in the project config"},
 		{Project, "idle_timeout = \"10s\"", "below the minimum 1m"},
 		{Project, "size = { cpu = \"4\" }", "size.cpu: want a whole number"},
 		{User, "version = 2", "version 2 is not supported"},
@@ -99,7 +99,7 @@ credentials = [
   "claude",
 ]
 `)
-	out, err := Set(text, []string{"server"}, "me@box")
+	out, err := Set(text, []string{"machine"}, "me@box")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ credentials = [
 	want := `# my settings
 version = 1
 default_agent = "codex" # I prefer codex
-server = "me@box"
+machine = "me@box"
 
 [grants."github.com/me/app"]
 # reviewed 2026-10

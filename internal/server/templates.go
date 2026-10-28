@@ -486,8 +486,8 @@ func (s *Server) removeBox(ctx context.Context, id string) error {
 		if err := rpc.Call(ctx, w.sess, api.BoxRm, api.IDParams{ID: id}, nil); err != nil {
 			return err
 		}
-	} else if lost, after, lerr := s.workerLost(b.Worker); lerr != nil || !lost {
-		return fmt.Errorf("worker %s is offline; remove %s once it is back or has been offline for %s (worker.lost_after)", b.Worker, id, after)
+	} else if lost, lerr := s.workerLost(b.Worker); lerr != nil || !lost {
+		return fmt.Errorf("%s is on a machine that is offline; remove it once that machine is back", id)
 	}
 	if store != nil {
 		s.deletePrefix(ctx, store.Prefix)

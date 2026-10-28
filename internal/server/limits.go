@@ -18,7 +18,7 @@ type limitError struct {
 
 func (e *limitError) Error() string { return fmt.Sprintf("%s (%d) reached", e.key, e.value) }
 
-// limits resolves a limits.* key: yours, capped by the server's when it sets one.
+// limits resolves a limits.* key: yours, capped by the machine's when it sets one.
 func (s *Server) limits(key string) (any, error) {
 	cfg, err := s.settings()
 	if err != nil {
@@ -28,16 +28,16 @@ func (s *Server) limits(key string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	d, err := s.store.config("server")
+	d, err := s.store.config("machine")
 	if err != nil {
 		return nil, err
 	}
-	doc, err := config.Parse(config.Server, "server config", []byte(d.Content))
+	doc, err := config.Parse(config.Machine, "machine config", []byte(d.Content))
 	if err != nil {
 		return nil, err
 	}
 	sv, err := config.New(doc).Get(key)
-	if err != nil || sv.Layer != config.Server {
+	if err != nil || sv.Layer != config.Machine {
 		return v.Value, err
 	}
 	switch a := v.Value.(type) {
@@ -86,4 +86,4 @@ func (s *Server) placeWait(ctx context.Context, n need, requested, box string, o
 	}
 }
 
-var errNoRoom = errors.New("no worker has room")
+var errNoRoom = errors.New("the machine has no room")

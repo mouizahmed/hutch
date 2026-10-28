@@ -1,4 +1,4 @@
-// Package config resolves settings from four layers (server, user, project, flags)
+// Package config resolves settings from four layers (machine, user, project, flags)
 // over built-in defaults, all checked against one schema.
 package config
 
@@ -19,7 +19,7 @@ import (
 const Version = 1
 
 // UserPath is the user config, ~/.config/hutch/config.toml: a working copy of the
-// server's copy, which is authoritative.
+// machine's copy, which is authoritative.
 func UserPath() string {
 	dir := os.Getenv("XDG_CONFIG_HOME")
 	if dir == "" {

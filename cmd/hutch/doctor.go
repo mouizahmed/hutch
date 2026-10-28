@@ -15,13 +15,13 @@ import (
 func doctorCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:     "doctor",
-		Short:   "Check the server, bucket, workers, boxes, and config, with a fix for each problem",
+		Short:   "Check this computer, the machine, its bucket, boxes, and config, with a fix for each problem",
 		GroupID: "setup",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			var checks []api.Check
 			local := func(name string, err error, detail, fix string) {
-				c := api.Check{Area: "this machine", Name: name, Status: "ok", Detail: detail}
+				c := api.Check{Area: "this computer", Name: name, Status: "ok", Detail: detail}
 				if err != nil {
 					c.Status, c.Detail, c.Fix = "fail", err.Error(), fix
 				}
@@ -34,7 +34,7 @@ func doctorCommand() *cobra.Command {
 				local("project config", err, repo.ConfigPath(), "fix "+repo.ConfigPath()+" (hutch config edit --project)")
 			}
 			sess, err := connect()
-			local("server", err, serverTarget(), "check the server is running, and SSH to it works (server in your user config, or $HUTCH_SERVER)")
+			local("machine", err, machineTarget(), "check that ssh to it works and hutchd runs there (machine in your user config, or $HUTCH_MACHINE)")
 			var r api.DoctorResult
 			if err == nil {
 				defer sess.Close()
@@ -42,8 +42,8 @@ func doctorCommand() *cobra.Command {
 					return err
 				}
 				if r.Version != version.String() {
-					checks = append(checks, api.Check{Area: "this machine", Name: "version", Status: "warn",
-						Detail: "hutch " + version.String() + ", server " + r.Version, Fix: "use the same Hutch version on both"})
+					checks = append(checks, api.Check{Area: "this computer", Name: "version", Status: "warn",
+						Detail: "hutch " + version.String() + ", hutchd " + r.Version, Fix: "use the same Hutch version on both"})
 				}
 				checks = append(checks, r.Checks...)
 			}

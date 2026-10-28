@@ -28,22 +28,22 @@ func (s *Server) doctor(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any
 	}
 
 	cfg, err := s.settings()
-	check("config", "server and user layers", err, "", "hutch config validate, then hutch config edit --server or hutch config edit")
+	check("config", "machine and user layers", err, "", "hutch config validate, then hutch config edit --machine or hutch config edit")
 	if err != nil {
 		return r, nil
 	}
 
 	if v := s.vault.Load(); v == nil {
-		check("server", "bucket", fmt.Errorf("no bucket: nothing is backed up"), "", "hutch server init")
+		warn("machine", "bucket", "none: losing the machine loses its boxes", "hutch machine bucket")
 	} else {
-		check("server", "bucket", checkBucket(ctx, v.bucket), v.cfg.Name, "check the bucket's credentials, and that it supports conditional writes")
+		check("machine", "bucket", checkBucket(ctx, v.bucket), v.cfg.Name, "check the bucket's credentials, and that it supports conditional writes")
 		s.backupMu.Lock()
 		last, at := s.backedUp, s.lastBackup
 		s.backupMu.Unlock()
 		if n, err := s.store.changes(); err == nil && n != last && !at.IsZero() && time.Since(at) > cfg.Duration("backup.warn_after") {
-			warn("server", "backup", fmt.Sprintf("changes since the last backup, %s ago", time.Since(at).Round(time.Second)), "see hutch logs server for backup errors")
+			warn("machine", "backup", fmt.Sprintf("changes since the last backup, %s ago", time.Since(at).Round(time.Second)), "see journalctl -u hutchd on the machine for backup errors")
 		} else {
-			check("server", "backup", nil, "current", "")
+			check("machine", "backup", nil, "current", "")
 		}
 	}
 
@@ -51,17 +51,17 @@ func (s *Server) doctor(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any
 	if err != nil {
 		return nil, err
 	}
-	reserve := cfg.Percent("worker.disk_reserve")
+	reserve := cfg.Percent("machine.disk_reserve")
 	for _, w := range ws {
 		if w.Gone {
 			continue
 		}
-		area := "worker " + w.Name
+		area := "machine"
 		conn, err := s.worker(w.ID)
 		switch {
 		case err != nil:
 			warn(area, "state", fmt.Sprintf("offline since %s", w.LastSeen.Format(time.DateTime)),
-				"start hutchd there, or hutch workers rm "+w.ID+" if it's gone (its stored boxes restore elsewhere)")
+				"start hutchd there: sudo systemctl start hutchd")
 			continue
 		}
 		var checks []api.Check
@@ -76,10 +76,10 @@ func (s *Server) doctor(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any
 			r.Checks = append(r.Checks, c)
 		}
 		if d := conn.info.Disk; d.Total > 0 && 100*float64(d.Free)/float64(d.Total) < reserve {
-			warn(area, "disk", fmt.Sprintf("%d%% free, below worker.disk_reserve; it takes no new boxes", 100*d.Free/d.Total), "remove boxes there, or give it a larger disk")
+			warn(area, "disk", fmt.Sprintf("%d%% free, below machine.disk_reserve; it takes no new boxes", 100*d.Free/d.Total), "remove boxes there, or give it a larger disk")
 		}
 		if conn.info.Version != r.Version {
-			warn(area, "version", "hutchd "+conn.info.Version+", server "+r.Version, "upgrade hutchd there")
+			warn(area, "version", "worker "+conn.info.Version+", hutchd "+r.Version, "restart hutchd there")
 		}
 	}
 
@@ -99,7 +99,7 @@ func (s *Server) doctor(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any
 		}
 	}
 	if stranded == 0 {
-		check("boxes", "fit", nil, fmt.Sprintf("all %d fit a worker", len(boxes)), "")
+		check("boxes", "fit", nil, fmt.Sprintf("all %d fit the machine", len(boxes)), "")
 	}
 	return r, nil
 }

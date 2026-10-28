@@ -14,14 +14,14 @@ type Layer int
 
 const (
 	Default Layer = iota
-	Server
+	Machine
 	User
 	Project
 	Flag
 )
 
 func (l Layer) String() string {
-	return [...]string{"default", "server", "user", "project", "flag"}[l]
+	return [...]string{"default", "machine", "user", "project", "flag"}[l]
 }
 
 type Kind int
@@ -55,17 +55,17 @@ type Key struct {
 }
 
 var (
-	server      = []Layer{Server}
+	machine     = []Layer{Machine}
 	user        = []Layer{User}
 	project     = []Layer{Project}
 	userProject = []Layer{User, Project}
-	serverUser  = []Layer{Server, User}
+	machineUser = []Layer{Machine, User}
 )
 
 // Keys is the one schema for every layer.
 var Keys = []*Key{
-	{Path: "server", Kind: String, Layers: user,
-		Doc: "SSH target of the server, like me@home-server; empty means a server on this machine"},
+	{Path: "machine", Kind: String, Layers: user,
+		Doc: "your machine's SSH target, like me@hetzner (set by hutch setup); empty when hutchd runs on this computer"},
 	{Path: "default_agent", Kind: String, Default: "claude", Layers: userProject,
 		Doc: "agent for new threads without --agent or --cmd"},
 
@@ -93,8 +93,8 @@ var Keys = []*Key{
 	{Path: "network.domains", Kind: List, Layers: project,
 		Doc: "domains boxes may reach when network.egress is allowlist"},
 
-	{Path: "git.merge_check", Kind: Duration, Default: "10m", Min: "1m", Max: "24h", Layers: server,
-		Doc: "how often the server checks whether boxes' branches are merged (GitHub pull requests, or contained in the base)"},
+	{Path: "git.merge_check", Kind: Duration, Default: "10m", Min: "1m", Max: "24h", Layers: machine,
+		Doc: "how often the machine checks whether boxes' branches are merged (GitHub pull requests, or contained in the base)"},
 	{Path: "git.push_interval", Kind: Duration, Default: "1m", Min: "10s", Max: "1h", Layers: project,
 		Doc: "a box pushes its branch at most this often after new commits"},
 	{Path: "template.build_timeout", Kind: Duration, Default: "1h", Min: "1m", Max: "24h", Layers: project,
@@ -102,56 +102,54 @@ var Keys = []*Key{
 	{Path: "template.quiet_timeout", Kind: Duration, Default: "2m", Min: "1s", Max: "1h", Layers: project,
 		Doc: "how long a snapshot waits for queued systemd jobs and transient units to finish"},
 
-	{Path: "retention.template_versions", Kind: Int, Default: int64(2), Min: "1", Max: "100", Layers: server,
+	{Path: "retention.template_versions", Kind: Int, Default: int64(2), Min: "1", Max: "100", Layers: machine,
 		Doc: "template versions kept per project, besides those boxes were forked from"},
-	{Path: "worker.memory_margin", Kind: Percent, Default: "10%", Min: "0%", Max: "50%", Layers: server,
-		Doc: "RAM held back for the host on every worker"},
-	{Path: "worker.overcommit", Kind: Float, Default: 1.0, Min: "1", Max: "4", Layers: server,
+	{Path: "machine.memory_margin", Kind: Percent, Default: "10%", Min: "0%", Max: "50%", Layers: machine,
+		Doc: "RAM held back for the host"},
+	{Path: "machine.overcommit", Kind: Float, Default: 1.0, Min: "1", Max: "4", Layers: machine,
 		Doc: "1 means every box reserves its full size, and nothing is ever slept or moved for memory; above 1, boxes are placed by measured peak use, with their full sizes allowed up to this multiple of a worker's memory, and boxes may be slept or moved under pressure"},
-	{Path: "worker.memory_high", Kind: Percent, Default: "80%", Min: "50%", Max: "95%", Layers: server,
-		Doc: "with overcommit: past this share of a worker's memory, it takes no new boxes, reclaims guest memory, sleeps idle boxes, then moves working ones"},
-	{Path: "worker.memory_critical", Kind: Percent, Default: "90%", Min: "60%", Max: "98%", Layers: server,
+	{Path: "machine.memory_high", Kind: Percent, Default: "80%", Min: "50%", Max: "95%", Layers: machine,
+		Doc: "with overcommit: past this share of the machine's memory, it takes no new boxes, reclaims guest memory, sleeps idle boxes, then moves working ones"},
+	{Path: "machine.memory_critical", Kind: Percent, Default: "90%", Min: "60%", Max: "98%", Layers: machine,
 		Doc: "with overcommit: past this, with nowhere to move, the least recently active working box sleeps and you're notified"},
-	{Path: "worker.pressure_stall", Kind: Duration, Default: "50ms", Min: "10ms", Max: "1s", Layers: server,
-		Doc: "with overcommit: when tasks on a worker stall on memory this long within a second, it handles pressure at once instead of at the next check"},
-	{Path: "worker.peak_window", Kind: Duration, Default: "1h", Min: "5m", Max: "7d", Layers: server,
+	{Path: "machine.pressure_stall", Kind: Duration, Default: "50ms", Min: "10ms", Max: "1s", Layers: machine,
+		Doc: "with overcommit: when tasks on the machine stall on memory this long within a second, it handles pressure at once instead of at the next check"},
+	{Path: "machine.peak_window", Kind: Duration, Default: "1h", Min: "5m", Max: "7d", Layers: machine,
 		Doc: "with overcommit: a box counts at its highest measured memory use over this window"},
-	{Path: "worker.disk_reserve", Kind: Percent, Default: "10%", Min: "0%", Max: "50%", Layers: server,
-		Doc: "free disk below which a worker takes no new boxes"},
-	{Path: "idle.check_interval", Kind: Duration, Default: "15s", Min: "1s", Max: "5m", Layers: server,
-		Doc: "how often workers check boxes for activity"},
-	{Path: "threads.working_window", Kind: Duration, Default: "15s", Min: "1s", Max: "10m", Layers: server,
+	{Path: "machine.disk_reserve", Kind: Percent, Default: "10%", Min: "0%", Max: "50%", Layers: machine,
+		Doc: "free disk below which the machine takes no new boxes"},
+	{Path: "idle.check_interval", Kind: Duration, Default: "15s", Min: "1s", Max: "5m", Layers: machine,
+		Doc: "how often the machine checks boxes for activity"},
+	{Path: "threads.working_window", Kind: Duration, Default: "15s", Min: "1s", Max: "10m", Layers: machine,
 		Doc: "a thread with output this recent counts as working"},
 
-	{Path: "checkpoint.first_after", Kind: Duration, Default: "2m", Min: "30s", Max: "24h", Layers: server,
+	{Path: "checkpoint.first_after", Kind: Duration, Default: "2m", Min: "30s", Max: "24h", Layers: machine,
 		Doc: "a new box takes its first checkpoint after this long active, so it soon has a snapshot to recover from"},
-	{Path: "checkpoint.interval", Kind: Duration, Default: "15m", Min: "1m", Max: "24h", Layers: server,
-		Doc: "awake, active boxes are snapshotted to the bucket this often: the most work losing a worker loses"},
+	{Path: "checkpoint.interval", Kind: Duration, Default: "15m", Min: "1m", Max: "24h", Layers: machine,
+		Doc: "awake, active boxes are snapshotted to the bucket this often: the most work losing the machine loses"},
 	{Path: "archive_after", Kind: Duration, Default: "30d", Min: "1d", Max: "3650d", Layers: user,
 		Doc: "a box asleep this long drops its memory and keeps its disk; waking it is a cold boot"},
-	{Path: "worker.chunk_cache", Kind: Percent, Default: "30%", Min: "0%", Max: "90%", Layers: server,
-		Doc: "share of a worker's disk for chunks downloaded from the bucket"},
-	{Path: "worker.lost_after", Kind: Duration, Default: "5m", Min: "30s", Max: "24h", Layers: server,
-		Doc: "a box whose worker has been offline this long is restored on another worker when you use it"},
-	{Path: "retention.box_checkpoints", Kind: Int, Default: int64(3), Min: "1", Max: "100", Layers: server,
+	{Path: "machine.chunk_cache", Kind: Percent, Default: "30%", Min: "0%", Max: "90%", Layers: machine,
+		Doc: "share of the machine's disk for chunks downloaded from the bucket"},
+	{Path: "retention.box_checkpoints", Kind: Int, Default: int64(3), Min: "1", Max: "100", Layers: machine,
 		Doc: "snapshots kept in the bucket per box"},
-	{Path: "backup.interval", Kind: Duration, Default: "1m", Min: "10s", Max: "1h", Layers: server,
-		Doc: "how often the server backs up its database to the bucket, when it changed"},
-	{Path: "backup.warn_after", Kind: Duration, Default: "5m", Min: "1m", Max: "24h", Layers: server,
+	{Path: "backup.interval", Kind: Duration, Default: "1m", Min: "10s", Max: "1h", Layers: machine,
+		Doc: "how often the machine backs up its database to the bucket, when it changed"},
+	{Path: "backup.warn_after", Kind: Duration, Default: "5m", Min: "1m", Max: "24h", Layers: machine,
 		Doc: "hutch doctor warns when changes have waited this long for a backup"},
-	{Path: "retention.backups", Kind: Duration, Default: "30d", Min: "1d", Max: "3650d", Layers: server,
-		Doc: "server backups are kept this long: all from the last hour, then one per hour for a day, then one per day"},
-	{Path: "gc.interval", Kind: Duration, Default: "24h", Min: "1h", Max: "30d", Layers: server,
-		Doc: "how often the server deletes bucket chunks nothing uses"},
-	{Path: "limits.awake_boxes", Kind: Int, Default: int64(8), Min: "0", Max: "10000", Layers: serverUser,
-		Doc: "boxes awake at once across all workers; past it, boxes queue (the server's value caps yours)"},
-	{Path: "limits.box_max_awake", Kind: Duration, Default: "8h", Min: "1m", Max: "365d", Layers: serverUser,
-		Doc: "a box awake this long without a break is put to sleep, even mid-task (the server's value caps yours)"},
+	{Path: "retention.backups", Kind: Duration, Default: "30d", Min: "1d", Max: "3650d", Layers: machine,
+		Doc: "backups of the machine's database are kept this long: all from the last hour, then one per hour for a day, then one per day"},
+	{Path: "gc.interval", Kind: Duration, Default: "24h", Min: "1h", Max: "30d", Layers: machine,
+		Doc: "how often the machine deletes bucket chunks nothing uses"},
+	{Path: "limits.awake_boxes", Kind: Int, Default: int64(8), Min: "0", Max: "10000", Layers: machineUser,
+		Doc: "boxes awake at once; past it, boxes queue (the machine's value caps yours)"},
+	{Path: "limits.box_max_awake", Kind: Duration, Default: "8h", Min: "1m", Max: "365d", Layers: machineUser,
+		Doc: "a box awake this long without a break is put to sleep, even mid-task (the machine's value caps yours)"},
 	{Path: "notify.command", Kind: String, Layers: user,
-		Doc: "command the server runs on events, with HUTCH_EVENT, HUTCH_BOX, HUTCH_TITLE, HUTCH_MESSAGE set"},
+		Doc: "command the machine runs on events, with HUTCH_EVENT, HUTCH_BOX, HUTCH_TITLE, HUTCH_MESSAGE set"},
 	{Path: "notify.waiting_after", Kind: Duration, Default: "2m", Min: "0s", Max: "24h", Layers: user,
 		Doc: "a thread that stops working notifies you once it has waited or been exited this long"},
-	{Path: "gc.grace", Kind: Duration, Default: "24h", Min: "1h", Max: "30d", Layers: server,
+	{Path: "gc.grace", Kind: Duration, Default: "24h", Min: "1h", Max: "30d", Layers: machine,
 		Doc: "chunks younger than this are never deleted, so a sweep can't race an upload"},
 }
 

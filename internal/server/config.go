@@ -13,12 +13,12 @@ import (
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
-var configLayers = map[string]config.Layer{"server": config.Server, "user": config.User}
+var configLayers = map[string]config.Layer{"machine": config.Machine, "user": config.User}
 
 func (s *Server) configGet(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any, error) {
 	var c api.Configs
 	var err error
-	if c.Server, err = s.store.config("server"); err != nil {
+	if c.Machine, err = s.store.config("machine"); err != nil {
 		return nil, err
 	}
 	if c.User, err = s.store.config("user"); err != nil {
@@ -43,7 +43,7 @@ func (s *Server) configPut(ctx context.Context, params json.RawMessage, _ *rpc.O
 	if err != nil {
 		return nil, err
 	}
-	if !conflict && p.Name == "server" {
+	if !conflict && p.Name == "machine" {
 		s.mu.Lock()
 		workers := make([]*workerConn, 0, len(s.workers))
 		for _, w := range s.workers {
@@ -83,9 +83,9 @@ func (s *Server) sendWorkerSettings(ctx context.Context, w *workerConn) {
 		return
 	}
 	p := api.WorkerSettingsParams{IdleInterval: c.Duration("idle.check_interval"), WorkingWindow: c.Duration("threads.working_window"),
-		Checkpoint: c.Duration("checkpoint.interval"), FirstCheckpoint: c.Duration("checkpoint.first_after"), ChunkCache: c.Percent("worker.chunk_cache"), Refresh: c.Duration("gc.grace") / 2,
-		Overcommit: c.Float("worker.overcommit"), MemoryHigh: c.Percent("worker.memory_high"), MemoryCritical: c.Percent("worker.memory_critical"),
-		PeakWindow: c.Duration("worker.peak_window"), PressureStall: c.Duration("worker.pressure_stall")}
+		Checkpoint: c.Duration("checkpoint.interval"), FirstCheckpoint: c.Duration("checkpoint.first_after"), ChunkCache: c.Percent("machine.chunk_cache"), Refresh: c.Duration("gc.grace") / 2,
+		Overcommit: c.Float("machine.overcommit"), MemoryHigh: c.Percent("machine.memory_high"), MemoryCritical: c.Percent("machine.memory_critical"),
+		PeakWindow: c.Duration("machine.peak_window"), PressureStall: c.Duration("machine.pressure_stall")}
 	if v := s.vault.Load(); v != nil {
 		cfg := v.cfg
 		p.Bucket = &cfg

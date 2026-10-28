@@ -13,7 +13,7 @@ import (
 )
 
 // watchPressure runs a check as soon as the kernel reports tasks stalling on
-// memory for worker.pressure_stall within a second: the worker is about to run
+// memory for machine.pressure_stall within a second: the worker is about to run
 // out, sooner than the next check would notice. It re-arms when the setting changes.
 func (m *monitor) watchPressure(ctx context.Context) {
 	for ctx.Err() == nil {

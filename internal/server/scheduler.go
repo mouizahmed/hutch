@@ -43,7 +43,7 @@ type candidate struct {
 	id         string
 	freeMiB    int // memory not reserved by awake boxes, after the host's margin
 	cpus       int
-	diskOK     bool     // free disk above worker.disk_reserve
+	diskOK     bool     // free disk above machine.disk_reserve
 	classes    []string // snapshot classes it restores warm
 	hasVersion bool
 }
@@ -56,7 +56,7 @@ func (c candidate) why(n need) string {
 	case c.cpus < n.vcpus:
 		return fmt.Sprintf("%d vCPUs", c.cpus)
 	case !c.diskOK:
-		return "disk below worker.disk_reserve"
+		return "disk below machine.disk_reserve"
 	case n.strict && n.class != "" && !slices.Contains(c.classes, n.class):
 		return "snapshot class " + strings.Join(c.classes, ", ")
 	}
@@ -97,8 +97,8 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	margin, reserve := cfg.Percent("worker.memory_margin")/100, cfg.Percent("worker.disk_reserve")/100
-	overcommit, high := cfg.Float("worker.overcommit"), cfg.Percent("worker.memory_high")
+	margin, reserve := cfg.Percent("machine.memory_margin")/100, cfg.Percent("machine.disk_reserve")/100
+	overcommit, high := cfg.Float("machine.overcommit"), cfg.Percent("machine.memory_high")
 	boxes, err := s.store.boxes()
 	if err != nil {
 		return nil, nil, err
@@ -182,7 +182,7 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 	i := choose(cs, n)
 	if i < 0 {
 		if len(cs) == 0 {
-			return nil, nil, fmt.Errorf("%w: no workers online", errNoRoom)
+			return nil, nil, fmt.Errorf("%w: hutchd's worker isn't connected", errNoRoom)
 		}
 		var reasons []string
 		for i, c := range cs {
@@ -209,7 +209,7 @@ func (s *Server) checkFits(ctx context.Context, n need) error {
 	if err != nil {
 		return err
 	}
-	margin := cfg.Percent("worker.memory_margin") / 100
+	margin := cfg.Percent("machine.memory_margin") / 100
 	ws, err := s.store.workers()
 	if err != nil {
 		return err
@@ -230,7 +230,7 @@ func (s *Server) checkFits(ctx context.Context, n need) error {
 	if !known {
 		return nil // nothing to judge by until a worker connects
 	}
-	return fmt.Errorf("a %s box fits no worker (%s); choose a smaller size, or a bigger machine",
+	return fmt.Errorf("a %s box doesn't fit the machine (%s); choose a smaller size, or use a bigger machine",
 		n, strings.Join(candidates, "; "))
 }
 
@@ -336,7 +336,7 @@ func (s *Server) buildForClass(ctx context.Context, v api.Template, w *workerCon
 	class := w.info.Class
 	tag := fmt.Sprintf("%x", sha256.Sum256([]byte(class)))[:6]
 	id, buildID := fmt.Sprintf("%s-v%d-%s", proj.Slug, v.Version, tag), fmt.Sprintf("%s-v%d-%s-build", proj.Slug, v.Version, tag)
-	fmt.Fprintf(out, "No worker runs template v%d's snapshot class; building it for %s on %s (a few minutes, once).\n", v.Version, class, w.info.Name)
+	fmt.Fprintf(out, "Template v%d has no snapshot for %s yet; building one there (a few minutes, once).\n", v.Version, class)
 	if _, err := s.store.box(buildID); err == nil {
 		s.removeBox(ctx, buildID)
 	}
@@ -410,7 +410,7 @@ func (s *Server) boxPlan(ctx context.Context, params json.RawMessage, _ *rpc.Out
 	case errors.As(err, &lim):
 		plan.Why = "queued: " + lim.Error()
 	case errors.Is(err, errNoRoom):
-		plan.Why = "queued until a worker has room: " + err.Error()
+		plan.Why = "queued until there is room: " + err.Error()
 	default:
 		return nil, err
 	}
@@ -423,7 +423,7 @@ func (s *Server) fitWarnings(ctx context.Context, n need) []string {
 	if err != nil {
 		return nil
 	}
-	margin := cfg.Percent("worker.memory_margin") / 100
+	margin := cfg.Percent("machine.memory_margin") / 100
 	var out []string
 	check := func(name string, memMiB int) {
 		if per := int(float64(memMiB)*(1-margin)) / n.memMiB; per == 1 {

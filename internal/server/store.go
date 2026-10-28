@@ -149,6 +149,7 @@ var migrations = []string{
 	`ALTER TABLE templates ADD COLUMN params TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE boxes ADD COLUMN path TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE box_git ADD COLUMN merged TEXT NOT NULL DEFAULT ''`,
+	`UPDATE configs SET name = 'machine' WHERE name = 'server'`,
 }
 
 func openStore(path string, userKey durable.Key) (*store, error) {
@@ -511,7 +512,7 @@ func (s *store) project(id string) (api.Project, error) {
 	var peaks string
 	err := s.db.QueryRow(`SELECT slug, peaks, confirmed FROM projects WHERE id = ?`, id).Scan(&p.Slug, &peaks, &p.Confirmed)
 	if errors.Is(err, sql.ErrNoRows) {
-		return p, fmt.Errorf("no project %s on this server (run hutch init)", id)
+		return p, fmt.Errorf("no project %s on the machine (run hutch init)", id)
 	}
 	if err == nil && peaks != "" {
 		p.Peaks = &api.Peaks{}

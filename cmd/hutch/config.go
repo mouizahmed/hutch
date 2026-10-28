@@ -30,7 +30,7 @@ func loadConfig(ctx context.Context, sess *yamux.Session) (*config.Config, error
 	if err := rpc.Call(ctx, sess, api.ConfigGet, struct{}{}, &docs); err != nil {
 		return nil, err
 	}
-	srv, err := config.Parse(config.Server, "server config", []byte(docs.Server.Content))
+	srv, err := config.Parse(config.Machine, "machine config", []byte(docs.Machine.Content))
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +81,7 @@ func applyGrants(ctx context.Context, sess *yamux.Session, c *config.Config) (*c
 	if err := writeUserConfig(text); err != nil {
 		return nil, err
 	}
-	if err := syncUserConfig(ctx, sess, serverTarget(), ""); err != nil {
+	if err := syncUserConfig(ctx, sess, machineTarget(), ""); err != nil {
 		return nil, err
 	}
 	return loadConfig(ctx, sess)
@@ -184,20 +184,20 @@ func syncUserConfig(ctx context.Context, sess *yamux.Session, target, resolve st
 			return err
 		}
 		if res.Conflict {
-			return errors.New("the server's copy of your config changed during the sync; run the command again")
+			return errors.New("the machine's copy of your config changed during the sync; run the command again")
 		}
 		return record(res.Doc.Version, local)
 	case !localChanged && !serverChanged:
 		return nil
 	}
-	return fmt.Errorf("your config changed here and on the server since this machine last synced:\n%s\n"+
-		"keep this machine's: hutch config sync --mine\nkeep the server's:   hutch config sync --theirs",
+	return fmt.Errorf("your config changed here and on the machine since this computer last synced:\n%s\n"+
+		"keep this computer's: hutch config sync --mine\nkeep the machine's:   hutch config sync --theirs",
 		lineDiff(srv.Content, string(local)))
 }
 
-// lineDiff shows lines only on the server (-) or only here (+).
-func lineDiff(server, local string) string {
-	a, b := strings.Split(server, "\n"), strings.Split(local, "\n")
+// lineDiff shows lines only on the machine (-) or only here (+).
+func lineDiff(machine, local string) string {
+	a, b := strings.Split(machine, "\n"), strings.Split(local, "\n")
 	lcs := make([][]int, len(a)+1)
 	for i := range lcs {
 		lcs[i] = make([]int, len(b)+1)
@@ -225,16 +225,16 @@ func lineDiff(server, local string) string {
 			i++
 		}
 	}
-	return "  (- server, + here)\n" + strings.Join(out, "\n")
+	return "  (- machine, + here)\n" + strings.Join(out, "\n")
 }
 
-type layerFlags struct{ project, user, server bool }
+type layerFlags struct{ project, user, machine bool }
 
 func (f *layerFlags) register(c *cobra.Command) {
 	c.Flags().BoolVar(&f.project, "project", false, "the project's .hutch/hutch.toml")
 	c.Flags().BoolVar(&f.user, "user", false, "your config (the default)")
-	c.Flags().BoolVar(&f.server, "server", false, "the server's config")
-	c.MarkFlagsMutuallyExclusive("project", "user", "server")
+	c.Flags().BoolVar(&f.machine, "machine", false, "the machine's config")
+	c.MarkFlagsMutuallyExclusive("project", "user", "machine")
 }
 
 // layer picks the layer to edit: the flag, else user if the key allows it, else the
@@ -243,8 +243,8 @@ func (f *layerFlags) layer(k *config.Key) config.Layer {
 	switch {
 	case f.project:
 		return config.Project
-	case f.server:
-		return config.Server
+	case f.machine:
+		return config.Machine
 	case f.user || k == nil:
 		return config.User
 	}
@@ -259,21 +259,21 @@ func (f *layerFlags) layer(k *config.Key) config.Layer {
 // editLayer reads a layer's text, applies change, checks the result, and saves it.
 func editLayer(ctx context.Context, sess *yamux.Session, layer config.Layer, change func([]byte) ([]byte, error)) error {
 	switch layer {
-	case config.Server:
+	case config.Machine:
 		var docs api.Configs
 		if err := rpc.Call(ctx, sess, api.ConfigGet, struct{}{}, &docs); err != nil {
 			return err
 		}
-		text, err := change([]byte(docs.Server.Content))
+		text, err := change([]byte(docs.Machine.Content))
 		if err != nil {
 			return err
 		}
 		var res api.ConfigPutResult
-		if err := rpc.Call(ctx, sess, api.ConfigPut, api.ConfigPutParams{Name: "server", BaseVersion: docs.Server.Version, Content: string(text)}, &res); err != nil {
+		if err := rpc.Call(ctx, sess, api.ConfigPut, api.ConfigPutParams{Name: "machine", BaseVersion: docs.Machine.Version, Content: string(text)}, &res); err != nil {
 			return err
 		}
 		if res.Conflict {
-			return errors.New("the server config changed meanwhile; try again")
+			return errors.New("the machine config changed meanwhile; try again")
 		}
 		return nil
 	case config.User:
@@ -287,7 +287,7 @@ func editLayer(ctx context.Context, sess *yamux.Session, layer config.Layer, cha
 		if err := writeUserConfig(text); err != nil {
 			return err
 		}
-		return syncUserConfig(ctx, sess, serverTarget(), "")
+		return syncUserConfig(ctx, sess, machineTarget(), "")
 	default:
 		repo, err := config.FindRepo(".")
 		if err != nil {
@@ -406,20 +406,20 @@ func configCommands() *cobra.Command {
 		Short: "Change a setting in one layer (lists are comma-separated)",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// The server key says where the server is, so changing it can't go
+			// The machine key says where the machine is, so changing it can't go
 			// through the old one, which may be gone.
-			if args[0] == "server" {
-				if err := setUserServer(args[1]); err != nil {
+			if args[0] == "machine" {
+				if err := setUserMachine(args[1]); err != nil {
 					return err
 				}
-				// This machine's config, with the new address, is the one to keep.
+				// This computer's config, with the new address, is the one to keep.
 				sess, err := dial()
 				if err != nil {
-					fmt.Printf("server = %q; it isn't reachable yet (%v)\n", args[1], err)
+					fmt.Printf("machine = %q; it isn't reachable yet (%v)\n", args[1], err)
 					return nil
 				}
 				defer sess.Close()
-				return syncUserConfig(cmd.Context(), sess, serverTarget(), "mine")
+				return syncUserConfig(cmd.Context(), sess, machineTarget(), "mine")
 			}
 			return setOnServer(cmd, args)
 		},
@@ -509,7 +509,7 @@ func configCommands() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			for l := config.Server; l <= config.Project; l++ {
+			for l := config.Machine; l <= config.Project; l++ {
 				if d := c.Doc(l); d != nil {
 					fmt.Printf("%-8s ok  %s\n", l, d.Source)
 				}
@@ -563,7 +563,7 @@ func configCommands() *cobra.Command {
 	var mine, theirs bool
 	syncCmd := &cobra.Command{
 		Use:   "sync",
-		Short: "Sync your config with the server's copy (runs before every command)",
+		Short: "Sync your config with the machine's copy (runs before every command)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			resolve := ""
@@ -578,11 +578,11 @@ func configCommands() *cobra.Command {
 				return err
 			}
 			defer sess.Close()
-			return syncUserConfig(cmd.Context(), sess, serverTarget(), resolve)
+			return syncUserConfig(cmd.Context(), sess, machineTarget(), resolve)
 		},
 	}
-	syncCmd.Flags().BoolVar(&mine, "mine", false, "replace the server's copy with this machine's")
-	syncCmd.Flags().BoolVar(&theirs, "theirs", false, "replace this machine's copy with the server's")
+	syncCmd.Flags().BoolVar(&mine, "mine", false, "replace the machine's copy with this computer's")
+	syncCmd.Flags().BoolVar(&theirs, "theirs", false, "replace this computer's copy with the machine's")
 	syncCmd.MarkFlagsMutuallyExclusive("mine", "theirs")
 
 	cfgCmd.AddCommand(get, set, edit, explain, validate, grants, syncCmd)
@@ -596,14 +596,14 @@ func from(s config.Setting) string {
 	return s.Layer.String() + ": " + s.Source
 }
 
-// setUserServer points this machine's user config at the new server.
-func setUserServer(target string) error {
+// setUserMachine points this computer's user config at a machine.
+func setUserMachine(target string) error {
 	path := config.UserPath()
 	text, err := readOptional(path)
 	if err != nil {
 		return err
 	}
-	p, _ := config.SplitPath("server")
+	p, _ := config.SplitPath("machine")
 	if text, err = config.Set(withVersion(text), p, target); err != nil {
 		return err
 	}

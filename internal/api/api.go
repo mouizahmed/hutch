@@ -145,8 +145,8 @@ type GCResult struct {
 	Bytes     int64 `json:"bytes"`
 }
 
-// Config documents the server keeps: "server" (the server layer) and "user" (the
-// authoritative copy of the user config). Version 0 means never written.
+// Config documents the machine keeps: "machine" (the machine layer) and "user"
+// (the authoritative copy of the user config). Version 0 means never written.
 type ConfigDoc struct {
 	Name    string `json:"name"`
 	Version int64  `json:"version"`
@@ -154,8 +154,8 @@ type ConfigDoc struct {
 }
 
 type Configs struct {
-	Server ConfigDoc `json:"server"`
-	User   ConfigDoc `json:"user"`
+	Machine ConfigDoc `json:"machine"`
+	User    ConfigDoc `json:"user"`
 }
 
 // ConfigPutParams replaces a document if it is still at BaseVersion.

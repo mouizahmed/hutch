@@ -50,7 +50,7 @@ commands:
 `
 
 func main() {
-	root := flag.String("root", "/var/lib/hutch", "worker data directory (XFS with reflink)")
+	root := flag.String("root", "/var/lib/hutch", "data directory (XFS with reflink)")
 	fcVersion := flag.String("firecracker", "v1.17.0", "Firecracker version under <root>/firecracker/")
 	socket := flag.String("socket", client.Socket, "the API's Unix socket")
 	flag.Usage = func() { fmt.Fprint(flag.CommandLine.Output(), usage) }

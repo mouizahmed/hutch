@@ -131,7 +131,7 @@ func projectForm(ctx context.Context, sess *yamux.Session, cfg *config.Config, t
 	if err != nil {
 		return nil, err
 	}
-	margin := cfg.Percent("worker.memory_margin") / 100
+	margin := cfg.Percent("machine.memory_margin") / 100
 	reason := func(key string) string {
 		p, _ := config.SplitPath(key)
 		if c := config.Comment(text, p); c != "" {
@@ -160,7 +160,7 @@ func projectForm(ctx context.Context, sess *yamux.Session, cfg *config.Config, t
 		case len(fits) > 0:
 			label += "   fits " + strings.Join(fits, ", ")
 		case len(targets) > 0:
-			label += "   fits no worker"
+			label += "   doesn't fit the machine"
 			unfit[value] = true
 		}
 		if sz == cur {
@@ -199,7 +199,7 @@ func projectForm(ctx context.Context, sess *yamux.Session, cfg *config.Config, t
 		huh.NewGroup(huh.NewSelect[string]().Title("Box size").Description(strings.Join(sizeDesc, "\n")).Options(sizeChoices...).Value(&size).
 			Validate(func(v string) error {
 				if unfit[v] {
-					return fmt.Errorf("no worker can hold this size; pick a smaller one or a bigger machine")
+					return fmt.Errorf("the machine can't hold this size; pick a smaller one, or use a bigger machine")
 				}
 				return nil
 			})),

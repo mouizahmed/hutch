@@ -68,12 +68,12 @@ func main() {
 	}
 }
 
-// serverTarget is the server's SSH target: $HUTCH_SERVER, else a server running
-// on this machine (empty), else the user config's server key. The user config
-// syncs between machines, so on the server itself its server key names the server
-// from elsewhere.
-func serverTarget() string {
-	if t := os.Getenv("HUTCH_SERVER"); t != "" {
+// machineTarget is the machine's SSH target: $HUTCH_MACHINE, else hutchd on this
+// computer (empty), else the user config's machine key. The user config syncs
+// between computers, so on the machine itself its machine key names it from
+// elsewhere.
+func machineTarget() string {
+	if t := os.Getenv("HUTCH_MACHINE"); t != "" {
 		return t
 	}
 	if _, err := os.Stat(client.Socket); err == nil {
@@ -83,22 +83,22 @@ func serverTarget() string {
 	if err != nil {
 		return ""
 	}
-	return config.New(d).String("server")
+	return config.New(d).String("machine")
 }
 
 func dial() (*yamux.Session, error) {
-	target := serverTarget()
+	target := machineTarget()
 	sess, err := client.Dial(target, client.Socket)
 	if err != nil {
 		if target == "" {
-			return nil, fmt.Errorf("no server configured in %s and none running here: %w", config.UserPath(), err)
+			return nil, fmt.Errorf("no machine set (hutch setup <ssh-host>, or machine in %s) and no hutchd on this computer: %w", config.UserPath(), err)
 		}
 		return nil, fmt.Errorf("connect to %s: %w", target, err)
 	}
 	return sess, nil
 }
 
-// connect opens a session to the server and syncs the user config with it.
+// connect opens a session to the machine and syncs the user config with it.
 func connect() (*yamux.Session, error) {
 	if _, err := config.ReadFile(config.User, config.UserPath()); err != nil {
 		return nil, fmt.Errorf("%w\n  fix it with: hutch config edit", err)
@@ -109,7 +109,7 @@ func connect() (*yamux.Session, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := syncUserConfig(ctx, sess, serverTarget(), ""); err != nil {
+	if err := syncUserConfig(ctx, sess, machineTarget(), ""); err != nil {
 		sess.Close()
 		return nil, err
 	}

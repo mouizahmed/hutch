@@ -17,11 +17,71 @@ import (
 )
 
 func setupCommands() []*cobra.Command {
-	serverCmd := &cobra.Command{Use: "server", Short: "Run and manage the control plane", GroupID: "setup"}
+	machineCmd := &cobra.Command{
+		Use:     "machine",
+		Short:   "Your machine: what it runs and how full it is",
+		GroupID: "setup",
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			sess, err := connect()
+			if err != nil {
+				return err
+			}
+			defer sess.Close()
+			var ws []api.Worker
+			if err := rpc.Call(cmd.Context(), sess, api.WorkerList, struct{}{}, &ws); err != nil {
+				return err
+			}
+			boxes, err := listBoxes(cmd.Context(), sess)
+			if err != nil {
+				return err
+			}
+			for _, w := range ws {
+				if w.Gone {
+					continue
+				}
+				awake, total := 0, 0
+				for _, b := range boxes {
+					if b.Worker == w.ID && b.Kind != api.BoxVersion {
+						total++
+						if b.State == "running" {
+							awake++
+						}
+					}
+				}
+				state, disk := "offline since "+w.LastSeen.Local().Format(time.DateTime), "-"
+				if w.Online {
+					state = "online"
+					if w.Disk.Total > 0 {
+						disk = fmt.Sprintf("%d%% free of %d GB", 100*w.Disk.Free/w.Disk.Total, w.Disk.Total>>30)
+					}
+				}
+				target := machineTarget()
+				if target == "" {
+					target = "this computer"
+				}
+				tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+				for _, r := range [][2]string{
+					{"Machine", w.Name + " (" + target + ")"},
+					{"State", state},
+					{"hutchd", w.Version},
+					{"Class", w.Class},
+					{"CPUs", fmt.Sprint(w.CPUs)},
+					{"Memory", fmt.Sprintf("%.1f of %.1f GB reserved by awake boxes", float64(w.ReservedMiB)/1024, float64(w.MemMiB)/1024)},
+					{"Disk", disk},
+					{"Boxes", fmt.Sprintf("%d, %d awake", total, awake)},
+				} {
+					fmt.Fprintf(tw, "%s\t%s\n", r[0], r[1])
+				}
+				tw.Flush()
+			}
+			return nil
+		},
+	}
 
-	initCmd := &cobra.Command{
-		Use:   "init",
-		Short: "Connect the server to its bucket and set the recovery passphrase",
+	bucketCmd := &cobra.Command{
+		Use:   "bucket",
+		Short: "Back the machine up to a bucket, and set the recovery passphrase",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, pass, err := bucketForm(true)
@@ -60,71 +120,8 @@ func setupCommands() []*cobra.Command {
 			return nil
 		},
 	}
-	serverCmd.AddCommand(initCmd, gc)
-
-	workers := &cobra.Command{
-		Use:     "workers",
-		Short:   "List workers",
-		GroupID: "setup",
-		Args:    cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			sess, err := connect()
-			if err != nil {
-				return err
-			}
-			defer sess.Close()
-			var ws []api.Worker
-			if err := rpc.Call(cmd.Context(), sess, api.WorkerList, struct{}{}, &ws); err != nil {
-				return err
-			}
-			tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(tw, "WORKER\tNAME\tSTATE\tCLASS\tMEMORY IN USE\tDISK FREE\tLAST SEEN")
-			for _, w := range ws {
-				if w.Gone {
-					continue
-				}
-				state, disk := "offline", "-"
-				if w.Online {
-					state = "online"
-					if w.Disk.Total > 0 {
-						disk = fmt.Sprintf("%d%% of %d GB", 100*w.Disk.Free/w.Disk.Total, w.Disk.Total>>30)
-					}
-				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s of %s\t%s\t%s\n", w.ID, w.Name, state, w.Class, mib(w.ReservedMiB), mib(w.MemMiB), disk, ago(w.LastSeen))
-			}
-			return tw.Flush()
-		},
-	}
-	var undo bool
-	drain := &cobra.Command{
-		Use:   "drain <worker>",
-		Short: "Stop placing boxes on a worker and move its awake boxes off it",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			sess, err := connect()
-			if err != nil {
-				return err
-			}
-			defer sess.Close()
-			return rpc.CallOutput(cmd.Context(), sess, api.WorkerDrain, api.DrainParams{Worker: args[0], Undo: undo}, nil, os.Stdout, os.Stderr)
-		},
-	}
-	drain.Flags().BoolVar(&undo, "undo", false, "let the worker take new boxes again")
-	rmWorker := &cobra.Command{
-		Use:   "rm <worker>",
-		Short: "Forget an offline worker",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			sess, err := connect()
-			if err != nil {
-				return err
-			}
-			defer sess.Close()
-			return rpc.Call(cmd.Context(), sess, api.WorkerRm, api.IDParams{ID: args[0]}, nil)
-		},
-	}
-	workers.AddCommand(drain, rmWorker)
-	return []*cobra.Command{serverCmd, workers}
+	machineCmd.AddCommand(bucketCmd, gc)
+	return []*cobra.Command{machineCmd}
 }
 
 func ago(t time.Time) string {
@@ -156,9 +153,9 @@ func bucketForm(init bool) (bucket.Config, string, error) {
 		}
 		return nil
 	}
-	passDesc := "Unlocks the bucket on a new server if this one is lost."
+	passDesc := "Unlocks the bucket on a new machine if this one is lost."
 	if init {
-		passDesc = fmt.Sprintf("At least %d characters. Unlocks the bucket on a new server if this one is lost. Hutch never stores it.", api.MinPassphrase)
+		passDesc = fmt.Sprintf("At least %d characters. Unlocks the bucket on a new machine if this one is lost. Hutch never stores it.", api.MinPassphrase)
 	}
 	groups := []*huh.Group{
 		huh.NewGroup(
@@ -186,7 +183,7 @@ func bucketForm(init bool) (bucket.Config, string, error) {
 					return nil
 				})),
 			huh.NewGroup(huh.NewConfirm().Title("Have you stored the passphrase somewhere safe?").
-				Description("Without it, losing this server means the bucket can never be read again.").
+				Description("Without it, losing this machine means the bucket can never be read again.").
 				Affirmative("Yes, it's stored").Negative("Cancel").Value(&stored)))
 	}
 	if err := huh.NewForm(groups...).Run(); err != nil {

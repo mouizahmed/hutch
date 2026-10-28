@@ -89,7 +89,7 @@ func handoffCommands() []*cobra.Command {
 				}
 			} else {
 				if _, err := findBox(ctx, sess, "base"); err != nil {
-					return fmt.Errorf("%s isn't in a project with a template, and this server has no base box for other directories: hutch init in the repository, then hutch template build", dir)
+					return fmt.Errorf("%s isn't in a project with a template, and the machine has no base box for other directories: hutch init in the repository, then hutch template build", dir)
 				}
 				root := dir
 				if repo != nil {

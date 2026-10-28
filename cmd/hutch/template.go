@@ -156,11 +156,11 @@ func initCommand() *cobra.Command {
 }
 
 func projectCommands() *cobra.Command {
-	proj := &cobra.Command{Use: "project", Short: "Manage projects on the server", GroupID: "projects"}
+	proj := &cobra.Command{Use: "project", Short: "Manage projects on the machine", GroupID: "projects"}
 	var yes bool
 	rm := &cobra.Command{
 		Use:   "rm [<project>]",
-		Short: "Remove a project's templates and secrets from the server (default: this repository)",
+		Short: "Remove a project's templates and secrets from the machine (default: this repository)",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
 			id := ""
@@ -174,7 +174,7 @@ func projectCommands() *cobra.Command {
 			if id == "" {
 				return errors.New("which project? hutch project rm <project>")
 			}
-			if !yes && !(term.IsTerminal(int(os.Stdin.Fd())) && confirm("Remove "+id+" and all its template versions from the server?")) {
+			if !yes && !(term.IsTerminal(int(os.Stdin.Fd())) && confirm("Remove "+id+" and all its template versions from the machine?")) {
 				return errors.New("not removed (pass --yes to skip the question)")
 			}
 			if err := rpc.Call(ctx, sess, api.ProjectRm, api.ProjectParams{Project: id}, nil); err != nil {
@@ -387,7 +387,7 @@ func syncSecrets(ctx context.Context, sess *yamux.Session, repo *config.Repo) er
 		if stored.Digest == "" {
 			return fmt.Errorf("uploads.txt lists files that aren't here: %s", strings.Join(missing, ", "))
 		}
-		fmt.Fprintf(os.Stderr, "Not here: %s; using the server's copy of the project secrets.\n", strings.Join(missing, ", "))
+		fmt.Fprintf(os.Stderr, "Not here: %s; using the machine's copy of the project secrets.\n", strings.Join(missing, ", "))
 		return nil
 	}
 	if api.SecretsDigest(files) == stored.Digest {
@@ -421,7 +421,7 @@ func sizesCommand() *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:     "sizes",
-		Short:   "Box size options and how many fit on your workers",
+		Short:   "Box size options and how many fit on your machine",
 		GroupID: "projects",
 		Args:    cobra.NoArgs,
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, _ []string) error {
@@ -433,7 +433,7 @@ func sizesCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			margin := cfg.Percent("worker.memory_margin") / 100
+			margin := cfg.Percent("machine.memory_margin") / 100
 			type option struct {
 				CPU     int            `json:"cpu"`
 				Memory  string         `json:"memory"`

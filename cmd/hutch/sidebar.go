@@ -173,7 +173,7 @@ func (m *sidebar) checkedOut() bool {
 	if m.project == "" {
 		m.status = "boxes start in projects: open a project's tab, or hutch init in a repository"
 	} else {
-		m.status = "Hutch doesn't know where " + path.Base(m.project) + " is on this machine: run hutch once in its checkout"
+		m.status = "Hutch doesn't know where " + path.Base(m.project) + " is on this computer: run hutch once in its checkout"
 	}
 	return false
 }
@@ -386,7 +386,7 @@ func (m *sidebar) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.popup("Ports of "+box, "", "forward", box)
 		}
 	case "w":
-		return m, m.popup("Workers", "", "workers")
+		return m, m.popup("Machine", "", "machine")
 	case "m":
 		if box != "" {
 			return m, m.popup("Move "+box, "", "move", box)
@@ -436,7 +436,7 @@ const sidebarHelp = `
   s       a shell in the box               t   new thread in the box
   Ctrl-]  sidebar ↔ right pane             d   diff of the box's branch
   Ctrl-\  agent ↔ shell on the right       f   forward the box's ports
-  z       sleep the box                    w   workers
+  z       sleep the box                    w   machine
   x       remove the box                   m   move the box
   p       pin or unpin the thread          c   serial console
   Ctrl-PgUp/PgDn  previous/next project tab; + on the tab bar opens one

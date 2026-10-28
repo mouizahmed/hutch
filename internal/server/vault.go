@@ -20,7 +20,7 @@ import (
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
-var errNoBucket = errors.New("the server has no bucket yet: run hutch server init")
+var errNoBucket = errors.New("the machine has no bucket: hutch machine bucket")
 
 // loadMaster reads the master key, creating it on first start. It never leaves the
 // server except wrapped by the recovery passphrase.
@@ -118,7 +118,7 @@ func (s *Server) serverInit(ctx context.Context, params json.RawMessage, _ *rpc.
 		return nil, err
 	}
 	if s.vault.Load() != nil {
-		return nil, errors.New("the server already has a bucket")
+		return nil, errors.New("the machine already has a bucket")
 	}
 	if len(p.Passphrase) < api.MinPassphrase {
 		return nil, fmt.Errorf("the recovery passphrase needs at least %d characters", api.MinPassphrase)
@@ -131,7 +131,7 @@ func (s *Server) serverInit(ctx context.Context, params json.RawMessage, _ *rpc.
 		return nil, err
 	}
 	if _, err := b.Head(ctx, "server/master"); err == nil {
-		return nil, errors.New("this bucket already holds a Hutch server's keys: restore it with hutchd restore, or use an empty bucket")
+		return nil, errors.New("this bucket already holds a Hutch machine's keys: restore from it with hutchd restore, or use an empty bucket")
 	} else if !errors.Is(err, bucket.ErrNotFound) {
 		return nil, err
 	}
@@ -294,7 +294,7 @@ func pruneBackups(ctx context.Context, b bucket.Bucket, now time.Time, keep time
 // the recovery passphrase, then the newest backup. It returns when that backup was taken.
 func Restore(ctx context.Context, dir string, cfg bucket.Config, passphrase string) (time.Time, error) {
 	if _, err := os.Stat(filepath.Join(dir, "hutch.db")); err == nil {
-		return time.Time{}, fmt.Errorf("%s already holds a server", dir)
+		return time.Time{}, fmt.Errorf("%s already holds a machine's state", dir)
 	}
 	b, err := bucket.New(cfg)
 	if err != nil {
@@ -306,7 +306,7 @@ func Restore(ctx context.Context, dir string, cfg bucket.Config, passphrase stri
 	}
 	data, err := b.Get(ctx, "server/master")
 	if err != nil {
-		return time.Time{}, fmt.Errorf("no Hutch server in this bucket: %w", err)
+		return time.Time{}, fmt.Errorf("no Hutch machine in this bucket: %w", err)
 	}
 	var r durable.Recovery
 	if err := json.Unmarshal(data, &r); err != nil {
@@ -321,7 +321,7 @@ func Restore(ctx context.Context, dir string, cfg bucket.Config, passphrase stri
 		return time.Time{}, err
 	}
 	if len(objs) == 0 {
-		return time.Time{}, errors.New("the bucket has no server backups")
+		return time.Time{}, errors.New("the bucket has no backups")
 	}
 	sort.Slice(objs, func(i, j int) bool { return objs[i].Key > objs[j].Key })
 	m, err := st.GetManifest(ctx, master.ServerKey(), objs[0].Key)

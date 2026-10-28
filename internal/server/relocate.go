@@ -13,23 +13,19 @@ import (
 	"github.com/mouizahmed/hutch/internal/api"
 )
 
-// workerLost reports whether a worker has been offline for worker.lost_after.
-func (s *Server) workerLost(id string) (bool, time.Duration, error) {
-	cfg, err := s.settings()
-	if err != nil {
-		return false, 0, err
-	}
-	after := cfg.Duration("worker.lost_after")
+// workerLost reports whether a worker is gone: removed, or a machine this one
+// was restored from.
+func (s *Server) workerLost(id string) (bool, error) {
 	ws, err := s.store.workers()
 	if err != nil {
-		return false, after, err
+		return false, err
 	}
 	for _, w := range ws {
 		if w.ID == id {
-			return w.Gone || time.Since(w.LastSeen) >= after, after, nil
+			return w.Gone, nil
 		}
 	}
-	return true, after, nil
+	return true, nil
 }
 
 // boxWorker returns the worker that has a box. When that worker has been lost,
@@ -49,12 +45,12 @@ func (s *Server) boxWorker(ctx context.Context, b api.Box) (*workerConn, api.Box
 	if w, err := s.worker(b.Worker); err == nil {
 		return w, b, nil
 	}
-	lost, after, err := s.workerLost(b.Worker)
+	lost, err := s.workerLost(b.Worker)
 	if err != nil {
 		return nil, b, err
 	}
 	if !lost {
-		return nil, b, fmt.Errorf("worker %s is offline; %s moves to another worker once it has been offline for %s (worker.lost_after)", b.Worker, b.ID, after)
+		return nil, b, fmt.Errorf("%s is on a machine that is offline", b.ID)
 	}
 	store, err := s.storeOf(b)
 	if err != nil {

@@ -22,14 +22,14 @@ const xfsMagic = 0x58465342
 func doctor(w *worker.Worker) []api.Check {
 	var out []api.Check
 	add := func(name string, ok bool, detail, fix string) {
-		c := api.Check{Area: "worker", Name: name, Status: "ok", Detail: detail}
+		c := api.Check{Area: "machine", Name: name, Status: "ok", Detail: detail}
 		if !ok {
 			c.Status, c.Fix = "fail", fix
 		}
 		out = append(out, c)
 	}
 	_, err := os.Stat("/dev/kvm")
-	add("/dev/kvm", err == nil, "", "enable virtualization: on a server, a dedicated machine or a VPS plan with nested virtualization; on your own machine, VT-x or AMD-V in firmware")
+	add("/dev/kvm", err == nil, "", "enable virtualization: a dedicated server or a VPS plan with nested virtualization; on your own hardware, VT-x or AMD-V in firmware")
 
 	var u unix.Utsname
 	unix.Uname(&u)

@@ -112,7 +112,7 @@ func (s *Server) Run(ctx context.Context) error {
 	errc := make(chan error, 1)
 	go func() { errc <- s.listenAPI(ctx) }()
 	if s.vault.Load() == nil {
-		log.Printf("no bucket: nothing is backed up until hutch server init")
+		log.Printf("no bucket: nothing is backed up until hutch machine bucket")
 	}
 	go s.backupLoop(ctx)
 	go s.gcLoop(ctx)
@@ -290,7 +290,7 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 				go s.recoverCrash(workerID, c)
 			}
 			for _, id := range r.ForceSlept {
-				msg := fmt.Sprintf("%s was put to sleep: worker %s's memory passed worker.memory_critical; it wakes when you use it", id, workerID)
+				msg := fmt.Sprintf("%s was put to sleep: the machine's memory passed machine.memory_critical; it wakes when you use it", id)
 				s.store.event(id, "force-slept", msg)
 				s.notify("force-slept", id, "Box put to sleep", msg)
 			}

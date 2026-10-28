@@ -280,7 +280,7 @@ func userCommands() *cobra.Command {
 	var yes bool
 	syncCmd := &cobra.Command{
 		Use:   "sync",
-		Short: "Copy agent config and MCP servers from this machine into the user layer",
+		Short: "Copy agent config and MCP servers from this computer into the user layer",
 		Args:  cobra.NoArgs,
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, _ []string) error {
 			c, err := collectLayer()
