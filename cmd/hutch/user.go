@@ -427,12 +427,15 @@ func loginCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// With no names, only what isn't logged in yet.
 			names := args
 			if len(names) == 0 {
-				for _, a := range set.Sorted() {
-					if a.Login != "" {
-						names = append(names, a.Name)
-					}
+				if names, err = missingLogins(st); err != nil {
+					return err
+				}
+				if len(names) == 0 {
+					fmt.Println("Everything is logged in. hutch login <agent> logs in to one again.")
+					return nil
 				}
 			}
 			for _, n := range names {

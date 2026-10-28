@@ -258,11 +258,9 @@ func (s *Server) installAgents(ctx context.Context, w *workerConn, box string, s
 			continue
 		}
 		// An image that has the agent's command keeps its own.
-		if cmd := strings.Fields(a.Start); len(cmd) > 0 {
-			if s.run(ctx, w, box, api.ExecParams{Argv: []string{"sh", "-c", "command -v " + cmd[0]}}, io.Discard, io.Discard) == nil {
-				fmt.Fprintf(stdout, "%s: the image has %s\n", a.Name, cmd[0])
-				continue
-			}
+		if s.hasCommand(ctx, w, box, a.Start) {
+			fmt.Fprintf(stdout, "%s: the image has it\n", a.Name)
+			continue
 		}
 		step(stdout, "install %s", a.Name)
 		if err := s.run(ctx, w, box, api.ExecParams{Argv: []string{"bash", "-eo", "pipefail", "-c", a.Install}}, stdout, stderr); err != nil {
@@ -310,7 +308,7 @@ func (s *Server) userLoginBox(ctx context.Context, params json.RawMessage, out *
 			s.removeBox(ctx, id)
 			return nil, fmt.Errorf("no login for %q", name)
 		}
-		if a.Install != "" {
+		if a.Install != "" && !s.hasCommand(ctx, w, id, a.Start) {
 			step(stdout, "install %s", name)
 			if err := s.run(ctx, w, id, api.ExecParams{Argv: []string{"bash", "-eo", "pipefail", "-c", a.Install}}, stdout, stderr); err != nil {
 				s.removeBox(ctx, id)
@@ -508,4 +506,10 @@ func (s *Server) refreshCredentials(ctx context.Context, w *workerConn, box stri
 	if err := rpc.Call(ctx, w.sess, api.BoxFiles, api.FilesParams{ID: box, Files: guestproto.Files{Files: files}}, nil); err != nil {
 		log.Printf("credentials: refresh %s after wake: %v", box, err)
 	}
+}
+
+// hasCommand reports whether a box has the program a command line starts with.
+func (s *Server) hasCommand(ctx context.Context, w *workerConn, box, command string) bool {
+	f := strings.Fields(command)
+	return len(f) > 0 && s.run(ctx, w, box, api.ExecParams{Argv: []string{"sh", "-c", "command -v " + f[0]}}, io.Discard, io.Discard) == nil
 }
