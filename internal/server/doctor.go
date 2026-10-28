@@ -12,6 +12,18 @@ import (
 	"github.com/mouizahmed/hutch/internal/version"
 )
 
+// hello refuses a CLI too old for this hutchd and says what it runs.
+func (s *Server) hello(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+	var p api.Handshake
+	if err := rpc.Decode(params, &p); err != nil {
+		return nil, err
+	}
+	if p.Protocol < api.Protocol-1 {
+		return nil, fmt.Errorf("hutch %s on this computer is too old for the machine's hutchd %s: upgrade hutch on this computer", p.Version, version.String())
+	}
+	return api.Handshake{Protocol: api.Protocol, Version: version.String()}, nil
+}
+
 // doctor checks the server, its bucket, every worker, and the boxes,
 // each failure with a fix.
 func (s *Server) doctor(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any, error) {

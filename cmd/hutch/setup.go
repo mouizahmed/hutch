@@ -132,7 +132,7 @@ func setupCommands() []*cobra.Command {
 			return nil
 		},
 	}
-	machineCmd.AddCommand(bucketCmd, gc, upgradeCommand(), restoreCommand())
+	machineCmd.AddCommand(bucketCmd, gc, upgradeCommand(), restoreCommand(), addComputerCommand(), joinCommand())
 	return []*cobra.Command{setupCommand(), machineCmd}
 }
 

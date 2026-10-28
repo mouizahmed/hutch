@@ -13,8 +13,10 @@ import (
 	"github.com/hashicorp/yamux"
 	"github.com/spf13/cobra"
 
+	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/client"
 	"github.com/mouizahmed/hutch/internal/config"
+	"github.com/mouizahmed/hutch/internal/rpc"
 	"github.com/mouizahmed/hutch/internal/version"
 )
 
@@ -98,6 +100,25 @@ func dial() (*yamux.Session, error) {
 	return sess, nil
 }
 
+// checkVersion refuses a machine whose hutchd is older than this CLI speaks;
+// hutchd refuses a CLI that is too old for it.
+func checkVersion(ctx context.Context, sess *yamux.Session) error {
+	var h api.Handshake
+	err := rpc.Call(ctx, sess, api.Hello, api.Handshake{Protocol: api.Protocol, Version: version.String()}, &h)
+	switch {
+	case err != nil && strings.Contains(err.Error(), "unknown method"):
+		return fmt.Errorf("the machine's hutchd is older than hutch %s on this computer: hutch machine upgrade", version.String())
+	case err != nil:
+		if msg := client.SSHError(); msg != "" && strings.Contains(err.Error(), "EOF") {
+			return fmt.Errorf("%s: %s", machineTarget(), msg)
+		}
+		return err
+	case h.Protocol < api.Protocol:
+		return fmt.Errorf("the machine's hutchd %s is older than hutch %s on this computer: hutch machine upgrade", h.Version, version.String())
+	}
+	return nil
+}
+
 // connect opens a session to the machine and syncs the user config with it.
 func connect() (*yamux.Session, error) {
 	if _, err := config.ReadFile(config.User, config.UserPath()); err != nil {
@@ -109,6 +130,10 @@ func connect() (*yamux.Session, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	if err := checkVersion(ctx, sess); err != nil {
+		sess.Close()
+		return nil, err
+	}
 	if err := syncUserConfig(ctx, sess, machineTarget(), ""); err != nil {
 		sess.Close()
 		if msg := client.SSHError(); msg != "" && strings.Contains(err.Error(), "EOF") {

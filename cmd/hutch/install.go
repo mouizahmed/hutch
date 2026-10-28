@@ -19,6 +19,7 @@ import (
 	"github.com/hashicorp/yamux"
 	"github.com/klauspost/compress/zstd"
 	"github.com/spf13/cobra"
+	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 	"rsc.io/qr"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/mouizahmed/hutch/internal/config"
 	"github.com/mouizahmed/hutch/internal/durable"
 	"github.com/mouizahmed/hutch/internal/rpc"
+	"github.com/mouizahmed/hutch/internal/version"
 )
 
 // The Firecracker release hutchd runs, and its published checksums.
@@ -566,6 +568,7 @@ func printQR(text string) {
 
 func upgradeCommand() *cobra.Command {
 	var f installFlags
+	var force bool
 	c := &cobra.Command{
 		Use:   "upgrade",
 		Short: "Install this version of hutchd on the machine and restart it",
@@ -584,7 +587,13 @@ func upgradeCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("hutchd %s → this version\n", p.get("hutchd"))
+			have, want := p.get("hutchd"), version.String()
+			// A build with uncommitted changes isn't identified by its version.
+			if have == want && !strings.HasSuffix(want, "-dirty") && !force {
+				fmt.Printf("The machine already runs hutchd %s.\n", have)
+				return nil
+			}
+			fmt.Printf("hutchd %s → %s\n", have, want)
 			if err := install(r, p, a, storagePlan{}, true); err != nil {
 				return err
 			}
@@ -598,6 +607,7 @@ func upgradeCommand() *cobra.Command {
 		},
 	}
 	f.register(c, false)
+	c.Flags().BoolVar(&force, "force", false, "reinstall even when the machine runs this version")
 	return c
 }
 
@@ -639,19 +649,7 @@ first time you use them. Then the new machine is your machine.`,
 			}
 			// The restored copy of your config is the newest one, but it names the
 			// old machine.
-			sess, err := client.Dial(host, client.Socket)
-			if err != nil {
-				return err
-			}
-			err = syncUserConfig(cmd.Context(), sess, host, "theirs")
-			if err == nil {
-				err = setUserMachine(host)
-			}
-			if err == nil {
-				err = syncUserConfig(cmd.Context(), sess, host, "mine")
-			}
-			sess.Close()
-			if err != nil {
+			if err := adoptMachine(cmd, host); err != nil {
 				return err
 			}
 			fmt.Printf("  ✓ machine = %q; boxes restore from the bucket when you use them\n", host)
@@ -726,19 +724,7 @@ func saveExistingBucket(cmd *cobra.Command, name string) error {
 	if cfg.Name != name {
 		return fmt.Errorf("the machine's bucket is %s, not %s", name, cfg.Name)
 	}
-	b, err := bucket.New(cfg)
-	if err != nil {
-		return err
-	}
-	data, err := b.Get(cmd.Context(), "server/master")
-	if err != nil {
-		return fmt.Errorf("read %s: %w", name, err)
-	}
-	var r durable.Recovery
-	if err := json.Unmarshal(data, &r); err != nil {
-		return err
-	}
-	if _, err := r.Unwrap(pass); err != nil {
+	if err := checkPassphrase(cmd, cfg, pass); err != nil {
 		return err
 	}
 	if err := saveRecovery(cfg, pass); err != nil {
@@ -746,4 +732,179 @@ func saveExistingBucket(cmd *cobra.Command, name string) error {
 	}
 	fmt.Printf("Saved in %s, sealed with your passphrase: restoring onto a new machine asks only for the passphrase.\n", recoveryPath())
 	return nil
+}
+
+// adoptMachine makes host this computer's machine: its copy of your config, with
+// machine set to host, is the one to keep.
+func adoptMachine(cmd *cobra.Command, host string) error {
+	sess, err := client.Dial(host, client.Socket)
+	if err != nil {
+		return err
+	}
+	defer sess.Close()
+	if err := checkVersion(cmd.Context(), sess); err != nil {
+		return err
+	}
+	if err := syncUserConfig(cmd.Context(), sess, host, "theirs"); err != nil {
+		return err
+	}
+	if err := setUserMachine(host); err != nil {
+		return err
+	}
+	return syncUserConfig(cmd.Context(), sess, host, "mine")
+}
+
+// machineAddress is the machine's SSH target as another computer can use it: the
+// user, host, and port an SSH alias stands for.
+func machineAddress(target string) string {
+	out, err := exec.Command("ssh", "-G", target).Output()
+	if err != nil {
+		return target
+	}
+	v := map[string]string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		if k, val, ok := strings.Cut(line, " "); ok {
+			v[k] = val
+		}
+	}
+	addr := v["hostname"]
+	if v["user"] != "" {
+		addr = v["user"] + "@" + addr
+	}
+	if p := v["port"]; p != "" && p != "22" {
+		return "ssh://" + addr + ":" + p
+	}
+	return addr
+}
+
+func addComputerCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "add-computer [<public key>]",
+		Short: "Use the machine from another computer too",
+		Long: `Prints the command to run on another computer to use this machine from it. Given
+that computer's SSH public key (hutch machine join prints it when it can't connect),
+it first lets the key in on the machine.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			target := machineTarget()
+			if target == "" {
+				return errors.New("no machine set: hutch setup <ssh-host>")
+			}
+			addr := machineAddress(target)
+			if len(args) == 1 {
+				key := strings.TrimSpace(args[0])
+				if _, _, _, _, err := ssh.ParseAuthorizedKey([]byte(key)); err != nil {
+					return fmt.Errorf("not an SSH public key: %w", err)
+				}
+				q := shellQuote(key)
+				if err := (remote{target}).run(`mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && { grep -qxF ` + q + ` ~/.ssh/authorized_keys || echo ` + q + ` >> ~/.ssh/authorized_keys; }`); err != nil {
+					return err
+				}
+				fmt.Printf("Let the key in on %s.\n", target)
+			}
+			fmt.Printf("On the other computer, install hutch, then run:\n\n  hutch machine join %s\n\n", addr)
+			fmt.Println("It checks it can reach the machine (and says what to do if not), takes your config, and saves the bucket details sealed with your passphrase.")
+			return nil
+		},
+	}
+}
+
+func joinCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "join <ssh-host>",
+		Short: "Use a machine that another of your computers set up",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			host := args[0]
+			if err := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "true").Run(); err != nil {
+				fmt.Printf("This computer can't SSH to %s yet.\n", host)
+				if key := publicKey(); key != "" {
+					fmt.Printf("On a computer that can, run:\n\n  hutch machine add-computer '%s'\n\nthen run this again.\n", key)
+				} else {
+					fmt.Println("Make it an SSH key first (ssh-keygen -t ed25519), then run this again for the next step.")
+				}
+				return errors.New("no SSH access yet")
+			}
+			if err := adoptMachine(cmd, host); err != nil {
+				return err
+			}
+			fmt.Printf("  ✓ machine = %q, with your config from it\n", host)
+			sess, err := connect()
+			if err != nil {
+				return err
+			}
+			defer sess.Close()
+			var info api.BucketInfo
+			if err := rpc.Call(cmd.Context(), sess, api.BucketGet, struct{}{}, &info); err != nil {
+				return err
+			}
+			if info.Name != "" {
+				if err := saveBucketFrom(cmd, remote{host}, info.Name); err != nil {
+					return err
+				}
+			}
+			fmt.Println("Done. This computer uses the machine; clone your repositories here to start boxes from them.")
+			return nil
+		},
+	}
+}
+
+// publicKey is this computer's SSH public key, if it has one.
+func publicKey() string {
+	home, _ := os.UserHomeDir()
+	for _, name := range []string{"id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub"} {
+		if b, err := os.ReadFile(filepath.Join(home, ".ssh", name)); err == nil {
+			return strings.TrimSpace(string(b))
+		}
+	}
+	return ""
+}
+
+// saveBucketFrom saves the machine's bucket details on this computer, read from the
+// machine over SSH, once the passphrase opens the machine's keys in the bucket; or
+// typed, when this SSH user can't read them.
+func saveBucketFrom(cmd *cobra.Command, r remote, name string) error {
+	c := r.cmd("sudo -n cat /var/lib/hutch/state/bucket.json")
+	out, err := c.Output()
+	var cfg bucket.Config
+	if err != nil || json.Unmarshal(out, &cfg) != nil || cfg.Name != name {
+		fmt.Printf("The machine backs up to %s. Enter its details to save them here.\n", name)
+		return saveExistingBucket(cmd, name)
+	}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return errors.New("this needs a terminal: the recovery passphrase is typed, never passed as an argument")
+	}
+	var pass string
+	err = huh.NewForm(huh.NewGroup(huh.NewInput().Title("Recovery passphrase").
+		Description("The machine backs up to " + name + ". The passphrase seals its details on this computer, for restoring onto a new machine.").
+		EchoMode(huh.EchoModePassword).Value(&pass))).Run()
+	if err != nil {
+		return err
+	}
+	if err := checkPassphrase(cmd, cfg, pass); err != nil {
+		return err
+	}
+	if err := saveRecovery(cfg, pass); err != nil {
+		return err
+	}
+	fmt.Printf("  ✓ bucket %s's details in %s, sealed with your passphrase\n", name, recoveryPath())
+	return nil
+}
+
+// checkPassphrase opens the machine's keys in the bucket with pass.
+func checkPassphrase(cmd *cobra.Command, cfg bucket.Config, pass string) error {
+	b, err := bucket.New(cfg)
+	if err != nil {
+		return err
+	}
+	data, err := b.Get(cmd.Context(), "server/master")
+	if err != nil {
+		return fmt.Errorf("read %s: %w", cfg.Name, err)
+	}
+	var r durable.Recovery
+	if err := json.Unmarshal(data, &r); err != nil {
+		return err
+	}
+	_, err = r.Unwrap(pass)
+	return err
 }

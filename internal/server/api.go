@@ -54,6 +54,7 @@ func (s *Server) apiMux() rpc.Mux {
 		api.WorkerDrain:      s.workerDrain,
 		api.WorkerRm:         s.workerRm,
 		api.BucketGet:        s.bucketGet,
+		api.Hello:            s.hello,
 		api.NotifyTest:       s.notifyTest,
 		api.Doctor:           s.doctor,
 		api.WorkerList:       s.workerList,

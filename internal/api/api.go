@@ -72,6 +72,7 @@ const (
 	BoxMove      = "box.move"
 	WorkerDrain  = "worker.drain"
 	WorkerRm     = "worker.rm"
+	Hello        = "hello"
 	NotifyTest   = "notify.test"
 	BucketGet    = "bucket.get"
 	Doctor       = "doctor"        // the server's checks
@@ -127,6 +128,16 @@ type MoveResult struct {
 type DrainParams struct {
 	Worker string `json:"worker"`
 	Undo   bool   `json:"undo,omitempty"`
+}
+
+// Protocol is the API's version, raised when a change breaks older CLIs or an
+// older hutchd. hutchd accepts CLIs of its protocol and the one before.
+const Protocol = 1
+
+// Handshake is the CLI's and hutchd's protocol and version, exchanged on connecting.
+type Handshake struct {
+	Protocol int    `json:"protocol"`
+	Version  string `json:"version"`
 }
 
 // BucketInfo names the machine's bucket, if it has one; never its credentials.
