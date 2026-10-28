@@ -55,7 +55,6 @@ func (s *Server) apiMux() rpc.Mux {
 		api.WorkerRm:         s.workerRm,
 		api.Doctor:           s.doctor,
 		api.WorkerList:       s.workerList,
-		api.TokenCreate:      s.tokenCreate,
 	}
 }
 
@@ -112,11 +111,6 @@ func (s *Server) workerList(ctx context.Context, _ json.RawMessage, _ *rpc.Out) 
 	}
 	s.mu.Unlock()
 	return ws, nil
-}
-
-func (s *Server) tokenCreate(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any, error) {
-	t, err := s.NewToken()
-	return api.Token{Token: t}, err
 }
 
 // callForBox sends a box call to a worker and records the box it returns.

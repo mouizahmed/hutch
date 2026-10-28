@@ -66,7 +66,6 @@ const (
 	WorkerHello    = "worker.hello"
 	WorkerSettings = "worker.settings"
 	WorkerReport   = "worker.report"
-	TokenCreate    = "token.create"
 
 	ServerInit   = "server.init"
 	ServerGC     = "server.gc"
@@ -127,6 +126,9 @@ type DrainParams struct {
 	Worker string `json:"worker"`
 	Undo   bool   `json:"undo,omitempty"`
 }
+
+// MinPassphrase is the shortest recovery passphrase accepted.
+const MinPassphrase = 12
 
 // ServerInitParams connects the server to its bucket and backs up its master key
 // there, wrapped by the recovery passphrase.
@@ -562,24 +564,6 @@ type PTYParams struct {
 type ConsoleParams struct {
 	ID     string `json:"id"`
 	Follow bool   `json:"follow,omitempty"`
-}
-
-type Token struct {
-	Token string `json:"token"`
-}
-
-// Enrollment happens on the worker port before the worker has a certificate.
-type EnrollRequest struct {
-	Secret string `json:"secret"`
-	Name   string `json:"name"`
-	CSR    []byte `json:"csr"`
-}
-
-type EnrollResponse struct {
-	WorkerID string `json:"worker_id"`
-	Cert     []byte `json:"cert"`
-	CA       []byte `json:"ca"`
-	Error    string `json:"error,omitempty"`
 }
 
 // SecretsDigest identifies a set of secret files by their paths and contents.

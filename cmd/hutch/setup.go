@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -14,55 +13,12 @@ import (
 
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/bucket"
-	"github.com/mouizahmed/hutch/internal/client"
 	"github.com/mouizahmed/hutch/internal/rpc"
-	"github.com/mouizahmed/hutch/internal/server"
-	"github.com/mouizahmed/hutch/internal/version"
 )
 
 func setupCommands() []*cobra.Command {
 	serverCmd := &cobra.Command{Use: "server", Short: "Run and manage the control plane", GroupID: "setup"}
 
-	var listen string
-	var names []string
-	run := &cobra.Command{
-		Use:   "run",
-		Short: "Run the control plane",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if len(names) == 0 {
-				host, _ := os.Hostname()
-				names = []string{host, "localhost", "127.0.0.1"}
-			}
-			s, err := server.New(server.Config{Dir: flagServerData, Listen: listen, Names: names})
-			if err != nil {
-				return err
-			}
-			log.Printf("hutch server %s, data in %s", version.String(), flagServerData)
-			return s.Run(cmd.Context())
-		},
-	}
-	run.Flags().StringVar(&listen, "listen", ":7443", "address workers connect to")
-	run.Flags().StringSliceVar(&names, "name", nil, "hostname or IP workers use to reach this server (repeatable)")
-
-	token := &cobra.Command{
-		Use:   "token",
-		Short: "Create a single-use worker join token",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			sess, err := connect()
-			if err != nil {
-				return err
-			}
-			defer sess.Close()
-			var t api.Token
-			if err := rpc.Call(cmd.Context(), sess, api.TokenCreate, struct{}{}, &t); err != nil {
-				return err
-			}
-			fmt.Println(t.Token)
-			return nil
-		},
-	}
 	initCmd := &cobra.Command{
 		Use:   "init",
 		Short: "Connect the server to its bucket and set the recovery passphrase",
@@ -86,27 +42,6 @@ func setupCommands() []*cobra.Command {
 		},
 	}
 
-	restore := &cobra.Command{
-		Use:   "restore",
-		Short: "Recover a lost server here from its bucket",
-		Long: `Recover a lost server on this machine from its bucket: the master key (with your
-recovery passphrase), then the newest backup. Then start it with hutch server run;
-workers reconnect once the server's address points here.`,
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, pass, err := bucketForm(false)
-			if err != nil {
-				return err
-			}
-			at, err := server.Restore(cmd.Context(), flagServerData, cfg, pass)
-			if err != nil {
-				return err
-			}
-			fmt.Printf("Restored the backup from %s (%s) into %s.\nStart the server: hutch server run\n", at.Local().Format(time.DateTime), ago(at), flagServerData)
-			return nil
-		},
-	}
-
 	gc := &cobra.Command{
 		Use:   "gc",
 		Short: "Delete old box snapshots and bucket chunks nothing uses",
@@ -125,15 +60,7 @@ workers reconnect once the server's address points here.`,
 			return nil
 		},
 	}
-	serverCmd.AddCommand(run, token, initCmd, restore, gc)
-
-	apiCmd := &cobra.Command{
-		Use:    "api",
-		Short:  "Bridge stdio to the server (run by ssh <server> hutch api)",
-		Args:   cobra.NoArgs,
-		Hidden: true,
-		RunE:   func(*cobra.Command, []string) error { return client.Bridge(server.SocketPath(flagServerData)) },
-	}
+	serverCmd.AddCommand(initCmd, gc)
 
 	workers := &cobra.Command{
 		Use:     "workers",
@@ -197,7 +124,7 @@ workers reconnect once the server's address points here.`,
 		},
 	}
 	workers.AddCommand(drain, rmWorker)
-	return []*cobra.Command{serverCmd, apiCmd, workers}
+	return []*cobra.Command{serverCmd, workers}
 }
 
 func ago(t time.Time) string {
@@ -231,7 +158,7 @@ func bucketForm(init bool) (bucket.Config, string, error) {
 	}
 	passDesc := "Unlocks the bucket on a new server if this one is lost."
 	if init {
-		passDesc = fmt.Sprintf("At least %d characters. Unlocks the bucket on a new server if this one is lost. Hutch never stores it.", server.MinPassphrase)
+		passDesc = fmt.Sprintf("At least %d characters. Unlocks the bucket on a new server if this one is lost. Hutch never stores it.", api.MinPassphrase)
 	}
 	groups := []*huh.Group{
 		huh.NewGroup(
@@ -243,8 +170,8 @@ func bucketForm(init bool) (bucket.Config, string, error) {
 		),
 		huh.NewGroup(huh.NewInput().Title("Recovery passphrase").Description(passDesc).EchoMode(huh.EchoModePassword).Value(&pass).
 			Validate(func(s string) error {
-				if init && len(s) < server.MinPassphrase {
-					return fmt.Errorf("at least %d characters", server.MinPassphrase)
+				if init && len(s) < api.MinPassphrase {
+					return fmt.Errorf("at least %d characters", api.MinPassphrase)
 				}
 				return notEmpty(s)
 			})),

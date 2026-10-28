@@ -46,11 +46,6 @@ CREATE TABLE IF NOT EXISTS threads (
 	created TIMESTAMP NOT NULL,
 	PRIMARY KEY (box_id, n)
 );
-CREATE TABLE IF NOT EXISTS tokens (
-	hash    TEXT PRIMARY KEY,
-	created TIMESTAMP NOT NULL,
-	used    TIMESTAMP
-);
 CREATE TABLE IF NOT EXISTS projects (
 	id      TEXT PRIMARY KEY,
 	slug    TEXT NOT NULL UNIQUE,
@@ -187,26 +182,11 @@ func hashSecret(secret string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (s *store) addToken(secret string) error {
-	_, err := s.db.Exec(`INSERT INTO tokens (hash, created) VALUES (?, ?)`, hashSecret(secret), time.Now().UTC())
-	return err
-}
-
-// useToken marks a join token used; each token enrolls exactly one worker.
-func (s *store) useToken(secret string) error {
-	res, err := s.db.Exec(`UPDATE tokens SET used = ? WHERE hash = ? AND used IS NULL`, time.Now().UTC(), hashSecret(secret))
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return errors.New("invalid or already used join token")
-	}
-	return nil
-}
-
-func (s *store) addWorker(id, name string) error {
+// ensureWorker records the worker on this machine, keeping its boxes if it is known.
+func (s *store) ensureWorker(id, name string) error {
 	now := time.Now().UTC()
-	_, err := s.db.Exec(`INSERT INTO workers (id, name, created, last_seen) VALUES (?, ?, ?, ?)`, id, name, now, now)
+	_, err := s.db.Exec(`INSERT INTO workers (id, name, created, last_seen) VALUES (?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET name = excluded.name, gone = 0`, id, name, now, now)
 	return err
 }
 

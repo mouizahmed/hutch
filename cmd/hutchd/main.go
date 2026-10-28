@@ -4,25 +4,35 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"log"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
 
 	"github.com/mouizahmed/hutch/internal/agent"
+	"github.com/mouizahmed/hutch/internal/api"
+	"github.com/mouizahmed/hutch/internal/client"
 	"github.com/mouizahmed/hutch/internal/guestproto"
+	"github.com/mouizahmed/hutch/internal/server"
 	"github.com/mouizahmed/hutch/internal/version"
 	"github.com/mouizahmed/hutch/internal/worker"
 )
 
-const usage = `usage: hutchd [--root DIR] [--firecracker VERSION] <command>
+const usage = `usage: hutchd [--root DIR] [--firecracker VERSION] [--socket PATH] <command>
 
 commands:
   box boot <id> [--image NAME] [--cpus N] [--mem MIB]   cold boot a new box from an image
@@ -33,14 +43,16 @@ commands:
   box console <id>                                       print the serial console log
   box status <id>                                        print what hutch-guest reports (threads, sessions, ports)
   image import <name> <vmlinux> <rootfs.ext4>
-  enroll --server HOST:PORT --token TOKEN [--name NAME]   join a server
-  run [--name NAME]                                      serve the server's calls
+  run [--name NAME]                                      run the machine: boxes, their state, and the API
+  api                                                    bridge stdio to the API (what ssh <machine> hutchd api runs)
+  restore                                                recover the state from a bucket: {"bucket": ..., "passphrase": ...} on stdin
   version
 `
 
 func main() {
 	root := flag.String("root", "/var/lib/hutch", "worker data directory (XFS with reflink)")
 	fcVersion := flag.String("firecracker", "v1.17.0", "Firecracker version under <root>/firecracker/")
+	socket := flag.String("socket", client.Socket, "the API's Unix socket")
 	flag.Usage = func() { fmt.Fprint(flag.CommandLine.Output(), usage) }
 	flag.Parse()
 	args := flag.Args()
@@ -55,21 +67,35 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := dispatch(ctx, *root, *fcVersion, args); err != nil {
+	if err := dispatch(ctx, *root, *fcVersion, *socket, args); err != nil {
 		fmt.Fprintln(os.Stderr, "hutchd:", err)
 		os.Exit(1)
 	}
 }
 
-func dispatch(ctx context.Context, root, fcVersion string, args []string) error {
+func dispatch(ctx context.Context, root, fcVersion, socket string, args []string) error {
+	switch args[0] {
+	case "api":
+		return client.Bridge(socket)
+	case "run":
+		return run(ctx, root, fcVersion, socket, args)
+	case "restore":
+		var p api.ServerInitParams
+		if err := json.NewDecoder(os.Stdin).Decode(&p); err != nil {
+			return fmt.Errorf("restore: read the bucket and passphrase: %w", err)
+		}
+		at, err := server.Restore(ctx, filepath.Join(root, "state"), p.Bucket, p.Passphrase)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("restored the backup from %s\n", at.Local().Format(time.DateTime))
+		return nil
+	}
 	if len(args) >= 2 && args[0] == "image" && args[1] == "import" {
 		if len(args) != 5 {
 			return fmt.Errorf("usage: hutchd image import <name> <vmlinux> <rootfs.ext4>")
 		}
 		return importImage(root, args[2], args[3], args[4])
-	}
-	if args[0] == "enroll" || args[0] == "run" {
-		return daemon(ctx, root, fcVersion, args)
 	}
 	if len(args) < 2 || args[0] != "box" {
 		flag.Usage()
@@ -231,28 +257,54 @@ func copyFile(src, dst string) error {
 	return os.Rename(dst+".tmp", dst)
 }
 
-func daemon(ctx context.Context, root, fcVersion string, args []string) error {
-	id := agent.Identity{Dir: filepath.Join(root, "identity")}
-	fs := flag.NewFlagSet(args[0], flag.ExitOnError)
+// run is the machine's one daemon: the server's state and scheduling, and the
+// worker that runs the boxes, joined in memory.
+func run(ctx context.Context, root, fcVersion, socket string, args []string) error {
+	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	host, _ := os.Hostname()
-	name := fs.String("name", host, "worker name shown by the server")
-	serverAddr := fs.String("server", "", "server address, host:port")
-	token := fs.String("token", "", "join token from `hutch server token`")
+	name := fs.String("name", host, "this machine's name")
 	fs.Parse(args[1:])
-	if args[0] == "enroll" {
-		if *serverAddr == "" || *token == "" {
-			return fmt.Errorf("usage: hutchd enroll --server HOST:PORT --token TOKEN [--name NAME]")
-		}
-		wid, err := agent.Enroll(ctx, id, *serverAddr, *token, *name)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("enrolled as %s\n", wid)
-		return nil
+	id, err := workerID(root)
+	if err != nil {
+		return err
 	}
 	w, err := worker.New(root, fcVersion)
 	if err != nil {
 		return err
 	}
-	return agent.Run(ctx, id, w, *name)
+	dir := filepath.Dir(socket)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return err
+	}
+	if g, err := user.LookupGroup("hutch"); err == nil {
+		gid, _ := strconv.Atoi(g.Gid)
+		if err := os.Chown(dir, 0, gid); err != nil {
+			return err
+		}
+	}
+	s, err := server.New(server.Config{Dir: filepath.Join(root, "state"), Socket: socket})
+	if err != nil {
+		return err
+	}
+	a, b := net.Pipe()
+	go func() {
+		if err := agent.Run(ctx, w, *name, a); err != nil && ctx.Err() == nil {
+			log.Printf("worker: %v", err)
+		}
+	}()
+	go s.AttachWorker(ctx, id, *name, b)
+	log.Printf("hutchd %s on %s, data in %s", version.String(), *name, root)
+	return s.Run(ctx)
+}
+
+// workerID is this machine's worker ID, made on first start.
+func workerID(root string) (string, error) {
+	path := filepath.Join(root, "worker-id")
+	if b, err := os.ReadFile(path); err == nil {
+		return strings.TrimSpace(string(b)), nil
+	}
+	b := make([]byte, 6)
+	rand.Read(b)
+	id := "w-" + hex.EncodeToString(b)
+	return id, os.WriteFile(path, []byte(id+"\n"), 0o600)
 }

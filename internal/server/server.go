@@ -3,8 +3,6 @@ package server
 import (
 	"context"
 	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -14,27 +12,24 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/hashicorp/yamux"
 
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/durable"
-	"github.com/mouizahmed/hutch/internal/pki"
 	"github.com/mouizahmed/hutch/internal/rpc"
-	"github.com/mouizahmed/hutch/internal/wire"
 )
 
 type Config struct {
-	Dir    string   // data directory: hutch.db, CA, api.sock
-	Listen string   // worker address, e.g. ":7443"
-	Names  []string // names and IPs workers use to reach the server
+	Dir    string // data directory: hutch.db, master.key, bucket.json
+	Socket string // the API's Unix socket; group members of its directory may use it
 }
 
 type Server struct {
 	cfg   Config
 	store *store
-	ca    *pki.CA
 	// master derives every key ([durable.Key]); vault is the bucket, once initialized.
 	master   durable.Key
 	vault    atomic.Pointer[vault]
@@ -86,8 +81,6 @@ type workerConn struct {
 	memTotal, memAvailable int
 }
 
-func SocketPath(dir string) string { return filepath.Join(dir, "api.sock") }
-
 func New(cfg Config) (*Server, error) {
 	if err := os.MkdirAll(cfg.Dir, 0o700); err != nil {
 		return nil, err
@@ -100,11 +93,7 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	ca, err := pki.LoadOrCreateCA(cfg.Dir)
-	if err != nil {
-		return nil, err
-	}
-	s := &Server{cfg: cfg, store: st, ca: ca, master: master, workers: map[string]*workerConn{}, pending: map[string]int{}, peaks: map[string]int{}, relieving: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{}, threadWatch: map[string]*threadWatch{},
+	s := &Server{cfg: cfg, store: st, master: master, workers: map[string]*workerConn{}, pending: map[string]int{}, peaks: map[string]int{}, relieving: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{}, threadWatch: map[string]*threadWatch{},
 		fileHashes: map[string]map[string]string{}, syncing: map[string]bool{}, pushErrors: map[string]string{}}
 	b, bcfg, err := loadBucket(cfg.Dir)
 	if err != nil {
@@ -120,8 +109,7 @@ func New(cfg Config) (*Server, error) {
 }
 
 func (s *Server) Run(ctx context.Context) error {
-	errc := make(chan error, 2)
-	go func() { errc <- s.listenWorkers(ctx) }()
+	errc := make(chan error, 1)
 	go func() { errc <- s.listenAPI(ctx) }()
 	if s.vault.Load() == nil {
 		log.Printf("no bucket: nothing is backed up until hutch server init")
@@ -139,17 +127,22 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 }
 
-// listenAPI serves the CLI on a Unix socket only the server's user can open;
-// remote CLIs reach it through `ssh <server> hutch api`.
+// listenAPI serves the CLI on a Unix socket open to hutchd's user and its
+// directory's group; CLIs reach it through `ssh <machine> hutchd api`.
 func (s *Server) listenAPI(ctx context.Context) error {
-	path := SocketPath(s.cfg.Dir)
+	path := s.cfg.Socket
 	os.Remove(path)
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		return err
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
+	if err := os.Chmod(path, 0o660); err != nil {
 		return err
+	}
+	if fi, err := os.Stat(filepath.Dir(path)); err == nil {
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+			os.Chown(path, -1, int(st.Gid))
+		}
 	}
 	context.AfterFunc(ctx, func() { ln.Close() })
 	mux := s.apiMux()
@@ -180,49 +173,14 @@ func yamuxConfig() *yamux.Config {
 	return c
 }
 
-func (s *Server) listenWorkers(ctx context.Context) error {
-	cert, err := s.ca.ServerCert(s.cfg.Names)
-	if err != nil {
-		return err
-	}
-	pool := x509.NewCertPool()
-	pool.AddCert(s.ca.Cert)
-	ln, err := tls.Listen("tcp", s.cfg.Listen, &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		ClientAuth:   tls.VerifyClientCertIfGiven,
-		ClientCAs:    pool,
-		MinVersion:   tls.VersionTLS13,
-	})
-	if err != nil {
-		return err
-	}
-	context.AfterFunc(ctx, func() { ln.Close() })
-	log.Printf("listening for workers on %s", s.cfg.Listen)
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			return err
-		}
-		go s.handleWorkerConn(ctx, conn.(*tls.Conn))
-	}
-}
-
-func (s *Server) handleWorkerConn(ctx context.Context, conn *tls.Conn) {
-	conn.SetDeadline(time.Now().Add(30 * time.Second))
-	if err := conn.HandshakeContext(ctx); err != nil {
+// AttachWorker serves the worker on this machine over conn, the other end of
+// which its agent serves, until conn closes.
+func (s *Server) AttachWorker(ctx context.Context, id, name string, conn net.Conn) {
+	if err := s.store.ensureWorker(id, name); err != nil {
+		log.Printf("worker %s: %v", id, err)
 		conn.Close()
 		return
 	}
-	peers := conn.ConnectionState().PeerCertificates
-	if len(peers) == 0 {
-		s.enroll(conn)
-		return
-	}
-	conn.SetDeadline(time.Time{})
-	id := peers[0].Subject.CommonName
 	sess, err := yamux.Client(conn, yamuxConfig())
 	if err != nil {
 		conn.Close()
@@ -274,39 +232,6 @@ func (s *Server) handleWorkerConn(ctx context.Context, conn *tls.Conn) {
 	s.mu.Unlock()
 	s.store.workerSeen(id, info)
 	log.Printf("worker %s disconnected", id)
-}
-
-func (s *Server) enroll(conn *tls.Conn) {
-	defer conn.Close()
-	var req api.EnrollRequest
-	if err := wire.Read(conn, &req); err != nil {
-		return
-	}
-	resp := func() api.EnrollResponse {
-		if err := s.store.useToken(req.Secret); err != nil {
-			return api.EnrollResponse{Error: err.Error()}
-		}
-		id := "w-" + randomHex(6)
-		cert, err := s.ca.SignWorker(req.CSR, id)
-		if err != nil {
-			return api.EnrollResponse{Error: err.Error()}
-		}
-		if err := s.store.addWorker(id, req.Name); err != nil {
-			return api.EnrollResponse{Error: err.Error()}
-		}
-		log.Printf("enrolled worker %s (%s)", id, req.Name)
-		return api.EnrollResponse{WorkerID: id, Cert: cert, CA: s.ca.PEM}
-	}()
-	wire.Write(conn, resp)
-}
-
-// NewToken creates a single-use join token: <CA fingerprint>.<secret>.
-func (s *Server) NewToken() (string, error) {
-	secret := randomHex(24)
-	if err := s.store.addToken(secret); err != nil {
-		return "", err
-	}
-	return pki.Fingerprint(s.ca.Cert) + "." + secret, nil
 }
 
 func randomHex(n int) string {

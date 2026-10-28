@@ -15,11 +15,8 @@ import (
 
 	"github.com/mouizahmed/hutch/internal/client"
 	"github.com/mouizahmed/hutch/internal/config"
-	"github.com/mouizahmed/hutch/internal/server"
 	"github.com/mouizahmed/hutch/internal/version"
 )
-
-var flagServerData string
 
 // exitError carries a remote command's exit code back to main.
 type exitError int
@@ -42,8 +39,6 @@ func main() {
 			}
 		},
 	}
-	root.PersistentFlags().StringVar(&flagServerData, "server-data", client.DefaultDataDir(), "data directory of a server on this machine")
-	root.PersistentFlags().MarkHidden("server-data")
 
 	root.AddGroup(&cobra.Group{ID: "boxes", Title: "Boxes:"}, &cobra.Group{ID: "projects", Title: "Projects and templates:"},
 		&cobra.Group{ID: "setup", Title: "Setup:"})
@@ -81,7 +76,7 @@ func serverTarget() string {
 	if t := os.Getenv("HUTCH_SERVER"); t != "" {
 		return t
 	}
-	if _, err := os.Stat(server.SocketPath(flagServerData)); err == nil {
+	if _, err := os.Stat(client.Socket); err == nil {
 		return ""
 	}
 	d, err := config.ReadFile(config.User, config.UserPath())
@@ -93,7 +88,7 @@ func serverTarget() string {
 
 func dial() (*yamux.Session, error) {
 	target := serverTarget()
-	sess, err := client.Dial(target, server.SocketPath(flagServerData))
+	sess, err := client.Dial(target, client.Socket)
 	if err != nil {
 		if target == "" {
 			return nil, fmt.Errorf("no server configured in %s and none running here: %w", config.UserPath(), err)

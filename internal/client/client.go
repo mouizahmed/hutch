@@ -1,4 +1,4 @@
-// Package client connects the CLI to the server, locally or over SSH.
+// Package client connects the CLI to hutchd, locally or over SSH.
 package client
 
 import (
@@ -13,17 +13,11 @@ import (
 	"github.com/hashicorp/yamux"
 )
 
-// DefaultDataDir is where `hutch server` keeps its state for the current user.
-func DefaultDataDir() string {
-	if d := os.Getenv("XDG_STATE_HOME"); d != "" {
-		return filepath.Join(d, "hutch", "server")
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "state", "hutch", "server")
-}
+// Socket is hutchd's API socket on its machine.
+const Socket = "/run/hutch/api.sock"
 
-// Dial connects to a server on this machine through its socket, or, when sshTarget
-// is set, by running `hutch api` on that host over SSH.
+// Dial connects to hutchd on this machine through its socket, or, when sshTarget
+// is set, by running `hutchd api` on that host over SSH.
 func Dial(sshTarget, socketPath string) (*yamux.Session, error) {
 	var conn net.Conn
 	if sshTarget == "" {
@@ -45,7 +39,7 @@ func Dial(sshTarget, socketPath string) (*yamux.Session, error) {
 	return yamux.Client(conn, cfg)
 }
 
-// SSHKeyPath is the key hutch server init makes for the servers it creates.
+// SSHKeyPath is Hutch's key for reaching boxes over SSH (hutch ssh-config).
 func SSHKeyPath() string {
 	if d := os.Getenv("XDG_CONFIG_HOME"); d != "" {
 		return filepath.Join(d, "hutch", "ssh", "id_ed25519")
@@ -54,20 +48,8 @@ func SSHKeyPath() string {
 	return filepath.Join(home, ".config", "hutch", "ssh", "id_ed25519")
 }
 
-// SSHArgs are the ssh options every connection to a server uses: Hutch's own key
-// and known hosts, when hutch server init made them, besides the user's.
-func SSHArgs() []string {
-	args := []string{"-o", "BatchMode=yes"}
-	key := SSHKeyPath()
-	if _, err := os.Stat(key); err == nil {
-		home, _ := os.UserHomeDir()
-		args = append(args, "-i", key, "-o", "UserKnownHostsFile="+filepath.Join(home, ".ssh", "known_hosts")+" "+filepath.Join(filepath.Dir(key), "known_hosts"))
-	}
-	return args
-}
-
 func sshConn(target string) (net.Conn, error) {
-	cmd := exec.Command("ssh", append(SSHArgs(), target, "hutch", "api")...)
+	cmd := exec.Command("ssh", "-o", "BatchMode=yes", target, "hutchd", "api")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -110,7 +92,7 @@ type pipeAddr struct{}
 func (pipeAddr) Network() string { return "ssh" }
 func (pipeAddr) String() string  { return "ssh" }
 
-// Bridge connects stdin/stdout to the server socket; it is what `hutch api` runs.
+// Bridge connects stdin/stdout to hutchd's socket; it is what `hutchd api` runs.
 func Bridge(socketPath string) error {
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {

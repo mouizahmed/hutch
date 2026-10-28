@@ -20,13 +20,7 @@ import (
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
-// MinPassphrase is the shortest recovery passphrase accepted.
-const MinPassphrase = 12
-
 var errNoBucket = errors.New("the server has no bucket yet: run hutch server init")
-
-// Files in the data directory that a server backup carries, besides the database.
-var backupFiles = []string{"ca.pem", "ca-key.pem"}
 
 // loadMaster reads the master key, creating it on first start. It never leaves the
 // server except wrapped by the recovery passphrase.
@@ -126,8 +120,8 @@ func (s *Server) serverInit(ctx context.Context, params json.RawMessage, _ *rpc.
 	if s.vault.Load() != nil {
 		return nil, errors.New("the server already has a bucket")
 	}
-	if len(p.Passphrase) < MinPassphrase {
-		return nil, fmt.Errorf("the recovery passphrase needs at least %d characters", MinPassphrase)
+	if len(p.Passphrase) < api.MinPassphrase {
+		return nil, fmt.Errorf("the recovery passphrase needs at least %d characters", api.MinPassphrase)
 	}
 	b, err := bucket.New(p.Bucket)
 	if err != nil {
@@ -137,7 +131,7 @@ func (s *Server) serverInit(ctx context.Context, params json.RawMessage, _ *rpc.
 		return nil, err
 	}
 	if _, err := b.Head(ctx, "server/master"); err == nil {
-		return nil, errors.New("this bucket already holds a Hutch server's keys: use hutch server restore, or an empty bucket")
+		return nil, errors.New("this bucket already holds a Hutch server's keys: restore it with hutchd restore, or use an empty bucket")
 	} else if !errors.Is(err, bucket.ErrNotFound) {
 		return nil, err
 	}
@@ -234,9 +228,6 @@ func (s *Server) backup(ctx context.Context) error {
 	now := time.Now().UTC()
 	m := &durable.Manifest{Created: now, Files: map[string]*durable.File{}}
 	paths := map[string]string{"hutch.db": tmp}
-	for _, f := range backupFiles {
-		paths[f] = filepath.Join(s.cfg.Dir, f)
-	}
 	k := s.master.ServerKey()
 	for name, path := range paths {
 		f, err := os.Open(path)
@@ -354,6 +345,16 @@ func Restore(ctx context.Context, dir string, cfg bucket.Config, passphrase stri
 		}
 	}
 	if err := os.WriteFile(filepath.Join(dir, "master.key"), master[:], 0o600); err != nil {
+		return time.Time{}, err
+	}
+	// This is a new machine: the old one's boxes restore here from the bucket.
+	db, err := openStore(filepath.Join(dir, "hutch.db"), master.Derive("user-layer"))
+	if err != nil {
+		return time.Time{}, err
+	}
+	_, err = db.db.Exec(`UPDATE workers SET gone = 1`)
+	db.db.Close()
+	if err != nil {
 		return time.Time{}, err
 	}
 	return m.Created, writeBucket(dir, cfg)
