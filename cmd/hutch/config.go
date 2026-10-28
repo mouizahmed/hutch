@@ -156,8 +156,12 @@ func syncUserConfig(ctx context.Context, sess *yamux.Session, target, resolve st
 	if !known {
 		localChanged = len(local) > 0
 	}
-	// A new machine's empty copy takes this machine's.
-	serverChanged := srv.Version != st.Version && strings.TrimSpace(srv.Content) != ""
+	// A new machine's empty copy takes this computer's.
+	newMachine := strings.TrimSpace(srv.Content) == ""
+	serverChanged := srv.Version != st.Version && !newMachine
+	if newMachine && len(local) > 0 {
+		localChanged = true
+	}
 
 	record := func(version int64, text []byte) error {
 		states[target] = syncState{Version: version, SHA256: sum(text)}

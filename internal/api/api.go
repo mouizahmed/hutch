@@ -72,6 +72,7 @@ const (
 	BoxMove      = "box.move"
 	WorkerDrain  = "worker.drain"
 	WorkerRm     = "worker.rm"
+	NotifyTest   = "notify.test"
 	Doctor       = "doctor"        // the server's checks
 	WorkerDoctor = "worker.doctor" // hutchd only
 )

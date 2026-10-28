@@ -53,6 +53,7 @@ func (s *Server) apiMux() rpc.Mux {
 		api.BoxPlan:          s.boxPlan,
 		api.WorkerDrain:      s.workerDrain,
 		api.WorkerRm:         s.workerRm,
+		api.NotifyTest:       s.notifyTest,
 		api.Doctor:           s.doctor,
 		api.WorkerList:       s.workerList,
 	}

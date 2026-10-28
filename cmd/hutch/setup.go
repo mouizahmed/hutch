@@ -120,8 +120,8 @@ func setupCommands() []*cobra.Command {
 			return nil
 		},
 	}
-	machineCmd.AddCommand(bucketCmd, gc)
-	return []*cobra.Command{machineCmd}
+	machineCmd.AddCommand(bucketCmd, gc, upgradeCommand(), restoreCommand())
+	return []*cobra.Command{setupCommand(), machineCmd}
 }
 
 func ago(t time.Time) string {
