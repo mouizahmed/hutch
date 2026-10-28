@@ -150,6 +150,8 @@ var migrations = []string{
 	`ALTER TABLE boxes ADD COLUMN path TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE box_git ADD COLUMN merged TEXT NOT NULL DEFAULT ''`,
 	`UPDATE configs SET name = 'machine' WHERE name = 'server'`,
+	`ALTER TABLE box_meta ADD COLUMN image TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE templates ADD COLUMN image TEXT NOT NULL DEFAULT ''`,
 }
 
 func openStore(path string, userKey durable.Key) (*store, error) {
@@ -307,7 +309,7 @@ func (s *store) deleteBox(id string) error {
 
 func (s *store) box(id string) (api.Box, error) {
 	var b api.Box
-	err := s.db.QueryRow(`SELECT id, worker_id, state, image, vcpus, mem_mib, generation, class, reach_ip, created,
+	err := s.db.QueryRow(`SELECT id, worker_id, state, boxes.image, vcpus, mem_mib, generation, class, reach_ip, created,
 		COALESCE(m.project_id, ''), COALESCE(m.kind, ''), COALESCE(g.branch, ''), COALESCE(g.base, ''), path, COALESCE(g.merged, '')
 		FROM boxes LEFT JOIN box_meta m ON m.box_id = boxes.id LEFT JOIN box_git g ON g.box_id = boxes.id WHERE id = ?`, id).
 		Scan(&b.ID, &b.Worker, &b.State, &b.Image, &b.VCPUs, &b.MemMiB, &b.Generation, &b.Class, &b.ReachIP, &b.Created, &b.Project, &b.Kind, &b.Branch, &b.Base, &b.Path, &b.Merged)
@@ -318,7 +320,7 @@ func (s *store) box(id string) (api.Box, error) {
 }
 
 func (s *store) boxes() ([]api.Box, error) {
-	rows, err := s.db.Query(`SELECT id, worker_id, state, image, vcpus, mem_mib, generation, class, reach_ip, created,
+	rows, err := s.db.Query(`SELECT id, worker_id, state, boxes.image, vcpus, mem_mib, generation, class, reach_ip, created,
 		COALESCE(m.project_id, ''), COALESCE(m.kind, ''), COALESCE(g.branch, ''), COALESCE(g.base, ''), path, COALESCE(g.merged, '')
 		FROM boxes LEFT JOIN box_meta m ON m.box_id = boxes.id LEFT JOIN box_git g ON g.box_id = boxes.id ORDER BY created`)
 	if err != nil {
@@ -487,6 +489,7 @@ type boxMeta struct {
 	verified              bool
 	secrets               string // digest of the project secrets a template box was built with
 	version               int    // the template version a box was forked from
+	image                 string // a template box's image: what it was built from, pinned
 }
 
 func (s *store) putMeta(box string, m boxMeta) error {
@@ -497,10 +500,16 @@ func (s *store) putMeta(box string, m boxMeta) error {
 	return err
 }
 
+// setImage records what a template box's image was built from.
+func (s *store) setImage(box, image string) error {
+	_, err := s.db.Exec(`UPDATE box_meta SET image = ? WHERE box_id = ?`, image, box)
+	return err
+}
+
 func (s *store) meta(box string) (boxMeta, error) {
 	var m boxMeta
-	err := s.db.QueryRow(`SELECT project_id, kind, commit_sha, verified, secrets FROM box_meta WHERE box_id = ?`, box).
-		Scan(&m.project, &m.kind, &m.commit, &m.verified, &m.secrets)
+	err := s.db.QueryRow(`SELECT project_id, kind, commit_sha, verified, secrets, image FROM box_meta WHERE box_id = ?`, box).
+		Scan(&m.project, &m.kind, &m.commit, &m.verified, &m.secrets, &m.image)
 	if errors.Is(err, sql.ErrNoRows) {
 		return m, nil
 	}
@@ -553,14 +562,14 @@ func (s *store) addProject(id, base string) (api.Project, error) {
 }
 
 func (s *store) addTemplate(t api.Template) error {
-	_, err := s.db.Exec(`INSERT INTO templates (project_id, version, commit_sha, box_id, vcpus, mem_mib, created, secrets) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.Project, t.Version, t.Commit, t.Box, t.VCPUs, t.MemMiB, t.Created, t.Secrets)
+	_, err := s.db.Exec(`INSERT INTO templates (project_id, version, commit_sha, box_id, vcpus, mem_mib, created, secrets, image) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.Project, t.Version, t.Commit, t.Box, t.VCPUs, t.MemMiB, t.Created, t.Secrets, t.Image)
 	return err
 }
 
 // templates lists a project's versions, newest first.
 func (s *store) templates(project string) ([]api.Template, error) {
-	rows, err := s.db.Query(`SELECT version, commit_sha, box_id, vcpus, mem_mib, created, secrets FROM templates WHERE project_id = ? ORDER BY version DESC`, project)
+	rows, err := s.db.Query(`SELECT version, commit_sha, box_id, vcpus, mem_mib, created, secrets, image FROM templates WHERE project_id = ? ORDER BY version DESC`, project)
 	if err != nil {
 		return nil, err
 	}
@@ -568,7 +577,7 @@ func (s *store) templates(project string) ([]api.Template, error) {
 	var ts []api.Template
 	for rows.Next() {
 		t := api.Template{Project: project}
-		if err := rows.Scan(&t.Version, &t.Commit, &t.Box, &t.VCPUs, &t.MemMiB, &t.Created, &t.Secrets); err != nil {
+		if err := rows.Scan(&t.Version, &t.Commit, &t.Box, &t.VCPUs, &t.MemMiB, &t.Created, &t.Secrets, &t.Image); err != nil {
 			return nil, err
 		}
 		ts = append(ts, t)

@@ -349,13 +349,13 @@ func templateCommands() *cobra.Command {
 				return nil
 			}
 			tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(tw, "VERSION\tRECIPE\tSIZE\tCREATED")
+			fmt.Fprintln(tw, "VERSION\tRECIPE\tFROM\tSIZE\tCREATED")
 			for i, t := range ts {
 				mark := ""
 				if i == 0 {
 					mark = "  (new boxes)"
 				}
-				fmt.Fprintf(tw, "v%d\t%.12s\t%d vCPU, %s\t%s%s\n", t.Version, t.Commit, t.VCPUs, mib(t.MemMiB), ago(t.Created), mark)
+				fmt.Fprintf(tw, "v%d\t%.12s\t%s\t%d vCPU, %s\t%s%s\n", t.Version, t.Commit, shortImage(t.Image), t.VCPUs, mib(t.MemMiB), ago(t.Created), mark)
 			}
 			return tw.Flush()
 		}),
@@ -534,4 +534,18 @@ func sizesCommand() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "machine-readable output")
 	return cmd
+}
+
+// shortImage abbreviates the digests in "ref@sha256:…, ref@sha256:…".
+func shortImage(image string) string {
+	if image == "" {
+		return "-"
+	}
+	parts := strings.Split(image, ", ")
+	for i, p := range parts {
+		if ref, digest, ok := strings.Cut(p, "@sha256:"); ok && len(digest) > 12 {
+			parts[i] = ref + "@" + digest[:12]
+		}
+	}
+	return strings.Join(parts, ", ")
 }

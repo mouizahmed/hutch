@@ -299,6 +299,8 @@ type Template struct {
 	MemMiB  int       `json:"mem_mib"`
 	Created time.Time `json:"created"`
 	Secrets string    `json:"secrets,omitempty"` // digest of the project secrets it was built with
+	// Image is what its image was built from: the base images, pinned by digest.
+	Image string `json:"image,omitempty"`
 }
 
 // Secrets are a project's uploads.txt files; Digest identifies their contents.

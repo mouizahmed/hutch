@@ -187,7 +187,7 @@ func (s *Server) bootTemplate(ctx context.Context, proj api.Project, p api.Templ
 		return api.Box{}, nil, err
 	}
 	defer release()
-	img, err := s.buildImage(ctx, w, proj, p, stdout)
+	img, from, err := s.buildImage(ctx, w, proj, p, stdout)
 	if err != nil {
 		return api.Box{}, nil, err
 	}
@@ -197,6 +197,9 @@ func (s *Server) bootTemplate(ctx context.Context, proj api.Project, p api.Templ
 		return b, nil, err
 	}
 	if err := s.store.putMeta(id, boxMeta{project: proj.ID, kind: api.BoxTemplate}); err != nil {
+		return b, nil, err
+	}
+	if err := s.store.setImage(id, from); err != nil {
 		return b, nil, err
 	}
 	if err := s.applyUserLayer(ctx, w, id, p.Credentials); err != nil {
@@ -216,10 +219,10 @@ func (s *Server) bootTemplate(ctx context.Context, proj api.Project, p api.Templ
 // buildImage builds the template's image on w: the recipe's Dockerfile, the
 // published image the project names, or neither, the default image. An image is
 // named after what it's built from, so an unchanged recipe reuses it.
-func (s *Server) buildImage(ctx context.Context, w *workerConn, proj api.Project, p api.TemplateParams, out io.Writer) (string, error) {
+func (s *Server) buildImage(ctx context.Context, w *workerConn, proj api.Project, p api.TemplateParams, out io.Writer) (name, from string, err error) {
 	cfg, err := s.settings()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	bp := api.ImageBuildParams{Name: api.DefaultImage, CacheBytes: cfg.Size("machine.build_cache"), Reuse: true}
 	switch {
@@ -239,19 +242,18 @@ func (s *Server) buildImage(ctx context.Context, w *workerConn, proj api.Project
 		}
 		bp.Name, bp.Files = fmt.Sprintf("%s-%x", proj.Slug, h.Sum(nil))[:len(proj.Slug)+13], p.Recipe
 		step(out, "image from .hutch/Dockerfile")
-	default:
-		return api.DefaultImage, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, p.BuildTimeout)
 	defer cancel()
 	var img api.Image
 	if err := rpc.CallOutput(ctx, w.sess, api.ImageBuild, bp, &img, out, out); err != nil {
-		return "", fmt.Errorf("image: %w", err)
+		return "", "", fmt.Errorf("image: %w", err)
 	}
-	if len(img.Sources) > 0 {
-		fmt.Fprintf(out, "%s, from %s\n", img.Name, strings.Join(img.Sources, ", "))
+	from = strings.Join(img.Sources, ", ")
+	if from != "" && bp.Name != api.DefaultImage {
+		fmt.Fprintf(out, "%s, from %s\n", img.Name, from)
 	}
-	return img.Name, nil
+	return img.Name, from, nil
 }
 
 func (s *Server) templateSnapshot(ctx context.Context, params json.RawMessage, out *rpc.Out) (any, error) {
@@ -318,7 +320,7 @@ func (s *Server) templateSnapshot(ctx context.Context, params json.RawMessage, o
 	if err := s.store.putMeta(vid, boxMeta{project: proj.ID, kind: api.BoxVersion, commit: p.Commit, secrets: built.secrets}); err != nil {
 		return nil, err
 	}
-	t := api.Template{Project: proj.ID, Version: n, Commit: p.Commit, Box: vid, VCPUs: vb.VCPUs, MemMiB: vb.MemMiB, Created: time.Now().UTC(), Secrets: built.secrets}
+	t := api.Template{Project: proj.ID, Version: n, Commit: p.Commit, Box: vid, VCPUs: vb.VCPUs, MemMiB: vb.MemMiB, Created: time.Now().UTC(), Secrets: built.secrets, Image: built.image}
 	if err := s.store.addTemplate(t); err != nil {
 		return nil, err
 	}
