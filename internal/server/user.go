@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -254,9 +255,6 @@ func (s *Server) installAgents(ctx context.Context, w *workerConn, box string, s
 	}
 	set, err := agents.Load(l.Adapters)
 	if err != nil {
-		return err
-	}
-	if err := s.ensureFetch(ctx, w, box, stdout, stderr); err != nil {
 		return err
 	}
 	for _, a := range set.Sorted() {
@@ -520,16 +518,27 @@ func (s *Server) hasCommand(ctx context.Context, w *workerConn, box, command str
 	return len(f) > 0 && s.run(ctx, w, box, api.ExecParams{Argv: []string{"sh", "-c", "command -v " + f[0]}}, io.Discard, io.Discard) == nil
 }
 
-// ensureFetch installs curl, which agents' installers download with, in an image
-// that lacks it, using the image's own package manager.
-func (s *Server) ensureFetch(ctx context.Context, w *workerConn, box string, stdout, stderr io.Writer) error {
-	if s.hasCommand(ctx, w, box, "curl") {
+// agentTools are what agents and their installers expect in any box: downloads,
+// process listing (Codex's background server uses ps), and git.
+var agentTools = map[string]string{"curl": "curl", "ps": "procps", "git": "git"}
+
+// ensureTools installs the agent tools an image lacks, with its own package manager.
+func (s *Server) ensureTools(ctx context.Context, w *workerConn, box string, stdout, stderr io.Writer) error {
+	var missing []string
+	for cmd, pkg := range agentTools {
+		if !s.hasCommand(ctx, w, box, cmd) {
+			missing = append(missing, pkg)
+		}
+	}
+	if len(missing) == 0 {
 		return nil
 	}
-	step(stdout, "install curl (agent installers need it)")
-	script := `if command -v apt-get >/dev/null; then apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends curl ca-certificates >/dev/null
-elif command -v apk >/dev/null; then apk add -q curl ca-certificates bash
-elif command -v dnf >/dev/null; then dnf install -yq curl ca-certificates
-else echo "no package manager to install curl with; add curl to the image" >&2; exit 1; fi`
-	return s.run(ctx, w, box, api.ExecParams{User: "root", Argv: []string{"sh", "-c", script}}, stdout, stderr)
+	sort.Strings(missing)
+	pkgs := strings.Join(missing, " ")
+	step(stdout, "install %s (agents need them; the image lacks them)", pkgs)
+	script := `if command -v apt-get >/dev/null; then apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends ca-certificates $0 >/dev/null
+elif command -v apk >/dev/null; then apk add -q ca-certificates bash $0
+elif command -v dnf >/dev/null; then dnf install -yq ca-certificates $0
+else echo "no package manager to install $0 with; add them to the image" >&2; exit 1; fi`
+	return s.run(ctx, w, box, api.ExecParams{User: "root", Argv: []string{"sh", "-c", script, pkgs}}, stdout, stderr)
 }

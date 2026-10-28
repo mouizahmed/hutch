@@ -210,6 +210,9 @@ func (s *Server) bootTemplate(ctx context.Context, proj api.Project, p api.Templ
 	if err := s.store.setImage(id, from); err != nil {
 		return b, nil, err
 	}
+	if err := s.ensureTools(ctx, w, id, stdout, stderr); err != nil {
+		return b, w, err
+	}
 	if err := s.applyUserLayer(ctx, w, id, p.Credentials); err != nil {
 		return b, w, err
 	}
