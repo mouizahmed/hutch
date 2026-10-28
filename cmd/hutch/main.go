@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -34,6 +35,12 @@ func main() {
 		SilenceErrors: true,
 		Args:          cobra.NoArgs,
 		RunE:          runTUI,
+		// The TUI opens a project's tab in its checkout, so remember where it is.
+		PersistentPreRun: func(*cobra.Command, []string) {
+			if repo, _ := config.FindRepo("."); repo != nil && !strings.HasPrefix(repo.ID, "local:") {
+				rememberProject(repo.ID, repo.Root)
+			}
+		},
 	}
 	root.PersistentFlags().StringVar(&flagServerData, "server-data", client.DefaultDataDir(), "data directory of a server on this machine")
 	root.PersistentFlags().MarkHidden("server-data")

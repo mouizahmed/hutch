@@ -572,6 +572,12 @@ func (s *store) updateThread(box string, n int, column string, value any) error 
 	return nil
 }
 
+// setAgentTitle keeps the agent's own title for a thread, unless the user renamed it.
+func (s *store) setAgentTitle(box string, n int, title string) error {
+	_, err := s.db.Exec(`UPDATE threads SET title = ? WHERE box_id = ? AND n = ? AND renamed = 0`, title, box, n)
+	return err
+}
+
 func (s *store) deleteThread(box string, n int) error {
 	_, err := s.db.Exec(`DELETE FROM threads WHERE box_id = ? AND n = ?`, box, n)
 	return err

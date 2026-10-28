@@ -49,6 +49,7 @@ const (
 	TemplateBox      = "template.box"
 	ProjectConfirm   = "project.confirm"
 	ProjectRm        = "project.rm"
+	ProjectList      = "project.list"
 	SecretsGet       = "secrets.get"
 	SecretsPut       = "secrets.put"
 

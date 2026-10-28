@@ -421,6 +421,9 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 					if t.SessionID != "" && prevStates[n].SessionID != t.SessionID {
 						s.store.updateThread(br.Box.ID, n, "session_id", t.SessionID)
 					}
+					if t.Title != "" && prevStates[n].Title != t.Title {
+						s.store.setAgentTitle(br.Box.ID, n, t.Title)
+					}
 				}
 				if br.Push != nil {
 					if prev := s.pushErrors[br.Box.ID]; br.Push.Error != prev && br.Push.Error != "" {

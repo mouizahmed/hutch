@@ -597,8 +597,11 @@ func size(n int) string {
 }
 
 func plural(n, word string) string {
-	if n == "1" {
+	switch {
+	case n == "1":
 		return n + " " + word
+	case strings.HasSuffix(word, "x"):
+		return n + " " + word + "es"
 	}
 	return n + " " + word + "s"
 }

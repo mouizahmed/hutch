@@ -18,6 +18,7 @@ func (s *Server) apiMux() rpc.Mux {
 		api.BoxBoot:          s.boxBoot,
 		api.BoxFork:          s.boxFork,
 		api.BoxRelease:       s.boxRelease,
+		api.ProjectList:      s.projectList,
 		api.BoxSleep:         s.onBoxWorker(api.BoxSleep),
 		api.BoxWake:          s.boxWake,
 		api.BoxRm:            s.boxRm,

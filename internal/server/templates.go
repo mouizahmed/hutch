@@ -305,6 +305,22 @@ func (s *Server) templateList(ctx context.Context, params json.RawMessage, _ *rp
 	return s.store.templates(p.Project)
 }
 
+func (s *Server) projectList(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any, error) {
+	ids, err := s.store.projects()
+	if err != nil {
+		return nil, err
+	}
+	out := []api.Project{}
+	for _, id := range ids {
+		p, err := s.store.project(id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
 // templateBox returns the project's template box, starting one when there is none:
 // a fork of the newest version, or before the first version a fresh VM with the
 // repository cloned.

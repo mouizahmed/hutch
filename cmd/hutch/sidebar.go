@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"slices"
 	"sort"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/hashicorp/yamux"
 
 	"github.com/mouizahmed/hutch/internal/api"
+	"github.com/mouizahmed/hutch/internal/config"
 	"github.com/mouizahmed/hutch/internal/names"
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
@@ -32,6 +34,7 @@ const (
 	rowBlank
 	rowBox // a box with several threads, or none
 	rowThread
+	rowWorker
 )
 
 type row struct {
@@ -40,6 +43,7 @@ type row struct {
 	right  string
 	box    api.Box
 	thread api.Thread
+	worker api.Worker
 	indent bool
 	at     time.Time
 }
@@ -52,6 +56,7 @@ type sidebar struct {
 	exe, cwd string
 	right    string // the right pane's tmux id
 	boxes    []api.Box
+	workers  []api.Worker
 	rows     []row
 	cursor   int
 	// showBox and showN are what the right pane shows; showN 0 is a shell.
@@ -74,11 +79,17 @@ type sidebar struct {
 	listTop     int  // screen line of the first list row
 	focused     bool // the sidebar pane has focus
 	branch      string
+	project     string // the launch folder's project, whose boxes need no tag
+	pane        string // the sidebar's own tmux pane
+	tabStatus   string // the counts last set on this project's tab
 }
 
 type boxesMsg struct {
-	boxes []api.Box
-	err   error
+	boxes   []api.Box
+	workers []api.Worker
+	err     error
+	branch  string
+	dir     string // where the tab's project turned out to be checked out
 }
 type tickMsg struct{}
 type loginsMsg []string
@@ -99,7 +110,7 @@ var (
 	spinner      = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 )
 
-func runSidebar(ctx context.Context) error {
+func runSidebar(ctx context.Context, project string) error {
 	exe, err := selfPath()
 	if err != nil {
 		return err
@@ -112,15 +123,17 @@ func runSidebar(ctx context.Context) error {
 	}
 	right := strings.TrimSpace(string(out))
 	tmuxCmd("resize-pane", "-t", pane, "-x", fmt.Sprint(sidebarWidth)).Run()
-	for _, hook := range []string{"client-resized", "window-resized"} {
-		tmuxCmd("set-hook", "-g", hook, "resize-pane -t "+pane+" -x "+fmt.Sprint(sidebarWidth)).Run()
-	}
 	tmuxCmd("select-pane", "-t", pane, "-T", "hutch").Run()
 	tmuxCmd("select-pane", "-t", right, "-T", "").Run()
 	m := &sidebar{ctx: ctx, exe: exe, cwd: cwd, right: right, states: map[string]string{}, agent: "claude", width: sidebarWidth, focused: true}
-	if b, err := exec.Command("git", "-C", cwd, "symbolic-ref", "--short", "-q", "HEAD").Output(); err == nil {
-		m.branch = strings.TrimSpace(string(b))
+	m.project = project
+	var here string
+	m.branch, here = folderInfo(cwd)
+	if here != project || project == "" {
+		m.cwd = "" // not checked out here, as far as Hutch knows
 	}
+	tmuxCmd("set-option", "-w", "-t", pane, "@hutch-key", project).Run()
+	m.pane = pane
 	m.input = textinput.New()
 	m.input.CharLimit = 2000
 	m.input.Prompt = "› "
@@ -154,6 +167,20 @@ func (m *sidebar) pollLogins() tea.Cmd {
 	}
 }
 
+// checkedOut reports whether Hutch knows where the tab's project is on this
+// machine; new boxes read its settings there.
+func (m *sidebar) checkedOut() bool {
+	if m.cwd != "" {
+		return true
+	}
+	if m.project == "" {
+		m.status = "boxes start in projects: open a project's tab, or hutch init in a repository"
+	} else {
+		m.status = "Hutch doesn't know where " + path.Base(m.project) + " is on this machine: run hutch once in its checkout"
+	}
+	return false
+}
+
 // agentReady reports whether new threads' agent can start logged in, warning once
 // when it can't; pressing the key again goes ahead.
 func (m *sidebar) agentReady() bool {
@@ -171,7 +198,18 @@ func (m *sidebar) poll() tea.Cmd {
 	sess := m.sess
 	return func() tea.Msg {
 		boxes, err := listBoxes(m.ctx, sess)
-		return boxesMsg{boxes, err}
+		var workers []api.Worker
+		if err == nil {
+			err = rpc.Call(m.ctx, sess, api.WorkerList, struct{}{}, &workers)
+		}
+		branch, dir := "", m.cwd
+		if dir == "" && m.project != "" && err == nil {
+			dir = projectDir(m.project, boxes)
+		}
+		if dir != "" {
+			branch, _ = folderInfo(dir)
+		}
+		return boxesMsg{boxes: boxes, workers: workers, err: err, branch: branch, dir: dir}
 	}
 }
 
@@ -207,8 +245,13 @@ func (m *sidebar) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.err = nil
+		m.branch = msg.branch
+		if m.cwd == "" && msg.dir != "" {
+			m.cwd = msg.dir
+		}
 		m.notifyChanges(msg.boxes)
-		m.boxes = msg.boxes
+		m.boxes, m.workers = msg.boxes, msg.workers
+		m.setTabStatus()
 		m.build()
 		if m.pendingOpen != "" {
 			box, n, _ := parseTarget(m.pendingOpen)
@@ -323,7 +366,7 @@ func (m *sidebar) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.status = "every login is in"
 	case "n":
-		if !m.agentReady() {
+		if !m.checkedOut() || !m.agentReady() {
 			return m, nil
 		}
 		m.inputFor = "new"
@@ -331,7 +374,7 @@ func (m *sidebar) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.input.SetValue("")
 		return m, m.input.Focus()
 	case "t":
-		if box != "" && m.agentReady() {
+		if box != "" && m.checkedOut() && m.agentReady() {
 			m.inputFor = box
 			m.input.Placeholder = "prompt for a new thread in " + box
 			m.input.SetValue("")
@@ -399,6 +442,7 @@ const sidebarHelp = `
   z       sleep the box                    w   workers
   x       remove the box                   m   move the box
   p       pin or unpin the thread          c   serial console
+  Ctrl-PgUp/PgDn  previous/next project tab; + on the tab bar opens one
   L       log in to agents and GitHub      u   logins and config
   q       quit (boxes keep running)
 
@@ -422,6 +466,57 @@ func (m *sidebar) show(box string, n int) {
 	}
 	tmuxCmd("select-pane", "-t", m.right, "-T", title).Run()
 	m.respawn(shellJoin(m.exe, "tui", "connect", target))
+}
+
+// inView reports whether the sidebar lists a box: its tab's project's boxes, or
+// outside a project the boxes of none.
+func (m *sidebar) inView(b api.Box) bool { return b.Project == m.project }
+
+// setTabStatus shows this project's threads on its tab: waiting, working, and
+// boxes in trouble (failed, or a rejected push).
+func (m *sidebar) setTabStatus() {
+	var waiting, working, trouble int
+	for _, b := range m.boxes {
+		if !m.inView(b) || b.Kind == api.BoxVersion {
+			continue
+		}
+		if b.State == "failed" || b.PushError != "" {
+			trouble++
+		}
+		for _, t := range b.Threads {
+			switch t.State {
+			case api.ThreadWaiting:
+				waiting++
+			case api.ThreadWorking:
+				working++
+			}
+		}
+	}
+	var parts []string
+	for _, c := range []struct {
+		n     int
+		color string
+	}{{waiting, "colour214"}, {working, "colour42"}, {trouble, "colour196"}} {
+		if c.n > 0 {
+			parts = append(parts, fmt.Sprintf("#[fg=%s]●%d", c.color, c.n))
+		}
+	}
+	status := strings.Join(parts, " ")
+	if status != m.tabStatus {
+		m.tabStatus = status
+		tmuxCmd("set-option", "-w", "-t", m.pane, "@hutch-status", status).Run()
+	}
+}
+
+// folderInfo is a folder's git branch and Hutch project.
+func folderInfo(dir string) (branch, project string) {
+	if b, err := exec.Command("git", "-C", dir, "symbolic-ref", "--short", "-q", "HEAD").Output(); err == nil {
+		branch = strings.TrimSpace(string(b))
+	}
+	if repo, err := config.FindRepo(dir); err == nil && repo != nil {
+		project = repo.ID
+	}
+	return branch, project
 }
 
 // agentLabel is how an agent's name reads in titles: claude → Claude.
@@ -460,7 +555,11 @@ func (m *sidebar) popupShell(title, script string, open ...string) tea.Cmd {
 func (m *sidebar) notifyChanges(boxes []api.Box) {
 	var msgs []string
 	next := map[string]string{}
+	mine := m.notifiesFor()
 	for _, b := range boxes {
+		if !mine(b) {
+			continue
+		}
 		for _, t := range b.Threads {
 			key := fmt.Sprintf("%s/%d", b.ID, t.N)
 			next[key] = t.State
@@ -491,18 +590,37 @@ func (m *sidebar) notifyChanges(boxes []api.Box) {
 	}
 }
 
-// build lays out rows: pinned threads, then boxes by last activity in day groups,
-// then the template box. A box with one thread is that thread's row.
+// notifiesFor decides which boxes this tab rings for: its project's, and, in the
+// first tab, those of projects with no tab open, so each change rings once.
+func (m *sidebar) notifiesFor() func(api.Box) bool {
+	open := map[string]bool{}
+	first := ""
+	out, _ := tmuxCmd("list-windows", "-t", "hutch", "-F", "#{@hutch-key}").Output()
+	for _, k := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if first == "" {
+			first = k
+		}
+		open[k] = true
+	}
+	return func(b api.Box) bool {
+		return m.inView(b) || m.project == first && !open[b.Project]
+	}
+}
+
+// build lays out rows as one tree: pinned threads, then each worker with the
+// boxes awake on it, then sleeping boxes, then the template box. A box with one
+// thread is that thread's row. Boxes are newest activity first.
 func (m *sidebar) build() {
 	type entry struct {
 		at   time.Time
 		rows []row
 	}
 	var pinned, template []row
-	var entries []entry
+	byWorker := map[string][]entry{}
+	var asleep, other []entry
 	templateState := ""
 	for _, b := range m.boxes {
-		if b.Kind == api.BoxVersion {
+		if b.Kind == api.BoxVersion || !m.inView(b) {
 			continue
 		}
 		at := b.Created
@@ -530,44 +648,68 @@ func (m *sidebar) build() {
 				rows = append(rows, row{kind: rowThread, box: b, thread: t, label: t.Title, indent: true, at: t.Created})
 			}
 		}
-		if b.Kind == api.BoxTemplate {
+		e := entry{at, rows}
+		switch {
+		case b.Kind == api.BoxTemplate:
 			template = append(template, rows...)
 			templateState = boxStateWord(b)
-			continue
+		case b.State == "asleep" || b.State == "archived":
+			asleep = append(asleep, e)
+		case b.Worker != "":
+			byWorker[b.Worker] = append(byWorker[b.Worker], e)
+		default:
+			other = append(other, e)
 		}
-		entries = append(entries, entry{at, rows})
 	}
-	sort.SliceStable(entries, func(i, j int) bool { return entries[i].at.After(entries[j].at) })
+	flatten := func(es []entry) []row {
+		sort.SliceStable(es, func(i, j int) bool { return es[i].at.After(es[j].at) })
+		var out []row
+		for _, e := range es {
+			out = append(out, e.rows...)
+		}
+		return out
+	}
 
 	selected := m.selected()
-	m.rows = []row{{kind: rowHeader, label: "Boxes"}}
-	if len(pinned) > 0 {
-		m.rows = append(m.rows, row{kind: rowDay, label: "PINNED"})
-		m.rows = append(m.rows, pinned...)
+	m.rows = nil
+	section := func(r row, rows []row) {
+		if len(m.rows) > 0 {
+			m.rows = append(m.rows, row{kind: rowBlank})
+		}
+		m.rows = append(m.rows, r)
+		m.rows = append(m.rows, rows...)
 	}
-	now := time.Now()
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	day := ""
-	for _, e := range entries {
-		d := "OLDER"
-		switch {
-		case !e.at.Before(today):
-			d = "TODAY"
-		case !e.at.Before(today.AddDate(0, 0, -1)):
-			d = "YESTERDAY"
+	if len(pinned) > 0 {
+		section(row{kind: rowHeader, label: "Pinned"}, pinned)
+	}
+	workers := slices.Clone(m.workers)
+	sort.SliceStable(workers, func(i, j int) bool {
+		if workers[i].Online != workers[j].Online {
+			return workers[i].Online
 		}
-		if d != day {
-			if day != "" || len(pinned) > 0 {
-				m.rows = append(m.rows, row{kind: rowBlank})
-			}
-			day = d
-			m.rows = append(m.rows, row{kind: rowDay, label: d})
+		return workers[i].Name < workers[j].Name
+	})
+	known := map[string]bool{}
+	for _, w := range workers {
+		if w.Gone {
+			continue
 		}
-		m.rows = append(m.rows, e.rows...)
+		known[w.ID] = true
+		section(row{kind: rowWorker, worker: w}, flatten(byWorker[w.ID]))
+	}
+	for id, es := range byWorker {
+		if !known[id] {
+			other = append(other, es...)
+		}
+	}
+	if len(other) > 0 {
+		section(row{kind: rowHeader, label: "Waiting"}, flatten(other))
+	}
+	if len(asleep) > 0 {
+		section(row{kind: rowHeader, label: "Asleep"}, flatten(asleep))
 	}
 	if len(template) > 0 {
-		m.rows = append(m.rows, row{kind: rowBlank}, row{kind: rowHeader, label: "Template box", right: templateState})
-		m.rows = append(m.rows, template...)
+		section(row{kind: rowHeader, label: "Template box", right: templateState}, template)
 	}
 	m.cursor = -1
 	for i, r := range m.rows {
@@ -635,19 +777,24 @@ func (m *sidebar) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 func (m *sidebar) View() string {
 	w := max(m.width, 20)
 	var top []string
-	path := m.cwd
-	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(path, home) {
-		path = "~" + strings.TrimPrefix(path, home)
+	name := "boxes outside projects"
+	if m.project != "" {
+		name = path.Base(m.project)
 	}
-	head := " " + stylePath.Render(truncate(path, w-4))
-	if m.branch != "" && lipgloss.Width(head)+len(m.branch)+4 < w {
-		head += styleDim.Render("  ⎇ " + m.branch)
+	dir := ""
+	switch {
+	case m.cwd != "":
+		dir = m.cwd
+		if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(dir, home) {
+			dir = "~" + strings.TrimPrefix(dir, home)
+		}
+	case m.project != "":
+		dir = "not checked out here"
 	}
-	top = append(top, head)
 	working := 0
 	for _, b := range m.boxes {
 		for _, t := range b.Threads {
-			if t.State == api.ThreadWorking {
+			if m.inView(b) && t.State == api.ThreadWorking {
 				working++
 			}
 		}
@@ -656,7 +803,12 @@ func (m *sidebar) View() string {
 	if working > 0 {
 		right = styleWorking.Render(fmt.Sprintf("%d working", working))
 	}
-	top = append(top, spread(" "+styleBold.Render("boxes")+styleDim.Render(" · threads"), right, w-1), "")
+	head := " " + stylePath.Render(truncate(name, w-lipgloss.Width(right)-4))
+	sub := " " + styleDim.Render(truncate(dir, w-4))
+	if m.branch != "" && lipgloss.Width(sub)+len(m.branch)+5 < w {
+		sub += styleDim.Render("  ⎇ " + m.branch)
+	}
+	top = append(top, spread(head, right, w-1), sub, "")
 	if len(m.missing) > 0 {
 		top = append(top, styleWaiting.Render(truncate(" ! not logged in: "+strings.Join(m.missing, ", "), w-1)),
 			styleDim.Render(truncate("   L logs in (a browser opens)", w-1)), "")
@@ -682,9 +834,6 @@ func (m *sidebar) View() string {
 		height = 3
 	}
 	list := m.rows
-	if len(list) <= 1 {
-		list = nil
-	}
 	// Keep the cursor on screen, a row of context past it where there is one.
 	if m.cursor < m.offset+1 {
 		m.offset = max(m.cursor-1, 0)
@@ -700,9 +849,15 @@ func (m *sidebar) View() string {
 		b.WriteString(l + "\n")
 	}
 	lines := 0
-	if len(list) == 0 {
-		b.WriteString(styleDim.Render(" No boxes yet. n starts a task.") + "\n")
-		lines++
+	empty := true
+	for _, x := range m.boxes {
+		if m.inView(x) && x.Kind != api.BoxVersion {
+			empty = false
+		}
+	}
+	if empty {
+		b.WriteString(styleDim.Render(" No boxes here yet. n starts a task.") + "\n\n")
+		lines += 2
 	}
 	for i := m.offset; i < len(list) && lines < height; i++ {
 		if lines == height-1 && i < len(list)-1 {
@@ -711,7 +866,7 @@ func (m *sidebar) View() string {
 			break
 		}
 		line := m.renderRow(list[i], w-1)
-		if i == m.cursor {
+		if i == m.cursor && list[i].selectable() {
 			st := styleCursor
 			if !m.focused {
 				st = styleBlurred
@@ -745,6 +900,9 @@ func (m *sidebar) renderRow(r row, w int) string {
 		fill := w - lipgloss.Width(left) - lipgloss.Width(right)
 		return left + styleRule.Render(strings.Repeat("─", max(fill, 0))) + right
 	}
+	if r.kind == rowWorker {
+		return m.renderWorker(r.worker, w)
+	}
 	b := r.box
 	bullet := styleDim.Render("·")
 	switch {
@@ -775,6 +933,9 @@ func (m *sidebar) renderRow(r row, w int) string {
 	if r.kind == rowThread && r.thread.Agent != m.agent {
 		tag = " [" + r.thread.Agent + "]"
 	}
+	if !r.indent && b.Project != "" && b.Project != m.project {
+		tag += " · " + path.Base(b.Project)
+	}
 	age := shortAge(r.at)
 	left := indent
 	if bullet != "" {
@@ -790,6 +951,29 @@ func (m *sidebar) renderRow(r row, w int) string {
 		text = styleDim.Render(text)
 	}
 	return spread(left+text+styleDim.Render(tag), styleDim.Render(age), w)
+}
+
+// renderWorker is a worker's header: state, name, a rule, and the memory its
+// awake boxes reserve and its price, or why it isn't running.
+func (m *sidebar) renderWorker(wk api.Worker, w int) string {
+	bullet, detail := styleWaiting.Render("!"), "offline"
+	switch {
+	case wk.Online:
+		bullet = styleWorking.Render("●")
+		detail = fmt.Sprintf("%d/%d GB", (wk.ReservedMiB+512)/1024, (wk.MemMiB+512)/1024)
+		if wk.PerHour > 0 {
+			detail += fmt.Sprintf(" $%.2f/h", wk.PerHour)
+		}
+		if wk.Draining {
+			detail = "draining " + detail
+		}
+	case !wk.Stopped.IsZero():
+		bullet, detail = styleDim.Render("○"), "stopped"
+	}
+	left := " " + bullet + " " + styleBold.Render(truncate(wk.Name, w/2)) + " "
+	right := " " + styleDim.Render(detail)
+	fill := w - lipgloss.Width(left) - lipgloss.Width(right)
+	return left + styleRule.Render(strings.Repeat("─", max(fill, 0))) + right
 }
 
 // spread puts right at the right edge of a line of width w.
