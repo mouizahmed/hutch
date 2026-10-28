@@ -360,6 +360,14 @@ func Restore(ctx context.Context, dir string, cfg bucket.Config, passphrase stri
 	return m.Created, writeBucket(dir, cfg)
 }
 
+func (s *Server) bucketGet(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any, error) {
+	var info api.BucketInfo
+	if v := s.vault.Load(); v != nil {
+		info.Name = v.cfg.Name
+	}
+	return info, nil
+}
+
 func (s *Server) gcLoop(ctx context.Context) {
 	for {
 		interval := 24 * time.Hour

@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/huh"
 	"github.com/hashicorp/yamux"
@@ -24,7 +23,10 @@ import (
 	"rsc.io/qr"
 
 	"github.com/mouizahmed/hutch/internal/api"
+	"github.com/mouizahmed/hutch/internal/bucket"
+	"github.com/mouizahmed/hutch/internal/client"
 	"github.com/mouizahmed/hutch/internal/config"
+	"github.com/mouizahmed/hutch/internal/durable"
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
@@ -488,6 +490,10 @@ func offerBucket(cmd *cobra.Command, sess *yamux.Session) error {
 		return err
 	}
 	fmt.Printf("  ✓ bucket %s: everything durable goes there, encrypted\n", cfg.Name)
+	if err := saveRecovery(cfg, pass); err != nil {
+		return err
+	}
+	fmt.Printf("  ✓ its details, sealed with your passphrase, in %s (restoring asks only for the passphrase)\n", recoveryPath())
 	return nil
 }
 
@@ -613,7 +619,7 @@ first time you use them. Then the new machine is your machine.`,
 			if p.get("state") == "yes" {
 				return fmt.Errorf("%s already has Hutch state in /var/lib/hutch/state; restore onto a fresh machine", host)
 			}
-			cfg, pass, err := bucketForm(false)
+			cfg, pass, err := recoverBucket()
 			if err != nil {
 				return err
 			}
@@ -631,11 +637,24 @@ first time you use them. Then the new machine is your machine.`,
 			if err := r.run("sudo systemctl restart hutchd && for i in $(seq 50); do [ -S /run/hutch/api.sock ] && exit 0; sleep 0.2; done; exit 1"); err != nil {
 				return fmt.Errorf("start hutchd: %w", err)
 			}
-			if err := setUserMachine(host); err != nil {
+			// The restored copy of your config is the newest one, but it names the
+			// old machine.
+			sess, err := client.Dial(host, client.Socket)
+			if err != nil {
+				return err
+			}
+			err = syncUserConfig(cmd.Context(), sess, host, "theirs")
+			if err == nil {
+				err = setUserMachine(host)
+			}
+			if err == nil {
+				err = syncUserConfig(cmd.Context(), sess, host, "mine")
+			}
+			sess.Close()
+			if err != nil {
 				return err
 			}
 			fmt.Printf("  ✓ machine = %q; boxes restore from the bucket when you use them\n", host)
-			time.Sleep(time.Second)
 			d := doctorCommand()
 			d.SetContext(cmd.Context())
 			return d.RunE(d, nil)
@@ -643,4 +662,88 @@ first time you use them. Then the new machine is your machine.`,
 	}
 	f.register(c, false)
 	return c
+}
+
+const recoveryAAD = "laptop/bucket"
+
+// recoveryPath is this computer's copy of the bucket's location and credentials,
+// sealed with the recovery passphrase, so restoring onto a new machine asks only
+// for the passphrase.
+func recoveryPath() string { return filepath.Join(filepath.Dir(config.UserPath()), "recovery.json") }
+
+func saveRecovery(cfg bucket.Config, pass string) error {
+	plain, _ := json.Marshal(cfg)
+	return writeFileAtomic(recoveryPath(), durable.WrapBytes(recoveryAAD, plain, pass).Marshal())
+}
+
+// recoverBucket asks for the passphrase and opens the saved bucket details, or
+// asks for everything when this computer has none.
+func recoverBucket() (bucket.Config, string, error) {
+	data, err := os.ReadFile(recoveryPath())
+	if errors.Is(err, os.ErrNotExist) {
+		cfg, pass, err := bucketForm(false)
+		if err == nil {
+			err = saveRecovery(cfg, pass)
+		}
+		return cfg, pass, err
+	}
+	if err != nil {
+		return bucket.Config{}, "", err
+	}
+	var r durable.Recovery
+	if err := json.Unmarshal(data, &r); err != nil {
+		return bucket.Config{}, "", fmt.Errorf("%s: %w", recoveryPath(), err)
+	}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return bucket.Config{}, "", errors.New("this needs a terminal: the recovery passphrase is typed, never passed as an argument")
+	}
+	var pass string
+	err = huh.NewForm(huh.NewGroup(huh.NewInput().Title("Recovery passphrase").
+		Description("Unlocks your bucket details saved on this computer, then the bucket.").
+		EchoMode(huh.EchoModePassword).Value(&pass))).Run()
+	if err != nil {
+		return bucket.Config{}, "", err
+	}
+	plain, err := r.UnwrapBytes(recoveryAAD, pass)
+	if err != nil {
+		return bucket.Config{}, "", err
+	}
+	var cfg bucket.Config
+	if err := json.Unmarshal(plain, &cfg); err != nil {
+		return bucket.Config{}, "", err
+	}
+	fmt.Printf("  ✓ bucket %s, from %s\n", cfg.Name, recoveryPath())
+	return cfg, pass, nil
+}
+
+// saveExistingBucket saves the details of the bucket the machine already uses on
+// this computer, once they and the passphrase open the machine's keys in it.
+func saveExistingBucket(cmd *cobra.Command, name string) error {
+	cfg, pass, err := bucketForm(false)
+	if err != nil {
+		return err
+	}
+	if cfg.Name != name {
+		return fmt.Errorf("the machine's bucket is %s, not %s", name, cfg.Name)
+	}
+	b, err := bucket.New(cfg)
+	if err != nil {
+		return err
+	}
+	data, err := b.Get(cmd.Context(), "server/master")
+	if err != nil {
+		return fmt.Errorf("read %s: %w", name, err)
+	}
+	var r durable.Recovery
+	if err := json.Unmarshal(data, &r); err != nil {
+		return err
+	}
+	if _, err := r.Unwrap(pass); err != nil {
+		return err
+	}
+	if err := saveRecovery(cfg, pass); err != nil {
+		return err
+	}
+	fmt.Printf("Saved in %s, sealed with your passphrase: restoring onto a new machine asks only for the passphrase.\n", recoveryPath())
+	return nil
 }

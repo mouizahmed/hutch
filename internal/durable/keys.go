@@ -123,21 +123,34 @@ const recoveryAAD = "server/master"
 
 // Wrap seals the master key under passphrase with Argon2id.
 func Wrap(master Key, passphrase string) Recovery {
-	r := Recovery{KDF: "argon2id", Time: 3, Memory: 256 << 10, Threads: 4, Salt: make([]byte, 16)}
-	rand.Read(r.Salt)
-	r.Sealed = r.kek(passphrase).Seal(recoveryAAD, master[:])
-	return r
+	return WrapBytes(recoveryAAD, master[:], passphrase)
 }
 
 func (r Recovery) Unwrap(passphrase string) (Key, error) {
-	if r.KDF != "argon2id" {
-		return Key{}, fmt.Errorf("unknown key derivation %q", r.KDF)
-	}
-	plain, err := r.kek(passphrase).Open(recoveryAAD, r.Sealed)
+	plain, err := r.UnwrapBytes(recoveryAAD, passphrase)
 	if err != nil {
-		return Key{}, errors.New("wrong recovery passphrase")
+		return Key{}, err
 	}
 	return ParseKey(plain)
+}
+
+// WrapBytes seals plain, named by aad, under passphrase with Argon2id.
+func WrapBytes(aad string, plain []byte, passphrase string) Recovery {
+	r := Recovery{KDF: "argon2id", Time: 3, Memory: 256 << 10, Threads: 4, Salt: make([]byte, 16)}
+	rand.Read(r.Salt)
+	r.Sealed = r.kek(passphrase).Seal(aad, plain)
+	return r
+}
+
+func (r Recovery) UnwrapBytes(aad, passphrase string) ([]byte, error) {
+	if r.KDF != "argon2id" {
+		return nil, fmt.Errorf("unknown key derivation %q", r.KDF)
+	}
+	plain, err := r.kek(passphrase).Open(aad, r.Sealed)
+	if err != nil {
+		return nil, errors.New("wrong recovery passphrase")
+	}
+	return plain, nil
 }
 
 func (r Recovery) kek(passphrase string) Key {

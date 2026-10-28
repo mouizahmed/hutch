@@ -111,6 +111,9 @@ func connect() (*yamux.Session, error) {
 	defer cancel()
 	if err := syncUserConfig(ctx, sess, machineTarget(), ""); err != nil {
 		sess.Close()
+		if msg := client.SSHError(); msg != "" && strings.Contains(err.Error(), "EOF") {
+			return nil, fmt.Errorf("%s: %s", machineTarget(), msg)
+		}
 		return nil, err
 	}
 	return sess, nil

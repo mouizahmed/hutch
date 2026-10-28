@@ -84,20 +84,32 @@ func setupCommands() []*cobra.Command {
 		Short: "Back the machine up to a bucket, and set the recovery passphrase",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, pass, err := bucketForm(true)
-			if err != nil {
-				return err
-			}
 			sess, err := connect()
 			if err != nil {
 				return err
 			}
 			defer sess.Close()
+			var info api.BucketInfo
+			if err := rpc.Call(cmd.Context(), sess, api.BucketGet, struct{}{}, &info); err != nil {
+				return err
+			}
+			if info.Name != "" {
+				fmt.Printf("The machine already backs up to %s. Enter its details to save them on this computer, for restoring onto a new machine.\n", info.Name)
+				return saveExistingBucket(cmd, info.Name)
+			}
+			cfg, pass, err := bucketForm(true)
+			if err != nil {
+				return err
+			}
 			fmt.Println("Checking the bucket and writing the first backup...")
 			if err := rpc.Call(cmd.Context(), sess, api.ServerInit, api.ServerInitParams{Bucket: cfg, Passphrase: pass}, nil); err != nil {
 				return err
 			}
 			fmt.Printf("Done. Everything durable now goes to %s, encrypted.\n", cfg.Name)
+			if err := saveRecovery(cfg, pass); err != nil {
+				return err
+			}
+			fmt.Printf("Its details are in %s, sealed with your passphrase: restoring onto a new machine asks only for the passphrase.\n", recoveryPath())
 			return nil
 		},
 	}

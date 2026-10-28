@@ -73,6 +73,7 @@ const (
 	WorkerDrain  = "worker.drain"
 	WorkerRm     = "worker.rm"
 	NotifyTest   = "notify.test"
+	BucketGet    = "bucket.get"
 	Doctor       = "doctor"        // the server's checks
 	WorkerDoctor = "worker.doctor" // hutchd only
 )
@@ -126,6 +127,11 @@ type MoveResult struct {
 type DrainParams struct {
 	Worker string `json:"worker"`
 	Undo   bool   `json:"undo,omitempty"`
+}
+
+// BucketInfo names the machine's bucket, if it has one; never its credentials.
+type BucketInfo struct {
+	Name string `json:"name,omitempty"`
 }
 
 // MinPassphrase is the shortest recovery passphrase accepted.

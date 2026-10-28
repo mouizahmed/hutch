@@ -2,12 +2,17 @@
 package client
 
 import (
+	"bytes"
+	"errors"
 	"io"
 	"log"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -58,11 +63,32 @@ func sshConn(target string) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = &sshStderr
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
 	return &pipeConn{r: stdout, w: stdin, cmd: cmd}, nil
+}
+
+// sshStderr keeps what ssh and hutchd api said, for when the connection fails.
+var sshStderr lockedBuffer
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+// SSHError is what ssh or hutchd api printed before a connection closed.
+func SSHError() string {
+	sshStderr.mu.Lock()
+	defer sshStderr.mu.Unlock()
+	return strings.TrimSpace(sshStderr.b.String())
 }
 
 // pipeConn presents an SSH child process's stdio as a net.Conn for yamux.
@@ -95,7 +121,12 @@ func (pipeAddr) String() string  { return "ssh" }
 // Bridge connects stdin/stdout to hutchd's socket; it is what `hutchd api` runs.
 func Bridge(socketPath string) error {
 	conn, err := net.Dial("unix", socketPath)
-	if err != nil {
+	switch {
+	case errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED):
+		return errors.New("not running here: sudo systemctl start hutchd (journalctl -u hutchd says why it stopped)")
+	case errors.Is(err, os.ErrPermission):
+		return errors.New("this user can't reach hutchd yet: it's in the hutch group from its next login (or run hutch setup again)")
+	case err != nil:
 		return err
 	}
 	defer conn.Close()
