@@ -50,7 +50,7 @@ func Init(listen, backend string) error {
 	for _, d := range []string{"/run/sshd", "/run/hutch", "/var/lib/hutch-guest", "/var/log/hutch"} {
 		os.MkdirAll(d, 0o755)
 	}
-	os.Chmod("/tmp", 0o1777)
+	os.Chmod("/tmp", os.ModeSticky|0o777) // Go drops a numeric 0o1000
 
 	token := os.Getenv(TokenEnv)
 	os.Unsetenv(TokenEnv)
