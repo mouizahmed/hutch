@@ -547,6 +547,16 @@ func (w *Worker) DialPort(ctx context.Context, id string, port int) (net.Conn, e
 	return w.guest(b).DialPort(ctx, port)
 }
 
+// GuestVersion returns the protocol version a running box's hutch-guest speaks.
+func (w *Worker) GuestVersion(ctx context.Context, id string) (int, error) {
+	b, err := w.load(id)
+	if err != nil {
+		return 0, err
+	}
+	hello, err := w.guest(b).Hello(ctx)
+	return hello.Version, err
+}
+
 // DialGuest opens a raw connection to a running box's hutch-guest.
 func (w *Worker) DialGuest(ctx context.Context, id string) (net.Conn, error) {
 	b, err := w.load(id)

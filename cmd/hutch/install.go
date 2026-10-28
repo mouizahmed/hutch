@@ -423,7 +423,7 @@ fi`, bk, buildkitVersion, goarch, buildkitSHA256[arch]))); err != nil {
 		}
 		guestChanged = guestChanged || filepath.Base(f.path) == "hutch-guest"
 	}
-	fmt.Println("  ✓ guest kernel and Hutch's image layer")
+	fmt.Println("  ✓ Hutch's image layer" + map[bool]string{true: " and the guest kernel"}[p.get("kvm") == "yes"])
 	if p.get("base") != "yes" || guestChanged {
 		fmt.Println("  … the default image, built on the machine (a minute or two the first time)")
 		var out bytes.Buffer

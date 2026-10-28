@@ -273,6 +273,30 @@ func streamHandlers(w *worker.Worker) rpc.Streams {
 			rpc.Splice(conn, g)
 			return nil
 		},
+		// Exec with input: guest frames end to end, like a terminal.
+		api.BoxExecIn: func(ctx context.Context, params json.RawMessage, conn net.Conn) error {
+			var p api.ExecParams
+			if err := rpc.Decode(params, &p); err != nil {
+				return err
+			}
+			if v, err := w.GuestVersion(ctx, p.ID); err != nil {
+				return err
+			} else if v < 2 {
+				return fmt.Errorf("%s's hutch-guest predates input to exec; a box from a newer template has it", p.ID)
+			}
+			g, err := w.DialGuest(ctx, p.ID)
+			if err != nil {
+				return err
+			}
+			req := guestproto.Request{Type: guestproto.TypeExec, Version: guestproto.Version,
+				Exec: &guestproto.Exec{Argv: p.Argv, User: p.User, Dir: p.Dir, Env: p.Env, Stdin: true}}
+			if err := wire.Write(g, req); err != nil {
+				g.Close()
+				return err
+			}
+			rpc.Splice(conn, g)
+			return nil
+		},
 		api.BoxDial: func(ctx context.Context, params json.RawMessage, conn net.Conn) error {
 			var p api.DialParams
 			if err := rpc.Decode(params, &p); err != nil {

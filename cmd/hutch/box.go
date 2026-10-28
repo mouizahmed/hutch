@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -12,11 +13,14 @@ import (
 
 	"github.com/hashicorp/yamux"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/mouizahmed/hutch/internal/agents"
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/config"
+	"github.com/mouizahmed/hutch/internal/guestproto"
 	"github.com/mouizahmed/hutch/internal/rpc"
+	"github.com/mouizahmed/hutch/internal/wire"
 )
 
 // withServer runs f with a session to the server.
@@ -161,7 +165,14 @@ func boxCommands() []*cobra.Command {
 		GroupID: "boxes",
 		Args:    cobra.MinimumNArgs(2),
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
-			code, err := rpc.Exec(ctx, sess, api.BoxExec, api.ExecParams{ID: args[0], Argv: args[1:], User: user}, os.Stdout, os.Stderr)
+			p := api.ExecParams{ID: args[0], Argv: args[1:], User: user}
+			var code int
+			var err error
+			if term.IsTerminal(int(os.Stdin.Fd())) {
+				code, err = rpc.Exec(ctx, sess, api.BoxExec, p, os.Stdout, os.Stderr)
+			} else {
+				code, err = execWithInput(ctx, sess, p, os.Stdin)
+			}
 			if err != nil {
 				return err
 			}
@@ -528,4 +539,43 @@ func printPlan(ctx context.Context, sess *yamux.Session, cfg *config.Config, p a
 	}
 	fmt.Println("Nothing was started (--dry-run).")
 	return nil
+}
+
+// execWithInput runs a command in a box with in as its input, over a stream that
+// speaks hutch-guest's frames end to end.
+func execWithInput(ctx context.Context, sess *yamux.Session, p api.ExecParams, in io.Reader) (int, error) {
+	conn, err := rpc.OpenStream(ctx, sess, api.BoxExecIn, p)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+	go func() {
+		buf := make([]byte, 32<<10)
+		for {
+			n, err := in.Read(buf)
+			if n > 0 && wire.Write(conn, guestproto.Input{Type: guestproto.InputStdin, Data: buf[:n]}) != nil {
+				return
+			}
+			if err != nil {
+				wire.Write(conn, guestproto.Input{Type: guestproto.InputEOF})
+				return
+			}
+		}
+	}()
+	for {
+		var r guestproto.Response
+		if err := wire.Read(conn, &r); err != nil {
+			return 0, err
+		}
+		switch r.Type {
+		case guestproto.RespStdout:
+			os.Stdout.Write(r.Data)
+		case guestproto.RespStderr:
+			os.Stderr.Write(r.Data)
+		case guestproto.RespExit:
+			return r.ExitCode, nil
+		case guestproto.RespError:
+			return 0, errors.New(r.Error)
+		}
+	}
 }

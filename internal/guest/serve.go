@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -142,14 +143,37 @@ func handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	// The host sends nothing after the request, so a read returning means it hung up.
+	// The host sends nothing after the request but a command's input, so a read
+	// returning (or failing) means it hung up.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	go func() {
-		var b [1]byte
-		conn.Read(b[:])
-		cancel()
-	}()
+	var stdin io.Reader
+	if req.Type == guestproto.TypeExec && req.Exec != nil && req.Exec.Stdin {
+		inR, inW := io.Pipe()
+		stdin = inR
+		go func() {
+			for {
+				var in guestproto.Input
+				if err := wire.Read(conn, &in); err != nil {
+					inW.Close()
+					cancel()
+					return
+				}
+				switch in.Type {
+				case guestproto.InputStdin:
+					inW.Write(in.Data)
+				case guestproto.InputEOF:
+					inW.Close()
+				}
+			}
+		}()
+	} else {
+		go func() {
+			var b [1]byte
+			conn.Read(b[:])
+			cancel()
+		}()
+	}
 
 	r := &responder{conn: conn}
 	switch req.Type {
@@ -170,7 +194,7 @@ func handle(ctx context.Context, conn net.Conn) {
 			r.fail(fmt.Errorf("exec request without a command"))
 			return
 		}
-		code, err := execute(ctx, *req.Exec, r)
+		code, err := execute(ctx, *req.Exec, stdin, r)
 		if err != nil {
 			r.fail(err)
 			return

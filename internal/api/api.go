@@ -23,6 +23,7 @@ const (
 	BoxWake    = "box.wake"
 	BoxRm      = "box.rm"
 	BoxExec    = "box.exec"
+	BoxExecIn  = "box.exec_in" // a stream: exec with the caller's input
 	BoxPTY     = "box.pty"
 	BoxConsole = "box.console"
 	BoxSerial  = "box.serial"

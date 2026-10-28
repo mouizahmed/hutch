@@ -54,7 +54,7 @@ func lookPath(name, home string) string {
 	return name
 }
 
-func execute(ctx context.Context, e guestproto.Exec, r *responder) (int, error) {
+func execute(ctx context.Context, e guestproto.Exec, stdin io.Reader, r *responder) (int, error) {
 	name := e.User
 	if name == "" {
 		name = "dev"
@@ -90,7 +90,7 @@ func execute(ctx context.Context, e guestproto.Exec, r *responder) (int, error) 
 	}
 	defer outR.Close()
 	defer errR.Close()
-	cmd.Stdout, cmd.Stderr = outW, errW
+	cmd.Stdout, cmd.Stderr, cmd.Stdin = outW, errW, stdin
 	err = cmd.Start()
 	outW.Close()
 	errW.Close()

@@ -2,8 +2,9 @@ package guestproto
 
 import "time"
 
+// Version 2 added input to exec (Exec.Stdin).
 const (
-	Version = 1
+	Version = 2
 	Port    = 1024
 )
 
@@ -78,6 +79,9 @@ type Exec struct {
 	User string   `json:"user,omitempty"`
 	Dir  string   `json:"dir,omitempty"`
 	Env  []string `json:"env,omitempty"`
+	// Stdin means the host sends the command's input as Input frames after the
+	// request, ending with InputEOF.
+	Stdin bool `json:"stdin,omitempty"`
 }
 
 // PTY starts a command on a pseudo-terminal. After the guest answers "ok", the
@@ -95,6 +99,7 @@ type PTY struct {
 const (
 	InputStdin  = "stdin"
 	InputResize = "resize"
+	InputEOF    = "eof"
 )
 
 type Input struct {

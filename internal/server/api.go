@@ -324,7 +324,7 @@ func (s *Server) boxConsole(ctx context.Context, params json.RawMessage, out *rp
 }
 
 func (s *Server) apiStreams() rpc.Streams {
-	return rpc.Streams{api.BoxPTY: s.boxPTY, api.BoxSerial: s.boxSerial, api.BoxDial: s.boxDial}
+	return rpc.Streams{api.BoxPTY: s.boxPTY, api.BoxSerial: s.boxSerial, api.BoxDial: s.boxDial, api.BoxExecIn: s.boxExecIn}
 }
 
 func (s *Server) boxDial(ctx context.Context, params json.RawMessage, conn net.Conn) error {
@@ -371,6 +371,24 @@ func (s *Server) boxSerial(ctx context.Context, params json.RawMessage, conn net
 		return err
 	}
 	s.store.event(p.ID, api.BoxSerial, "")
+	rpc.Splice(conn, wc)
+	return nil
+}
+
+func (s *Server) boxExecIn(ctx context.Context, params json.RawMessage, conn net.Conn) error {
+	var p api.ExecParams
+	if err := rpc.Decode(params, &p); err != nil {
+		return err
+	}
+	w, err := s.awake(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	wc, err := rpc.OpenStream(ctx, w.sess, api.BoxExecIn, p)
+	if err != nil {
+		return err
+	}
+	s.store.event(p.ID, api.BoxExec, strings.Join(p.Argv, " "))
 	rpc.Splice(conn, wc)
 	return nil
 }
