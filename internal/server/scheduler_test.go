@@ -6,10 +6,10 @@ import "testing"
 func TestChoose(t *testing.T) {
 	box := need{memMiB: 4096, vcpus: 2, class: "intel"}
 	cs := []candidate{
-		{id: "home-roomy", freeMiB: 20000, cpus: 8, diskOK: true, classes: []string{"intel"}},
-		{id: "home-full", freeMiB: 5000, cpus: 8, diskOK: true, classes: []string{"intel"}},
-		{id: "home-tight", freeMiB: 3000, cpus: 8, diskOK: true, classes: []string{"intel"}},
-		{id: "home-diskfull", freeMiB: 6000, cpus: 8, diskOK: false, classes: []string{"intel"}},
+		{id: "home-roomy", freeMiB: 20000, admitMiB: 4096, cpus: 8, diskOK: true, classes: []string{"intel"}},
+		{id: "home-full", freeMiB: 5000, admitMiB: 4096, cpus: 8, diskOK: true, classes: []string{"intel"}},
+		{id: "home-tight", freeMiB: 3000, admitMiB: 4096, cpus: 8, diskOK: true, classes: []string{"intel"}},
+		{id: "home-diskfull", freeMiB: 6000, admitMiB: 4096, cpus: 8, diskOK: false, classes: []string{"intel"}},
 	}
 	pick := func(cs []candidate, n need) string {
 		if i := choose(cs, n); i >= 0 {
@@ -24,9 +24,9 @@ func TestChoose(t *testing.T) {
 	// A fork needs its snapshot class; a template already on a worker beats fullness.
 	fork := need{memMiB: 4096, vcpus: 2, class: "intel", strict: true, version: "app-v3"}
 	cs = []candidate{
-		{id: "amd", freeMiB: 5000, cpus: 8, diskOK: true, classes: []string{"amd"}},
-		{id: "intel-roomy", freeMiB: 20000, cpus: 8, diskOK: true, classes: []string{"intel"}, hasVersion: true},
-		{id: "intel-full", freeMiB: 5000, cpus: 8, diskOK: true, classes: []string{"intel"}},
+		{id: "amd", freeMiB: 5000, admitMiB: 4096, cpus: 8, diskOK: true, classes: []string{"amd"}},
+		{id: "intel-roomy", freeMiB: 20000, admitMiB: 4096, cpus: 8, diskOK: true, classes: []string{"intel"}, hasVersion: true},
+		{id: "intel-full", freeMiB: 5000, admitMiB: 4096, cpus: 8, diskOK: true, classes: []string{"intel"}},
 	}
 	if got := pick(cs, fork); got != "intel-roomy" {
 		t.Fatalf("got %s, want the worker holding the template", got)

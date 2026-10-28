@@ -51,7 +51,8 @@ func (m *monitor) relieve(ctx context.Context, boxes []*worker.Box, report *api.
 	total, avail := worker.HostMemory()
 	report.MemTotal, report.MemAvailable = total, avail
 	s := m.settings.Load()
-	if s.Overcommit <= 1 || total == 0 {
+	// gVisor boxes take memory as they use it, so a gVisor machine always overcommits.
+	if (s.Overcommit <= 1 && m.w.GVisor == "") || total == 0 {
 		return
 	}
 	used := func() float64 {

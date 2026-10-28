@@ -120,6 +120,8 @@ var Keys = []*Key{
 		Doc: "with overcommit: a box counts at its highest measured memory use over this window"},
 	{Path: "machine.disk_reserve", Kind: Percent, Default: "10%", Min: "0%", Max: "50%", Layers: machine,
 		Doc: "free disk below which the machine takes no new boxes"},
+	{Path: "machine.sandbox_start", Kind: Size, Default: "1G", Min: "128M", Max: "64G", Layers: machine,
+		Doc: "on a gVisor machine, where boxes are admitted by the memory they use, what a starting box counts for until its use shows"},
 	{Path: "machine.build_cache", Kind: Size, Default: "20G", Min: "1G", Max: "16T", Layers: machine,
 		Doc: "disk the image builder keeps for cached layers"},
 	{Path: "idle.check_interval", Kind: Duration, Default: "15s", Min: "1s", Max: "5m", Layers: machine,

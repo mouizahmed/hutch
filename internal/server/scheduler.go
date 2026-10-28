@@ -40,8 +40,11 @@ func mib(m int) string {
 }
 
 type candidate struct {
-	id         string
-	freeMiB    int // memory not reserved by awake boxes, after the host's margin
+	id      string
+	freeMiB int // memory not reserved by awake boxes, after the host's margin
+	// admitMiB is what the box takes there as it starts: its size, or on a gVisor
+	// machine (where a box takes memory as it uses it) machine.sandbox_start.
+	admitMiB   int
 	cpus       int
 	diskOK     bool     // free disk above machine.disk_reserve
 	classes    []string // snapshot classes it restores warm
@@ -51,7 +54,7 @@ type candidate struct {
 // why says why a box doesn't fit a worker, or "" when it does.
 func (c candidate) why(n need) string {
 	switch {
-	case c.freeMiB < n.memMiB:
+	case c.freeMiB < c.admitMiB:
 		return fmt.Sprintf("%s free", mib(max(c.freeMiB, 0)))
 	case c.cpus < n.vcpus:
 		return fmt.Sprintf("%d vCPUs", c.cpus)
@@ -99,6 +102,7 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 	}
 	margin, reserve := cfg.Percent("machine.memory_margin")/100, cfg.Percent("machine.disk_reserve")/100
 	overcommit, high := cfg.Float("machine.overcommit"), cfg.Percent("machine.memory_high")
+	sandboxStart := int(cfg.Size("machine.sandbox_start") >> 20)
 	boxes, err := s.store.boxes()
 	if err != nil {
 		return nil, nil, err
@@ -159,7 +163,17 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 		}
 		d := w.info.Disk
 		free := int(float64(w.info.MemMiB)*(1-margin)) - reserved[id]
-		if overcommit > 1 {
+		admit := n.memMiB
+		if api.GVisorClass(w.info.Class) {
+			// Admitted by what the machine has free, not by boxes' sizes.
+			admit = min(n.memMiB, sandboxStart)
+			if w.memTotal > 0 {
+				free = w.memAvailable - int(float64(w.memTotal)*margin)
+				if 100*float64(w.memTotal-w.memAvailable)/float64(w.memTotal) >= high {
+					free = 0
+				}
+			}
+		} else if overcommit > 1 {
 			free = min(free, int(float64(w.info.MemMiB)*overcommit)-promised[id])
 			// A worker under memory pressure takes nothing new.
 			if w.memTotal > 0 && 100*float64(w.memTotal-w.memAvailable)/float64(w.memTotal) >= high {
@@ -169,6 +183,7 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 		cs = append(cs, candidate{
 			id:         id,
 			freeMiB:    free - s.pending[id],
+			admitMiB:   admit,
 			cpus:       w.info.CPUs,
 			diskOK:     d.Total == 0 || float64(d.Free) >= reserve*float64(d.Total),
 			classes:    workerClasses(w.info),
@@ -191,12 +206,12 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 		sort.Strings(reasons)
 		return nil, nil, fmt.Errorf("%w for a %s box (%s)", errNoRoom, n, strings.Join(reasons, "; "))
 	}
-	w := conns[i]
-	s.pending[w.id] += n.memMiB
+	w, admit := conns[i], cs[i].admitMiB
+	s.pending[w.id] += admit
 	s.starting++
 	return w, func() {
 		s.mu.Lock()
-		s.pending[w.id] -= n.memMiB
+		s.pending[w.id] -= admit
 		s.starting--
 		s.mu.Unlock()
 	}, nil
@@ -216,14 +231,18 @@ func (s *Server) checkFits(ctx context.Context, n need) error {
 	}
 	var candidates []string
 	known := false
-	fits := func(name string, cpus, memMiB int) bool {
+	fits := func(name, class string, cpus, memMiB int) bool {
 		known = true
 		usable := int(float64(memMiB) * (1 - margin))
+		if api.GVisorClass(class) {
+			// A gVisor box's size is a cap: up to the machine's memory, in whole GB.
+			usable = (memMiB + 1023) / 1024 * 1024
+		}
 		candidates = append(candidates, fmt.Sprintf("%s: %d vCPUs, %s for boxes", name, cpus, mib(usable)))
 		return usable >= n.memMiB && cpus >= n.vcpus
 	}
 	for _, w := range ws {
-		if !w.Gone && w.MemMiB > 0 && fits(w.Name, w.CPUs, w.MemMiB) {
+		if !w.Gone && w.MemMiB > 0 && fits(w.Name, w.Class, w.CPUs, w.MemMiB) {
 			return nil
 		}
 	}

@@ -43,9 +43,13 @@ const runscRoot = "/run/hutch/runsc"
 var runscFlags = []string{"--root", runscRoot, "--overlay2=none", "--net-raw", "--allow-suid",
 	"--allow-connected-on-save", "--host-settings=ignore"}
 
+// specVersion counts changes to the sandbox spec (mounts, flags): gVisor restores a
+// checkpoint only into the sandbox it was taken in, so a change is a new class.
+const specVersion = 2
+
 func gvisorClass(vendor, version string) string {
 	arch := map[string]string{"amd64": "x86_64", "arm64": "aarch64"}[runtime.GOARCH]
-	return fmt.Sprintf("%s-%s/gvisor-%s", arch, vendor, version)
+	return fmt.Sprintf("%s-%s/gvisor-%s-s%d", arch, vendor, version, specVersion)
 }
 
 // gvisorVersions lists the installed gVisor versions, oldest first.

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/mouizahmed/hutch/internal/bucket"
@@ -513,6 +514,10 @@ type Disk struct {
 	Total int64 `json:"total,omitempty"`
 	Free  int64 `json:"free,omitempty"`
 }
+
+// GVisorClass reports whether a snapshot class is gVisor's: such a machine's boxes
+// take memory as they use it, their size a cap.
+func GVisorClass(class string) bool { return strings.Contains(class, "/gvisor-") }
 
 // DefaultImage is the image projects without a Dockerfile use.
 const DefaultImage = "base"
