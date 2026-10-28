@@ -202,7 +202,10 @@ func (s *Server) applyUserLayer(ctx context.Context, w *workerConn, box string, 
 		script = append(script, `git config --global user.email "$2"`)
 	}
 	if hasGH {
-		script = append(script, "gh auth setup-git")
+		// Images without gh still get git over HTTPS, from the token in its login.
+		script = append(script, `if command -v gh >/dev/null; then gh auth setup-git; else
+git config --global credential.https://github.com.helper '!f() { echo username=x-access-token; echo "password=$(sed -n "s/^ *oauth_token: *//p" ~/.config/gh/hosts.yml | head -1)"; }; f'
+fi`)
 	}
 	if len(script) == 0 {
 		return nil

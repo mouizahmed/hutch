@@ -69,7 +69,11 @@ func (s *Server) run(ctx context.Context, w *workerConn, box string, e api.ExecP
 		return err
 	}
 	if code != 0 {
-		return fmt.Errorf("%s exited %d", e.Argv[len(e.Argv)-1], code)
+		what := e.Argv[len(e.Argv)-1]
+		if len(e.Argv) > 2 && e.Argv[0] == "sh" {
+			what = e.Argv[0] + " " + e.Argv[1] + " …"
+		}
+		return fmt.Errorf("%s exited %d", what, code)
 	}
 	return nil
 }
