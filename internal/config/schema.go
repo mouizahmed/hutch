@@ -65,7 +65,7 @@ var (
 // Keys is the one schema for every layer.
 var Keys = []*Key{
 	{Path: "machine", Kind: String, Layers: user,
-		Doc: "your machine's SSH target, like me@hetzner (set by hutch setup); empty when hutchd runs on this computer"},
+		Doc: "your machine's SSH target, like me@hetzner (set by hutch setup or join); kept on each computer, never synced"},
 	{Path: "default_agent", Kind: String, Default: "claude", Layers: userProject,
 		Doc: "agent for new threads without --agent or --cmd"},
 

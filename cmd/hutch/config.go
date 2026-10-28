@@ -133,14 +133,23 @@ func sum(b []byte) string {
 	return hex.EncodeToString(s[:])
 }
 
-// syncUserConfig reconciles the working copy with the server's authoritative copy:
+// syncUserConfig reconciles the working copy with the machine's authoritative copy:
 // whichever side changed since the last sync wins; if both did, it refuses with a diff
-// unless resolve is "mine" or "theirs".
+// unless resolve is "mine" or "theirs". The machine key stays on each computer, which
+// may reach the machine by its own address.
 func syncUserConfig(ctx context.Context, sess *yamux.Session, target, resolve string) error {
 	path := config.UserPath()
-	local, err := readOptional(path)
+	full, err := readOptional(path)
 	if err != nil {
 		return err
+	}
+	local, err := config.Remove(full, []string{"machine"})
+	if err != nil {
+		return err
+	}
+	here := ""
+	if d, err := config.Parse(config.User, path, full); err == nil {
+		here = config.New(d).String("machine")
 	}
 	states := map[string]syncState{}
 	if b, err := os.ReadFile(syncStatePath()); err == nil {
@@ -152,6 +161,9 @@ func syncUserConfig(ctx context.Context, sess *yamux.Session, target, resolve st
 		return err
 	}
 	srv := docs.User
+	if text, err := config.Remove([]byte(srv.Content), []string{"machine"}); err == nil {
+		srv.Content = string(text)
+	}
 	localChanged := sum(local) != st.SHA256
 	if !known {
 		localChanged = len(local) > 0
@@ -175,12 +187,18 @@ func syncUserConfig(ctx context.Context, sess *yamux.Session, target, resolve st
 		}
 		return record(srv.Version, local)
 	case resolve == "theirs" || (resolve == "" && !localChanged && serverChanged):
-		if err := writeFileAtomic(path, []byte(srv.Content)); err != nil {
+		text := []byte(srv.Content)
+		if here != "" {
+			if text, err = config.Set(withVersion(text), []string{"machine"}, here); err != nil {
+				return err
+			}
+		}
+		if err := writeFileAtomic(path, text); err != nil {
 			return err
 		}
 		return record(srv.Version, []byte(srv.Content))
 	case resolve == "mine" || (resolve == "" && localChanged && !serverChanged):
-		if _, err := config.Parse(config.User, path, local); err != nil {
+		if _, err := config.Parse(config.User, path, full); err != nil {
 			return err
 		}
 		var res api.ConfigPutResult

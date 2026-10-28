@@ -60,7 +60,7 @@ WantedBy=multi-user.target
 type remote struct{ host string }
 
 func (r remote) cmd(script string) *exec.Cmd {
-	return exec.Command("ssh", "-o", "BatchMode=yes", r.host, "bash -c "+shellQuote("set -euo pipefail; "+script))
+	return exec.Command("ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", r.host, "bash -c "+shellQuote("set -euo pipefail; "+script))
 }
 
 func (r remote) run(script string) error {
@@ -816,7 +816,7 @@ func joinCommand() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			host := args[0]
-			if err := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "true").Run(); err != nil {
+			if err := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", host, "true").Run(); err != nil {
 				fmt.Printf("This computer can't SSH to %s yet.\n", host)
 				if key := publicKey(); key != "" {
 					fmt.Printf("On a computer that can, run:\n\n  hutch machine add-computer '%s'\n\nthen run this again.\n", key)

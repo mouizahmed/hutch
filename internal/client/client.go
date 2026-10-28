@@ -54,7 +54,7 @@ func SSHKeyPath() string {
 }
 
 func sshConn(target string) (net.Conn, error) {
-	cmd := exec.Command("ssh", "-o", "BatchMode=yes", target, "hutchd", "api")
+	cmd := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", target, "hutchd", "api")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
