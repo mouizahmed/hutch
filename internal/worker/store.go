@@ -65,7 +65,7 @@ func (w *Worker) Upload(ctx context.Context, id string, s *durable.Store, k dura
 		}
 	}
 	m := &durable.Manifest{Created: time.Now().UTC(), Files: map[string]*durable.File{},
-		Box: &durable.BoxInfo{Image: b.Image, VCPUs: b.VCPUs, MemMiB: b.MemMiB, FCVersion: b.FCVersion, GVisor: b.GVisor, Class: b.Class,
+		Box: &durable.BoxInfo{Image: b.Image, VCPUs: b.VCPUs, MemMiB: b.MemMiB, FCVersion: b.FCVersion, GVisor: b.GVisor, GuestToken: b.Token, Class: b.Class,
 			IdleTimeout: b.Idle.Timeout, CPUThreshold: b.Idle.CPUThreshold, Allow: b.Allow, Watch: b.Watch}}
 	for _, name := range snapshotFiles {
 		f, err := os.Open(filepath.Join(work, name))
@@ -242,7 +242,7 @@ func (w *Worker) Restore(ctx context.Context, id string, store *Store, gen int, 
 		return nil, err
 	}
 	ok = true
-	b := &Box{ID: id, Image: m.Box.Image, VCPUs: m.Box.VCPUs, MemMiB: m.Box.MemMiB, FCVersion: m.Box.FCVersion, GVisor: m.Box.GVisor, Class: m.Box.Class,
+	b := &Box{ID: id, Image: m.Box.Image, VCPUs: m.Box.VCPUs, MemMiB: m.Box.MemMiB, FCVersion: m.Box.FCVersion, GVisor: m.Box.GVisor, Token: m.Box.GuestToken, Class: m.Box.Class,
 		State: Asleep, Generation: gen, Uploaded: gen, Created: time.Now().UTC(), Store: store,
 		Idle: Idle{Timeout: m.Box.IdleTimeout, CPUThreshold: m.Box.CPUThreshold}, Allow: m.Box.Allow, Watch: m.Box.Watch}
 	if !warm {
@@ -377,12 +377,7 @@ func (w *Worker) RollBack(id string) (*Box, error) {
 		b.State = Failed
 		return b, w.save(b)
 	}
-	rootfs := filepath.Join(w.boxDir(id), "rootfs.ext4")
-	os.Remove(rootfs + ".rollback")
-	if err := clone(disk, rootfs+".rollback"); err != nil {
-		return nil, err
-	}
-	if err := os.Rename(rootfs+".rollback", rootfs); err != nil {
+	if err := resetDisk(disk, filepath.Join(w.boxDir(id), "rootfs.ext4")); err != nil {
 		return nil, err
 	}
 	b.State = Archived

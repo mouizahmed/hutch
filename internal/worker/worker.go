@@ -34,8 +34,6 @@ type Worker struct {
 	// empty where boxes are Firecracker VMs. The backend follows the host.
 	GVisor string
 	vendor string
-	// token is what hutchd presents to hutch-guest in gVisor boxes, over TCP.
-	token string
 }
 
 type State string
@@ -73,6 +71,9 @@ type Box struct {
 	Store *Store `json:"store,omitempty"`
 	// GVisor is the gVisor version a gVisor box runs (FCVersion is empty then).
 	GVisor string `json:"gvisor,omitempty"`
+	// Token is what hutchd presents to a gVisor box's hutch-guest. It lives in the
+	// box's memory, so it goes wherever the box goes: forks, the bucket, a new machine.
+	Token string `json:"token,omitempty"`
 	// Uploaded is the generation the bucket last stored.
 	Uploaded int `json:"uploaded,omitempty"`
 	// Checkpointed is when the box's state was last captured: a snapshot, or the start
@@ -113,9 +114,6 @@ func New(root, fcVersion string) (*Worker, error) {
 			return nil, errors.New("no /dev/kvm, and gVisor isn't installed: run hutch setup again")
 		}
 		w.FCVersion, w.GVisor = "", v[len(v)-1]
-		if w.token, err = guestToken(root); err != nil {
-			return nil, err
-		}
 	}
 	if err := hostNAT(); err != nil {
 		return nil, fmt.Errorf("host NAT: %w", err)

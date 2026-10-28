@@ -65,16 +65,10 @@ func (w *Worker) gvisorVersions() []string {
 	return out
 }
 
-// guestToken is the machine's token for hutch-guest in gVisor boxes, made once.
-func guestToken(root string) (string, error) {
-	path := filepath.Join(root, "guest-token")
-	if b, err := os.ReadFile(path); err == nil {
-		return strings.TrimSpace(string(b)), nil
-	}
+func newToken() string {
 	b := make([]byte, 32)
 	rand.Read(b)
-	t := hex.EncodeToString(b)
-	return t, os.WriteFile(path, []byte(t+"\n"), 0o600)
+	return hex.EncodeToString(b)
 }
 
 func (w *Worker) bundleDir(id string) string { return filepath.Join(w.boxDir(id), "bundle") }
@@ -160,7 +154,7 @@ func (w *Worker) writeSpec(b *Box, s slot) error {
 		"process": map[string]any{
 			"user":         map[string]any{"uid": 0, "gid": 0},
 			"args":         []string{"/usr/local/bin/hutch-guest", "init", "--listen", fmt.Sprintf("tcp:0.0.0.0:%d", guestproto.Port), "--backend", "gvisor"},
-			"env":          []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "TERM=xterm-256color", "HUTCH_GUEST_TOKEN=" + w.token},
+			"env":          []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "TERM=xterm-256color", "HUTCH_GUEST_TOKEN=" + b.Token},
 			"cwd":          "/",
 			"capabilities": map[string]any{"bounding": caps, "effective": caps, "permitted": caps, "inheritable": caps, "ambient": caps},
 			"rlimits":      []map[string]any{{"type": "RLIMIT_NOFILE", "hard": 1048576, "soft": 1048576}},

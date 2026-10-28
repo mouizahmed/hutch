@@ -289,6 +289,9 @@ func (s *Server) awake(ctx context.Context, id string) (*workerConn, error) {
 	}
 	if b.State == "asleep" || b.State == "archived" {
 		if _, err := s.callForBox(ctx, w, api.BoxWake, api.IDParams{ID: id}); err != nil {
+			// A failed wake leaves the box as it was; a report taken while it was
+			// starting may have recorded it running.
+			s.store.putBox(b)
 			return nil, fmt.Errorf("wake %s: %w", id, err)
 		}
 		s.refreshCredentials(ctx, w, id)

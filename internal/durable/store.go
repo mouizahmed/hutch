@@ -59,7 +59,9 @@ type BoxInfo struct {
 	MemMiB    int    `json:"mem_mib"`
 	FCVersion string `json:"fc_version"`
 	GVisor    string `json:"gvisor,omitempty"`
-	Class     string `json:"snapshot_class"`
+	// GuestToken is a gVisor box's hutch-guest token, held in its memory snapshot.
+	GuestToken string `json:"guest_token,omitempty"`
+	Class      string `json:"snapshot_class"`
 	// Archived boxes keep only their disk; waking them is a cold boot.
 	Archived bool `json:"archived,omitempty"`
 	// The box's policies, so it restores anywhere as it was.

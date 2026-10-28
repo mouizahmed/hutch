@@ -173,7 +173,7 @@ func (w *Worker) copyFromSnapshot(srcID, id string) (*Box, error) {
 	}
 	gen := w.genDir(srcID, src.Generation)
 	dir := w.boxDir(id)
-	if err := clone(filepath.Join(w.boxDir(srcID), "rootfs.ext4"), filepath.Join(dir, "rootfs.ext4")); err != nil {
+	if err := clone(filepath.Join(gen, "rootfs.ext4"), filepath.Join(dir, "rootfs.ext4")); err != nil {
 		return nil, err
 	}
 	if src.GVisor != "" {
@@ -203,7 +203,7 @@ func (w *Worker) copyFromSnapshot(srcID, id string) (*Box, error) {
 		}
 	}
 	b := &Box{ID: id, Image: src.Image, VCPUs: src.VCPUs, MemMiB: src.MemMiB, FCVersion: src.FCVersion, GVisor: src.GVisor, Class: src.Class,
-		Created: time.Now().UTC()}
+		Token: src.Token, Created: time.Now().UTC()}
 	if src.GVisor == "" {
 		b.BaseMem = filepath.Join(dir, "base.mem")
 	}
@@ -231,6 +231,11 @@ func (w *Worker) Wake(ctx context.Context, id string) (*Box, error) {
 		return nil, fmt.Errorf("box %q has snapshot class %s, this worker runs %s; it needs a cold boot", id, b.Class, strings.Join(w.Classes(), ", "))
 	}
 	gen := w.genDir(id, b.Generation)
+	// The disk taken with the snapshot, not the box's live one: a wake that failed
+	// partway ran the box, and its writes no longer match the snapshot's memory.
+	if err := resetDisk(filepath.Join(gen, "rootfs.ext4"), filepath.Join(w.boxDir(id), "rootfs.ext4")); err != nil {
+		return nil, err
+	}
 	if b.GVisor != "" {
 		err = w.startSandbox(ctx, b, gen, 10*time.Second)
 	} else {
@@ -632,7 +637,7 @@ func clone(src, dst string) error {
 // machine's token for a sandbox, through the address DNATed to it.
 func (w *Worker) guest(b *Box) *guestproto.Client {
 	if b.GVisor != "" {
-		return &guestproto.Client{Addr: net.JoinHostPort(b.ReachIP(), fmt.Sprint(guestproto.Port)), Token: w.token}
+		return &guestproto.Client{Addr: net.JoinHostPort(b.ReachIP(), fmt.Sprint(guestproto.Port)), Token: b.Token}
 	}
 	return &guestproto.Client{UDSPath: w.vsockPath(b.ID)}
 }
@@ -650,10 +655,22 @@ func (w *Worker) stop(b *Box) {
 func (w *Worker) coldStart(ctx context.Context, b *Box) error {
 	b.BaseMem, b.Class, b.FCVersion, b.GVisor = "", w.Class(), w.FCVersion, w.GVisor
 	if b.GVisor != "" {
+		if b.Token == "" {
+			b.Token = newToken()
+		}
 		return w.startSandbox(ctx, b, "", 60*time.Second)
 	}
 	return w.start(ctx, b, map[string]string{
 		jailKernel: w.kernelPath(),
 		jailRootfs: filepath.Join(w.boxDir(b.ID), "rootfs.ext4"),
 	}, func(m *vm) error { return m.coldBoot(ctx, w.vendor) }, 60*time.Second)
+}
+
+// resetDisk replaces a box's disk with a reflink of a snapshot's.
+func resetDisk(snapshot, disk string) error {
+	os.Remove(disk + ".reset")
+	if err := clone(snapshot, disk+".reset"); err != nil {
+		return err
+	}
+	return os.Rename(disk+".reset", disk)
 }
