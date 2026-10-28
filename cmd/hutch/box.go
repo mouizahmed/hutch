@@ -128,7 +128,7 @@ func boxCommands() []*cobra.Command {
 				return err
 			}
 			tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(tw, "BOX / THREAD\tAGENT\tSTATE\tSIZE\tWORKER\tCOST\tCREATED")
+			fmt.Fprintln(tw, "BOX / THREAD\tAGENT\tSTATE\tSIZE\tWORKER\tCREATED")
 			for _, b := range boxes {
 				if b.Kind == api.BoxVersion {
 					continue
@@ -137,17 +137,17 @@ func boxCommands() []*cobra.Command {
 				if b.Merged != "" {
 					state += " ✓ merged"
 				}
-				fmt.Fprintf(tw, "%s\t\t%s\t%d vCPU, %s\t%s\t%s\t%s\n", b.ID, state, b.VCPUs, mib(b.MemMiB), b.Worker, perHour(b.PerHour), ago(b.Created))
+				fmt.Fprintf(tw, "%s\t\t%s\t%d vCPU, %s\t%s\t%s\n", b.ID, state, b.VCPUs, mib(b.MemMiB), b.Worker, ago(b.Created))
 				if b.PushError != "" {
 					msg, _, _ := strings.Cut(b.PushError, "\n")
-					fmt.Fprintf(tw, "  ! push of %s failed: %s\t\t\t\t\t\t\n", b.Branch, msg)
+					fmt.Fprintf(tw, "  ! push of %s failed: %s\t\t\t\t\t\n", b.Branch, msg)
 				}
 				for _, t := range b.Threads {
 					pin := ""
 					if t.Pinned {
 						pin = "* "
 					}
-					fmt.Fprintf(tw, "  %d  %s%s\t%s\t%s\t\t\t\t%s\n", t.N, pin, t.Title, t.Agent, t.State, ago(t.Created))
+					fmt.Fprintf(tw, "  %d  %s%s\t%s\t%s\t\t\t%s\n", t.N, pin, t.Title, t.Agent, t.State, ago(t.Created))
 				}
 			}
 			return tw.Flush()
@@ -406,13 +406,6 @@ func statusCommand() *cobra.Command {
 }
 
 // perHour shows a price per hour, or "-" for none (asleep, or a persistent worker).
-func perHour(usd float64) string {
-	if usd <= 0 {
-		return "-"
-	}
-	return fmt.Sprintf("$%.3f/h", usd)
-}
-
 func moveCommand() *cobra.Command {
 	var to string
 	cmd := &cobra.Command{
@@ -498,14 +491,6 @@ func printPlan(ctx context.Context, sess *yamux.Session, cfg *config.Config, p a
 	where := plan.Worker
 	if where == "" {
 		where = "-"
-	} else {
-		where += " (" + plan.Kind + ")"
-	}
-	cost := "$0 (persistent)"
-	if plan.PerHour > 0 {
-		cost = fmt.Sprintf("$%.3f/h (its share of the worker)", plan.PerHour)
-	} else if plan.Kind == "elastic" {
-		cost = "elastic worker time"
 	}
 	agentName := agent.agent
 	if agentName == "" && agent.cmd == "" {
@@ -528,7 +513,6 @@ func printPlan(ctx context.Context, sess *yamux.Session, cfg *config.Config, p a
 		{"Start", "warm, from the template snapshot (" + plan.Class + ")"},
 		{"Template", plan.Template},
 		{"Size", plan.Size},
-		{"Cost", cost},
 		{"Agent", agentName},
 		{"Autonomy", cfg.String("autonomy")},
 		{"Logins", strings.Join(p.Credentials, ", ")},

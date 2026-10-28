@@ -142,9 +142,6 @@ func runSidebar(ctx context.Context, project string) error {
 	}
 	if cfg, err := loadConfig(ctx, m.sess); err == nil {
 		m.agent = cfg.String("default_agent")
-		// Opening the TUI may start a worker early (providers.prestart), so the first
-		// box doesn't wait for one.
-		go rpc.Call(ctx, m.sess, api.Prestart, api.PrestartParams{VCPUs: int(cfg.Int("size.cpu")), MemMiB: int(cfg.Size("size.memory") >> 20)}, nil)
 	}
 	_, err = tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx), tea.WithMouseCellMotion(), tea.WithReportFocus()).Run()
 	return err
@@ -954,21 +951,15 @@ func (m *sidebar) renderRow(r row, w int) string {
 }
 
 // renderWorker is a worker's header: state, name, a rule, and the memory its
-// awake boxes reserve and its price, or why it isn't running.
+// awake boxes reserve, or that it's offline.
 func (m *sidebar) renderWorker(wk api.Worker, w int) string {
 	bullet, detail := styleWaiting.Render("!"), "offline"
-	switch {
-	case wk.Online:
+	if wk.Online {
 		bullet = styleWorking.Render("●")
 		detail = fmt.Sprintf("%d/%d GB", (wk.ReservedMiB+512)/1024, (wk.MemMiB+512)/1024)
-		if wk.PerHour > 0 {
-			detail += fmt.Sprintf(" $%.2f/h", wk.PerHour)
-		}
 		if wk.Draining {
 			detail = "draining " + detail
 		}
-	case !wk.Stopped.IsZero():
-		bullet, detail = styleDim.Render("○"), "stopped"
 	}
 	left := " " + bullet + " " + styleBold.Render(truncate(wk.Name, w/2)) + " "
 	right := " " + styleDim.Render(detail)

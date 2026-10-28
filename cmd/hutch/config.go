@@ -594,3 +594,20 @@ func from(s config.Setting) string {
 	}
 	return s.Layer.String() + ": " + s.Source
 }
+
+// setUserServer points this machine's user config at the new server.
+func setUserServer(target string) error {
+	path := config.UserPath()
+	text, err := readOptional(path)
+	if err != nil {
+		return err
+	}
+	p, _ := config.SplitPath("server")
+	if text, err = config.Set(withVersion(text), p, target); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return writeFileAtomic(path, text)
+}

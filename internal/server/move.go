@@ -138,7 +138,7 @@ func (s *Server) workerDrain(ctx context.Context, params json.RawMessage, out *r
 	return nil, nil
 }
 
-// workerRm forgets an offline worker, destroying its instance if it is elastic.
+// workerRm forgets an offline worker.
 // Its boxes that are in the bucket restore on another worker when used; a worker
 // holding any that aren't is kept.
 func (s *Server) workerRm(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
@@ -167,11 +167,6 @@ func (s *Server) workerRm(ctx context.Context, params json.RawMessage, _ *rpc.Ou
 			}
 			if _, err := s.storeOf(b); err != nil {
 				return nil, fmt.Errorf("%s holds %s, which isn't in the bucket; remove it first", w.ID, b.ID)
-			}
-		}
-		if f := s.fleet.Load(); f != nil && w.Node != "" {
-			if err := f.p.DestroyNode(ctx, w.Node); err != nil {
-				return nil, err
 			}
 		}
 		s.store.event("", "worker removed", w.Name)

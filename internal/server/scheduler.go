@@ -45,7 +45,6 @@ type candidate struct {
 	cpus       int
 	diskOK     bool     // free disk above worker.disk_reserve
 	classes    []string // snapshot classes it restores warm
-	elastic    bool
 	hasVersion bool
 }
 
@@ -64,9 +63,9 @@ func (c candidate) why(n need) string {
 	return ""
 }
 
-// choose picks a worker for a box: of those it fits, persistent over elastic, its
-// snapshot class over another, one that has its template, then the fullest, so
-// lightly used workers empty out and can be stopped. It returns -1 if none fits.
+// choose picks a worker for a box: of those it fits, its snapshot class over
+// another, one that has its template, then the fullest, so lightly used workers
+// empty out. It returns -1 if none fits.
 func choose(cs []candidate, n need) int {
 	best := -1
 	for i, c := range cs {
@@ -78,9 +77,6 @@ func choose(cs []candidate, n need) int {
 }
 
 func better(a, b candidate, n need) bool {
-	if a.elastic != b.elastic {
-		return !a.elastic
-	}
 	if am, bm := slices.Contains(a.classes, n.class), slices.Contains(b.classes, n.class); am != bm {
 		return am
 	}
@@ -127,9 +123,9 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	draining, elastic := map[string]bool{}, map[string]bool{}
+	draining := map[string]bool{}
 	for _, w := range ws {
-		draining[w.ID], elastic[w.ID] = w.Draining, w.Node != ""
+		draining[w.ID] = w.Draining
 	}
 	copies := map[string]bool{}
 	if n.version != "" {
@@ -176,7 +172,6 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 			cpus:       w.info.CPUs,
 			diskOK:     d.Total == 0 || float64(d.Free) >= reserve*float64(d.Total),
 			classes:    workerClasses(w.info),
-			elastic:    elastic[id],
 			hasVersion: copies[id],
 		})
 		conns = append(conns, w)
@@ -208,8 +203,7 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 }
 
 // checkFits refuses a box size no worker could ever hold, so it fails at once
-// instead of waiting for room that never comes. The candidates are the persistent
-// workers and, with a provider, providers.aws.worker_type.
+// instead of waiting for room that never comes.
 func (s *Server) checkFits(ctx context.Context, n need) error {
 	cfg, err := s.settings()
 	if err != nil {
@@ -229,20 +223,14 @@ func (s *Server) checkFits(ctx context.Context, n need) error {
 		return usable >= n.memMiB && cpus >= n.vcpus
 	}
 	for _, w := range ws {
-		if w.Node == "" && !w.Gone && w.MemMiB > 0 && fits(w.Name, w.CPUs, w.MemMiB) {
-			return nil
-		}
-	}
-	if f := s.fleet.Load(); f != nil {
-		wtype := cfg.String("providers.aws.worker_type")
-		if t, err := f.instanceType(ctx, wtype); err == nil && fits(wtype+" (elastic)", t.VCPUs, t.MemMiB) {
+		if !w.Gone && w.MemMiB > 0 && fits(w.Name, w.CPUs, w.MemMiB) {
 			return nil
 		}
 	}
 	if !known {
 		return nil // nothing to judge by until a worker connects
 	}
-	return fmt.Errorf("a %s box fits no worker (%s); choose a smaller size, or a larger providers.aws.worker_type",
+	return fmt.Errorf("a %s box fits no worker (%s); choose a smaller size, or a bigger machine",
 		n, strings.Join(candidates, "; "))
 }
 
@@ -250,7 +238,7 @@ func (s *Server) checkFits(ctx context.Context, n need) error {
 // the build to fork from. It prefers a worker of a snapshot class the version has
 // a build for, copying that build there from the bucket if the worker doesn't have
 // it. When no worker runs any of those classes, it builds the version again for
-// the class of a worker with room (starting one if needed): the same recipe commit,
+// the class of a worker with room: the same recipe commit,
 // since snapshots don't cross classes. release frees the fork's reservation.
 func (s *Server) versionWorker(ctx context.Context, v api.Template, box string, out io.Writer) (*workerConn, func(), string, error) {
 	n := need{memMiB: v.MemMiB, vcpus: v.VCPUs}
@@ -273,30 +261,12 @@ func (s *Server) versionWorker(ctx context.Context, v api.Template, box string, 
 				return w, release, b.box, nil
 			}
 		}
-		if attempt == 0 {
-			for _, b := range builds {
-				if !s.canStart(ctx, b.class) {
-					continue
-				}
-				bn := n
-				bn.class, bn.strict, bn.version = b.class, true, b.box
-				w, release, err := s.placeWait(ctx, bn, "", box, out)
-				if err != nil {
-					return nil, nil, "", err
-				}
-				if err := s.copyVersion(ctx, w, v, b.box); err != nil {
-					release()
-					return nil, nil, "", err
-				}
-				return w, release, b.box, nil
-			}
-		}
 		w, release, err := s.placeWait(ctx, n, "", box, out)
 		if err != nil {
 			return nil, nil, "", err
 		}
 		release()
-		// A worker just started may run one of the version's classes after all.
+		// Room may have freed on a worker that runs one of the version's classes.
 		have := false
 		for _, b := range builds {
 			have = have || slices.Contains(workerClasses(w.info), b.class)
@@ -309,25 +279,6 @@ func (s *Server) versionWorker(ctx context.Context, v api.Template, box string, 
 		}
 	}
 	return nil, nil, "", fmt.Errorf("no worker can run template v%d", v.Version)
-}
-
-// canStart reports whether a stopped elastic worker of snapshot class c can be
-// started within limits.cloud_workers: faster than building a template again.
-func (s *Server) canStart(ctx context.Context, c string) bool {
-	f := s.fleet.Load()
-	if f == nil || int64(s.cloudRunning(ctx, f)) >= s.limitInt("limits.cloud_workers") {
-		return false
-	}
-	ws, err := s.store.workers()
-	if err != nil {
-		return false
-	}
-	for _, w := range ws {
-		if !w.Gone && w.Node != "" && !w.Stopped.IsZero() && slices.Contains(workerClasses(w), c) {
-			return true
-		}
-	}
-	return false
 }
 
 // copyVersion makes sure a worker has a template build, copying it from the bucket.
@@ -440,29 +391,16 @@ func (s *Server) boxPlan(ctx context.Context, params json.RawMessage, _ *rpc.Out
 		return nil, err
 	}
 	plan.Warnings = s.fitWarnings(ctx, n)
-	if lim, err := s.spendReached(); err != nil {
-		return nil, err
-	} else if lim != nil {
-		plan.Why = "queued: " + lim.Error()
-		return plan, nil
-	}
 	w, release, err := s.place(n, "")
 	if err == nil {
 		release()
-		plan.Worker, plan.Kind = w.info.Name, "persistent"
+		plan.Worker = w.info.Name
 		have, _ := s.store.versionWorkers(v.Box)
 		var why string
 		if slices.Contains(have, w.id) {
 			why = "has the template and room"
 		} else {
 			why = "has room; the template is copied there from the bucket first"
-		}
-		ws, _ := s.store.workers()
-		for _, x := range ws {
-			if x.ID == w.id && x.Node != "" {
-				plan.Kind = "elastic"
-				plan.PerHour = s.perHour(ctx, []api.Box{{ID: "plan", Worker: w.id, State: "running", MemMiB: n.memMiB}})["plan"]
-			}
 		}
 		plan.Why = why
 		return plan, nil
@@ -471,16 +409,6 @@ func (s *Server) boxPlan(ctx context.Context, params json.RawMessage, _ *rpc.Out
 	switch {
 	case errors.As(err, &lim):
 		plan.Why = "queued: " + lim.Error()
-	case errors.Is(err, errNoRoom) && s.fleet.Load() != nil:
-		f := s.fleet.Load()
-		cfg, _ := s.settings()
-		wtype := cfg.String("providers.aws.worker_type")
-		plan.Kind = "elastic"
-		if s.cloudRunning(ctx, f) >= int(s.limitInt("limits.cloud_workers")) {
-			plan.Why = "queued: limits.cloud_workers reached"
-		} else if t, terr := f.instanceType(ctx, wtype); terr == nil {
-			plan.Why = fmt.Sprintf("no worker has room: a stopped %s worker is started, or a new one (%d vCPU, %s, $%.3f/h)", wtype, t.VCPUs, mib(t.MemMiB), t.PerHour)
-		}
 	case errors.Is(err, errNoRoom):
 		plan.Why = "queued until a worker has room: " + err.Error()
 	default:
@@ -504,14 +432,8 @@ func (s *Server) fitWarnings(ctx context.Context, n need) []string {
 	}
 	ws, _ := s.store.workers()
 	for _, w := range ws {
-		if w.Node == "" && !w.Gone && w.MemMiB > 0 {
+		if !w.Gone && w.MemMiB > 0 {
 			check(w.Name, w.MemMiB)
-		}
-	}
-	if f := s.fleet.Load(); f != nil {
-		wtype := cfg.String("providers.aws.worker_type")
-		if t, err := f.instanceType(ctx, wtype); err == nil {
-			check(wtype, t.MemMiB)
 		}
 	}
 	return out

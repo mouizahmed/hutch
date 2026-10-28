@@ -199,7 +199,7 @@ func projectForm(ctx context.Context, sess *yamux.Session, cfg *config.Config, t
 		huh.NewGroup(huh.NewSelect[string]().Title("Box size").Description(strings.Join(sizeDesc, "\n")).Options(sizeChoices...).Value(&size).
 			Validate(func(v string) error {
 				if unfit[v] {
-					return fmt.Errorf("no worker can hold this size; pick a smaller one or a larger providers.aws.worker_type")
+					return fmt.Errorf("no worker can hold this size; pick a smaller one or a bigger machine")
 				}
 				return nil
 			})),
@@ -299,8 +299,7 @@ func orEmpty(v any) any {
 	return v
 }
 
-// fitTarget is a worker a box size is judged against: an online persistent worker,
-// or the elastic worker type.
+// fitTarget is an online worker a box size is judged against.
 type fitTarget struct {
 	name         string
 	cpus, memMiB int
@@ -313,16 +312,9 @@ func fitTargets(ctx context.Context, sess *yamux.Session) ([]fitTarget, error) {
 	}
 	var out []fitTarget
 	for _, w := range ws {
-		if w.Online && w.Node == "" && w.MemMiB > 0 {
+		if w.Online && w.MemMiB > 0 {
 			out = append(out, fitTarget{w.Name, w.CPUs, w.MemMiB})
 		}
-	}
-	var f api.Fleet
-	if err := rpc.Call(ctx, sess, api.FleetInfo, struct{}{}, &f); err != nil {
-		return nil, err
-	}
-	if f.WorkerType != "" {
-		out = append(out, fitTarget{f.WorkerType + " (elastic)", f.VCPUs, f.MemMiB})
 	}
 	return out, nil
 }

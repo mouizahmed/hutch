@@ -50,12 +50,6 @@ type Server struct {
 	// the boxes being placed or woken; guarded by mu.
 	pending  map[string]int
 	starting int
-	fleet    atomic.Pointer[fleet]
-	// prestarted holds workers started early that no box has landed on yet; guarded by mu.
-	prestarted map[string]bool
-	// missing holds when each elastic worker's instance was first missing from the
-	// provider's listing; guarded by mu.
-	missing map[string]time.Time
 	// peaks holds each awake box's peak memory use as last reported, and relieving
 	// the workers a box is being moved off for memory; guarded by mu.
 	peaks     map[string]int
@@ -110,7 +104,7 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, store: st, ca: ca, master: master, workers: map[string]*workerConn{}, pending: map[string]int{}, prestarted: map[string]bool{}, missing: map[string]time.Time{}, peaks: map[string]int{}, relieving: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{}, threadWatch: map[string]*threadWatch{},
+	s := &Server{cfg: cfg, store: st, ca: ca, master: master, workers: map[string]*workerConn{}, pending: map[string]int{}, peaks: map[string]int{}, relieving: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{}, threadWatch: map[string]*threadWatch{},
 		fileHashes: map[string]map[string]string{}, syncing: map[string]bool{}, pushErrors: map[string]string{}}
 	b, bcfg, err := loadBucket(cfg.Dir)
 	if err != nil {
@@ -121,13 +115,6 @@ func New(cfg Config) (*Server, error) {
 			return nil, err
 		}
 		s.vault.Store(&vault{bucket: b, cfg: *bcfg})
-	}
-	f, err := loadFleet(cfg.Dir)
-	if err != nil {
-		return nil, err
-	}
-	if f != nil {
-		s.fleet.Store(f)
 	}
 	return s, nil
 }
@@ -142,9 +129,6 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.backupLoop(ctx)
 	go s.gcLoop(ctx)
 	go s.archiveLoop(ctx)
-	go s.teardownLoop(ctx)
-	go s.costLoop(ctx)
-	go s.bucketSizeLoop(ctx)
 	go s.maxAwakeLoop(ctx)
 	go s.mergeLoop(ctx)
 	select {
@@ -299,8 +283,7 @@ func (s *Server) enroll(conn *tls.Conn) {
 		return
 	}
 	resp := func() api.EnrollResponse {
-		node, err := s.store.useToken(req.Secret)
-		if err != nil {
+		if err := s.store.useToken(req.Secret); err != nil {
 			return api.EnrollResponse{Error: err.Error()}
 		}
 		id := "w-" + randomHex(6)
@@ -308,7 +291,7 @@ func (s *Server) enroll(conn *tls.Conn) {
 		if err != nil {
 			return api.EnrollResponse{Error: err.Error()}
 		}
-		if err := s.store.addWorker(id, req.Name, node); err != nil {
+		if err := s.store.addWorker(id, req.Name); err != nil {
 			return api.EnrollResponse{Error: err.Error()}
 		}
 		log.Printf("enrolled worker %s (%s)", id, req.Name)
@@ -320,13 +303,11 @@ func (s *Server) enroll(conn *tls.Conn) {
 // NewToken creates a single-use join token: <CA fingerprint>.<secret>.
 func (s *Server) NewToken() (string, error) {
 	secret := randomHex(24)
-	if err := s.store.addToken(secret, ""); err != nil {
+	if err := s.store.addToken(secret); err != nil {
 		return "", err
 	}
 	return pki.Fingerprint(s.ca.Cert) + "." + secret, nil
 }
-
-func fingerprint(s *Server) string { return pki.Fingerprint(s.ca.Cert) }
 
 func randomHex(n int) string {
 	b := make([]byte, n)
@@ -376,7 +357,6 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 			}
 			s.mu.Unlock()
 			if w != nil {
-				s.countRequests(w, r.Requests)
 				if r.Pressure == "high" {
 					go s.relieve(w)
 				}

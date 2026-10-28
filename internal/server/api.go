@@ -48,15 +48,11 @@ func (s *Server) apiMux() rpc.Mux {
 		api.ConfigPut:        s.configPut,
 		api.ServerInit:       s.serverInit,
 		api.ServerGC:         s.serverGC,
-		api.ProviderAdd:      s.providerAdd,
-		api.CostsGet:         s.costsReport,
 		api.BoxMove:          s.boxMove,
 		api.BoxResize:        s.boxResize,
 		api.BoxPlan:          s.boxPlan,
 		api.WorkerDrain:      s.workerDrain,
 		api.WorkerRm:         s.workerRm,
-		api.Prestart:         s.prestart,
-		api.FleetInfo:        s.fleetInfo,
 		api.Doctor:           s.doctor,
 		api.WorkerList:       s.workerList,
 		api.TokenCreate:      s.tokenCreate,
@@ -89,12 +85,6 @@ func (s *Server) boxList(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (an
 		boxes[i].Threads = ts
 		boxes[i].PushError = s.pushErrors[boxes[i].ID]
 	}
-	s.mu.Unlock()
-	perHour := s.perHour(ctx, boxes)
-	s.mu.Lock()
-	for i := range boxes {
-		boxes[i].PerHour = perHour[boxes[i].ID]
-	}
 	return boxes, nil
 }
 
@@ -113,11 +103,9 @@ func (s *Server) workerList(ctx context.Context, _ json.RawMessage, _ *rpc.Out) 
 			reserved[b.Worker] += b.MemMiB
 		}
 	}
-	perHour := s.workerPerHour(ctx)
 	s.mu.Lock()
 	for i := range ws {
 		ws[i].ReservedMiB = reserved[ws[i].ID]
-		ws[i].PerHour = perHour[ws[i].Node]
 		if w := s.workers[ws[i].ID]; w != nil {
 			ws[i].Online, ws[i].Disk = true, w.info.Disk
 		}

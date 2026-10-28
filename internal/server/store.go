@@ -118,26 +118,6 @@ CREATE TABLE IF NOT EXISTS configs (
 	content TEXT NOT NULL,
 	updated TIMESTAMP NOT NULL
 );
--- The cost ledger: what Hutch estimates each box (and, with box '', the fleet) cost per day.
-CREATE TABLE IF NOT EXISTS costs (
-	day      TEXT NOT NULL,
-	box_id   TEXT NOT NULL,
-	category TEXT NOT NULL,
-	usd      REAL NOT NULL,
-	PRIMARY KEY (day, box_id, category)
-);
--- What the provider billed per day, next to the estimate.
-CREATE TABLE IF NOT EXISTS billed (
-	day      TEXT NOT NULL,
-	category TEXT NOT NULL,
-	usd      REAL NOT NULL,
-	PRIMARY KEY (day, category)
-);
--- Small facts the server keeps across restarts.
-CREATE TABLE IF NOT EXISTS state (
-	key   TEXT PRIMARY KEY,
-	value TEXT NOT NULL
-);
 CREATE TABLE IF NOT EXISTS events (
 	id      INTEGER PRIMARY KEY,
 	ts      TIMESTAMP NOT NULL,
@@ -169,10 +149,7 @@ var migrations = []string{
 	`ALTER TABLE workers ADD COLUMN mem_mib INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE workers ADD COLUMN arch TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE workers ADD COLUMN disk_bytes INTEGER NOT NULL DEFAULT 0`,
-	`ALTER TABLE workers ADD COLUMN node_id TEXT NOT NULL DEFAULT ''`,
-	`ALTER TABLE workers ADD COLUMN stopped_at TIMESTAMP`,
 	`ALTER TABLE workers ADD COLUMN gone INTEGER NOT NULL DEFAULT 0`,
-	`ALTER TABLE tokens ADD COLUMN node_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE workers ADD COLUMN draining INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE templates ADD COLUMN params TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE boxes ADD COLUMN path TEXT NOT NULL DEFAULT ''`,
@@ -210,53 +187,26 @@ func hashSecret(secret string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// addToken stores a join token; nodeID links the worker it enrolls to the cloud
-// node it runs on ("" for a persistent worker).
-func (s *store) addToken(secret, nodeID string) error {
-	_, err := s.db.Exec(`INSERT INTO tokens (hash, created, node_id) VALUES (?, ?, ?)`, hashSecret(secret), time.Now().UTC(), nodeID)
+func (s *store) addToken(secret string) error {
+	_, err := s.db.Exec(`INSERT INTO tokens (hash, created) VALUES (?, ?)`, hashSecret(secret), time.Now().UTC())
 	return err
 }
 
-// useToken marks a join token used, returning its node; each token enrolls exactly one worker.
-func (s *store) useToken(secret string) (string, error) {
-	tx, err := s.db.Begin()
+// useToken marks a join token used; each token enrolls exactly one worker.
+func (s *store) useToken(secret string) error {
+	res, err := s.db.Exec(`UPDATE tokens SET used = ? WHERE hash = ? AND used IS NULL`, time.Now().UTC(), hashSecret(secret))
 	if err != nil {
-		return "", err
+		return err
 	}
-	defer tx.Rollback()
-	var node string
-	err = tx.QueryRow(`SELECT node_id FROM tokens WHERE hash = ? AND used IS NULL`, hashSecret(secret)).Scan(&node)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", errors.New("invalid or already used join token")
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errors.New("invalid or already used join token")
 	}
-	if err != nil {
-		return "", err
-	}
-	if _, err := tx.Exec(`UPDATE tokens SET used = ? WHERE hash = ?`, time.Now().UTC(), hashSecret(secret)); err != nil {
-		return "", err
-	}
-	return node, tx.Commit()
+	return nil
 }
 
-// setTokenNode links an unused token to the node it was given to.
-func (s *store) setTokenNode(secret, nodeID string) error {
-	_, err := s.db.Exec(`UPDATE tokens SET node_id = ? WHERE hash = ?`, nodeID, hashSecret(secret))
-	return err
-}
-
-func (s *store) addWorker(id, name, nodeID string) error {
+func (s *store) addWorker(id, name string) error {
 	now := time.Now().UTC()
-	_, err := s.db.Exec(`INSERT INTO workers (id, name, created, last_seen, node_id) VALUES (?, ?, ?, ?, ?)`, id, name, now, now, nodeID)
-	return err
-}
-
-// setWorkerStopped records an elastic worker stopped (at set) or started (zero).
-func (s *store) setWorkerStopped(id string, at time.Time) error {
-	var v any
-	if !at.IsZero() {
-		v = at
-	}
-	_, err := s.db.Exec(`UPDATE workers SET stopped_at = ? WHERE id = ?`, v, id)
+	_, err := s.db.Exec(`INSERT INTO workers (id, name, created, last_seen) VALUES (?, ?, ?, ?)`, id, name, now, now)
 	return err
 }
 
@@ -284,7 +234,7 @@ func (s *store) workerSeen(id string, w api.Worker) error {
 }
 
 func (s *store) workers() ([]api.Worker, error) {
-	rows, err := s.db.Query(`SELECT id, name, class, version, last_seen, cpus, mem_mib, arch, disk_bytes, node_id, stopped_at, gone, draining FROM workers ORDER BY created`)
+	rows, err := s.db.Query(`SELECT id, name, class, version, last_seen, cpus, mem_mib, arch, disk_bytes, gone, draining FROM workers ORDER BY created`)
 	if err != nil {
 		return nil, err
 	}
@@ -292,11 +242,9 @@ func (s *store) workers() ([]api.Worker, error) {
 	var ws []api.Worker
 	for rows.Next() {
 		var w api.Worker
-		var stopped sql.NullTime
-		if err := rows.Scan(&w.ID, &w.Name, &w.Class, &w.Version, &w.LastSeen, &w.CPUs, &w.MemMiB, &w.Arch, &w.Disk.Total, &w.Node, &stopped, &w.Gone, &w.Draining); err != nil {
+		if err := rows.Scan(&w.ID, &w.Name, &w.Class, &w.Version, &w.LastSeen, &w.CPUs, &w.MemMiB, &w.Arch, &w.Disk.Total, &w.Gone, &w.Draining); err != nil {
 			return nil, err
 		}
-		w.Stopped = stopped.Time
 		ws = append(ws, w)
 	}
 	return ws, rows.Err()
@@ -346,99 +294,6 @@ func (s *store) addVersionCopy(box, worker string) error {
 
 func (s *store) deleteVersionCopy(box, worker string) error {
 	_, err := s.db.Exec(`DELETE FROM version_copies WHERE box_id = ? AND worker_id = ?`, box, worker)
-	return err
-}
-
-// addCosts adds amounts to a day's ledger, keyed by box and category.
-func (s *store) addCosts(day string, add map[[2]string]float64) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for k, usd := range add {
-		if usd == 0 {
-			continue
-		}
-		if _, err := tx.Exec(`INSERT INTO costs (day, box_id, category, usd) VALUES (?, ?, ?, ?)
-			ON CONFLICT(day, box_id, category) DO UPDATE SET usd = usd + excluded.usd`, day, k[0], k[1], usd); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
-func (s *store) costTotal(day string) (float64, error) {
-	var total float64
-	err := s.db.QueryRow(`SELECT COALESCE(SUM(usd), 0) FROM costs WHERE day = ?`, day).Scan(&total)
-	return total, err
-}
-
-func (s *store) costs(from string) ([]api.CostRow, error) {
-	rows, err := s.db.Query(`SELECT day, box_id, category, usd FROM costs WHERE day >= ? ORDER BY day DESC, box_id, category`, from)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []api.CostRow
-	for rows.Next() {
-		var r api.CostRow
-		if err := rows.Scan(&r.Day, &r.Box, &r.Category, &r.USD); err != nil {
-			return nil, err
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
-}
-
-func (s *store) setBilled(day string, byCategory map[string]float64) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM billed WHERE day = ?`, day); err != nil {
-		return err
-	}
-	for c, usd := range byCategory {
-		if _, err := tx.Exec(`INSERT INTO billed (day, category, usd) VALUES (?, ?, ?)`, day, c, usd); err != nil {
-			return err
-		}
-	}
-	// A day with no charges still records that it was checked.
-	if len(byCategory) == 0 {
-		if _, err := tx.Exec(`INSERT INTO billed (day, category, usd) VALUES (?, '', 0)`, day); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
-func (s *store) billed(from string) ([]api.CostRow, error) {
-	rows, err := s.db.Query(`SELECT day, category, usd FROM billed WHERE day >= ? ORDER BY day DESC`, from)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []api.CostRow
-	for rows.Next() {
-		var r api.CostRow
-		if err := rows.Scan(&r.Day, &r.Category, &r.USD); err != nil {
-			return nil, err
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
-}
-
-func (s *store) state(key string) string {
-	var v string
-	s.db.QueryRow(`SELECT value FROM state WHERE key = ?`, key).Scan(&v)
-	return v
-}
-
-func (s *store) setState(key, value string) error {
-	_, err := s.db.Exec(`INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
 	return err
 }
 

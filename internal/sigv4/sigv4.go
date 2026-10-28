@@ -16,8 +16,6 @@ import (
 type Credentials struct {
 	AccessKey string `json:"access_key"`
 	SecretKey string `json:"secret_key"`
-	// Token is set for temporary credentials, like an instance role's.
-	Token string `json:"token,omitempty"`
 }
 
 // Sign adds the date, payload hash, and authorization headers to req. The URL's
@@ -30,9 +28,6 @@ func Sign(req *http.Request, body []byte, service, region string, c Credentials,
 	date := amzDate[:8]
 	req.Header.Set("X-Amz-Date", amzDate)
 	req.Header.Set("X-Amz-Content-Sha256", payloadHex)
-	if c.Token != "" {
-		req.Header.Set("X-Amz-Security-Token", c.Token)
-	}
 
 	headers := map[string]string{"host": req.URL.Host}
 	for k, v := range req.Header {

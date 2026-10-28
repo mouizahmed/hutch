@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +21,7 @@ import (
 
 	"github.com/hashicorp/yamux"
 	"github.com/spf13/cobra"
+	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 
 	"github.com/mouizahmed/hutch/internal/api"
@@ -219,4 +223,32 @@ func ensureAwake(ctx context.Context, sess *yamux.Session, box string) error {
 		return rpc.Call(ctx, sess, api.BoxWake, api.IDParams{ID: box}, nil)
 	}
 	return nil
+}
+
+// sshKey returns Hutch's SSH public key, creating the key pair the first time.
+func sshKey() ([]byte, error) {
+	path := client.SSHKeyPath()
+	if pub, err := os.ReadFile(path + ".pub"); err == nil {
+		return pub, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	block, err := ssh.MarshalPrivateKey(priv, "hutch")
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
+		return nil, err
+	}
+	sp, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		return nil, err
+	}
+	out := ssh.MarshalAuthorizedKey(sp)
+	return out, os.WriteFile(path+".pub", out, 0o644)
 }

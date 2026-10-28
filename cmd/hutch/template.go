@@ -438,7 +438,7 @@ func sizesCommand() *cobra.Command {
 				CPU     int            `json:"cpu"`
 				Memory  string         `json:"memory"`
 				Current bool           `json:"current,omitempty"`
-				Fits    map[string]int `json:"fits"` // boxes of this size per persistent worker and the elastic type, by name
+				Fits    map[string]int `json:"fits"` // boxes of this size per worker, by name
 			}
 			var opts []option
 			project := boxSize{int(cfg.Int("size.cpu")), int(cfg.Size("size.memory") >> 20)}

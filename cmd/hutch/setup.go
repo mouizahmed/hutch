@@ -17,7 +17,6 @@ import (
 	"github.com/mouizahmed/hutch/internal/client"
 	"github.com/mouizahmed/hutch/internal/rpc"
 	"github.com/mouizahmed/hutch/internal/server"
-	"github.com/mouizahmed/hutch/internal/sigv4"
 	"github.com/mouizahmed/hutch/internal/version"
 )
 
@@ -64,24 +63,11 @@ func setupCommands() []*cobra.Command {
 			return nil
 		},
 	}
-	var serverType, serverBinary string
 	initCmd := &cobra.Command{
-		Use:   "init [aws]",
-		Short: "Create a server on AWS, or connect a running server to its bucket",
-		Long: `hutch server init aws creates a Hutch server in your AWS account: the server
-instance, a bucket, a security group, and an IAM role, then sets the recovery
-passphrase and connects AWS for workers. Run it on your own machine.
-
-hutch server init, for a server you run yourself, connects it to its bucket and
-sets the recovery passphrase.`,
-		Args: cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 1 {
-				if args[0] != "aws" {
-					return fmt.Errorf("unknown provider %q (known: aws)", args[0])
-				}
-				return awsInit(cmd.Context(), serverType, serverBinary)
-			}
+		Use:   "init",
+		Short: "Connect the server to its bucket and set the recovery passphrase",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, pass, err := bucketForm(true)
 			if err != nil {
 				return err
@@ -99,9 +85,6 @@ sets the recovery passphrase.`,
 			return nil
 		},
 	}
-
-	initCmd.Flags().StringVar(&serverType, "server-type", "t4g.micro", "instance type of the server (aws)")
-	initCmd.Flags().StringVar(&serverBinary, "server-binary", "", "the hutch program for the server's Linux (default: linux-<arch>/hutch next to this one)")
 
 	restore := &cobra.Command{
 		Use:   "restore",
@@ -168,71 +151,23 @@ workers reconnect once the server's address points here.`,
 				return err
 			}
 			tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(tw, "WORKER\tNAME\tKIND\tSTATE\tCLASS\tMEMORY IN USE\tDISK FREE\tCOST\tLAST SEEN")
+			fmt.Fprintln(tw, "WORKER\tNAME\tSTATE\tCLASS\tMEMORY IN USE\tDISK FREE\tLAST SEEN")
 			for _, w := range ws {
 				if w.Gone {
 					continue
 				}
 				state, disk := "offline", "-"
-				if !w.Stopped.IsZero() && !w.Online {
-					state = "stopped"
-				}
 				if w.Online {
 					state = "online"
 					if w.Disk.Total > 0 {
 						disk = fmt.Sprintf("%d%% of %d GB", 100*w.Disk.Free/w.Disk.Total, w.Disk.Total>>30)
 					}
 				}
-				kind := "persistent"
-				if w.Node != "" {
-					kind = "elastic"
-				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s of %s\t%s\t%s\t%s\n", w.ID, w.Name, kind, state, w.Class, mib(w.ReservedMiB), mib(w.MemMiB), disk, perHour(w.PerHour), ago(w.LastSeen))
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s of %s\t%s\t%s\n", w.ID, w.Name, state, w.Class, mib(w.ReservedMiB), mib(w.MemMiB), disk, ago(w.LastSeen))
 			}
 			return tw.Flush()
 		},
 	}
-	providerCmd := &cobra.Command{Use: "provider", Short: "Let the server start elastic workers when yours are full", GroupID: "setup"}
-	var profile string
-	addAWS := &cobra.Command{
-		Use:   "add aws",
-		Short: "Connect the server to AWS (the server must run on EC2)",
-		Long: `Connect the server to AWS. New workers go in the server's subnet and security
-group, from the newest worker image in the account, and dial the server's private
-address. The credentials need EC2 access; they stay on the server.`,
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if args[0] != "aws" {
-				return fmt.Errorf("unknown provider %q (known: aws)", args[0])
-			}
-			if !term.IsTerminal(int(os.Stdin.Fd())) {
-				return fmt.Errorf("this needs a terminal: credentials are typed, never passed as arguments")
-			}
-			var c sigv4.Credentials
-			err := huh.NewForm(huh.NewGroup(
-				huh.NewInput().Title("AWS access key").Value(&c.AccessKey),
-				huh.NewInput().Title("AWS secret key").EchoMode(huh.EchoModePassword).Value(&c.SecretKey),
-			)).Run()
-			if err != nil {
-				return err
-			}
-			sess, err := connect()
-			if err != nil {
-				return err
-			}
-			defer sess.Close()
-			var info api.ProviderInfo
-			if err := rpc.Call(cmd.Context(), sess, api.ProviderAdd, api.ProviderParams{Credentials: sigv4.Credentials{
-				AccessKey: strings.TrimSpace(c.AccessKey), SecretKey: c.SecretKey}, InstanceProfile: profile}, &info); err != nil {
-				return err
-			}
-			fmt.Printf("AWS connected: region %s, worker image %s; workers dial %s.\n", info.Region, info.Image, info.Address)
-			fmt.Println("When your workers are full, the server starts one (providers.aws.worker_type, limits.cloud_workers).")
-			return nil
-		},
-	}
-	addAWS.Flags().StringVar(&profile, "instance-profile", "", "IAM instance profile for new workers")
-	providerCmd.AddCommand(addAWS)
 	var undo bool
 	drain := &cobra.Command{
 		Use:   "drain <worker>",
@@ -250,7 +185,7 @@ address. The credentials need EC2 access; they stay on the server.`,
 	drain.Flags().BoolVar(&undo, "undo", false, "let the worker take new boxes again")
 	rmWorker := &cobra.Command{
 		Use:   "rm <worker>",
-		Short: "Forget an offline worker (terminating it, if Hutch started it)",
+		Short: "Forget an offline worker",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sess, err := connect()
@@ -262,7 +197,7 @@ address. The credentials need EC2 access; they stay on the server.`,
 		},
 	}
 	workers.AddCommand(drain, rmWorker)
-	return []*cobra.Command{serverCmd, apiCmd, workers, providerCmd}
+	return []*cobra.Command{serverCmd, apiCmd, workers}
 }
 
 func ago(t time.Time) string {

@@ -127,7 +127,6 @@ func (m *monitor) check(ctx context.Context, server *atomic.Pointer[yamux.Sessio
 	}
 	m.relieve(ctx, boxes, &report)
 	report.Disk = diskUsage(m.w.Root)
-	report.Requests = m.uploads.requests()
 	for _, b := range boxes {
 		if b.Pending() {
 			report.Uploading++

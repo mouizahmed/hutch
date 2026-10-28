@@ -8,12 +8,11 @@ import (
 	"time"
 
 	"github.com/mouizahmed/hutch/internal/api"
-	"github.com/mouizahmed/hutch/internal/provider/aws"
 	"github.com/mouizahmed/hutch/internal/rpc"
 	"github.com/mouizahmed/hutch/internal/version"
 )
 
-// doctor checks the server, its bucket and provider, every worker, and the boxes,
+// doctor checks the server, its bucket, every worker, and the boxes,
 // each failure with a fix.
 func (s *Server) doctor(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any, error) {
 	r := api.DoctorResult{Version: version.String()}
@@ -48,15 +47,6 @@ func (s *Server) doctor(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any
 		}
 	}
 
-	if f := s.fleet.Load(); f != nil {
-		_, err := f.p.ListNodes(ctx)
-		check("server", "provider "+f.p.Name(), err, "", "hutch provider add aws, with credentials that can use EC2")
-		if a, ok := f.p.(*aws.AWS); ok && err == nil {
-			_, _, ierr := a.WorkerImage(ctx)
-			check("server", "worker image", ierr, f.cfg.AWS.ImageID, "build one with images/aws/build-ami.sh")
-		}
-	}
-
 	ws, err := s.store.workers()
 	if err != nil {
 		return nil, err
@@ -69,9 +59,6 @@ func (s *Server) doctor(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any
 		area := "worker " + w.Name
 		conn, err := s.worker(w.ID)
 		switch {
-		case err != nil && w.Node != "" && !w.Stopped.IsZero():
-			check(area, "state", nil, "stopped; starts when a box needs it", "")
-			continue
 		case err != nil:
 			warn(area, "state", fmt.Sprintf("offline since %s", w.LastSeen.Format(time.DateTime)),
 				"start hutchd there, or hutch workers rm "+w.ID+" if it's gone (its stored boxes restore elsewhere)")
@@ -92,7 +79,7 @@ func (s *Server) doctor(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any
 			warn(area, "disk", fmt.Sprintf("%d%% free, below worker.disk_reserve; it takes no new boxes", 100*d.Free/d.Total), "remove boxes there, or give it a larger disk")
 		}
 		if conn.info.Version != r.Version {
-			warn(area, "version", "hutchd "+conn.info.Version+", server "+r.Version, "upgrade hutchd there (elastic workers: build a new worker image)")
+			warn(area, "version", "hutchd "+conn.info.Version+", server "+r.Version, "upgrade hutchd there")
 		}
 	}
 
@@ -108,7 +95,7 @@ func (s *Server) doctor(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any
 		}
 		if err := s.checkFits(ctx, need{memMiB: b.MemMiB, vcpus: b.VCPUs}); err != nil {
 			stranded++
-			check("boxes", b.ID, err, "", "hutch resize "+b.ID+" --cpu N --memory SIZE, or a larger providers.aws.worker_type")
+			check("boxes", b.ID, err, "", "hutch resize "+b.ID+" --cpu N --memory SIZE, or a bigger machine")
 		}
 	}
 	if stranded == 0 {

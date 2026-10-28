@@ -29,7 +29,7 @@ func doctor(w *worker.Worker) []api.Check {
 		out = append(out, c)
 	}
 	_, err := os.Stat("/dev/kvm")
-	add("/dev/kvm", err == nil, "", "enable virtualization: on AWS a c8i, m8i, or r8i instance with nested virtualization; on your own machine, VT-x or AMD-V in firmware")
+	add("/dev/kvm", err == nil, "", "enable virtualization: on a server, a dedicated machine or a VPS plan with nested virtualization; on your own machine, VT-x or AMD-V in firmware")
 
 	var u unix.Utsname
 	unix.Uname(&u)

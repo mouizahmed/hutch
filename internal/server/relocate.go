@@ -49,9 +49,6 @@ func (s *Server) boxWorker(ctx context.Context, b api.Box) (*workerConn, api.Box
 	if w, err := s.worker(b.Worker); err == nil {
 		return w, b, nil
 	}
-	if w, err := s.wakeStopped(ctx, b.Worker); err != nil || w != nil {
-		return w, b, err
-	}
 	lost, after, err := s.workerLost(b.Worker)
 	if err != nil {
 		return nil, b, err

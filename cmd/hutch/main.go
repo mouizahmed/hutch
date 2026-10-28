@@ -55,7 +55,7 @@ func main() {
 	root.AddCommand(forwardCommands()...)
 	root.AddCommand(statusCommand())
 	root.AddCommand(setupCommands()...)
-	root.AddCommand(costsCommand(), moveCommand(), resizeCommand(), doctorCommand())
+	root.AddCommand(moveCommand(), resizeCommand(), doctorCommand())
 	root.AddCommand(configCommands(), initCommand(), templateCommands(), projectCommands(), sizesCommand(), userCommands(), loginCommand(), tuiCommand())
 
 	setHelp(root)

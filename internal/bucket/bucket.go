@@ -4,8 +4,6 @@ package bucket
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
-	"encoding/base64"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -13,21 +11,18 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/mouizahmed/hutch/internal/sigv4"
 )
 
-// Config locates the bucket. An empty Endpoint means AWS S3 in Region. With
-// InstanceRole, requests are signed with the EC2 instance's role instead of keys.
+// Config locates the bucket. An empty Endpoint means AWS S3 in Region.
 type Config struct {
-	Endpoint     string `json:"endpoint,omitempty"`
-	Region       string `json:"region"`
-	Name         string `json:"name"`
-	AccessKey    string `json:"access_key,omitempty"`
-	SecretKey    string `json:"secret_key,omitempty"`
-	InstanceRole bool   `json:"instance_role,omitempty"`
+	Endpoint  string `json:"endpoint,omitempty"`
+	Region    string `json:"region"`
+	Name      string `json:"name"`
+	AccessKey string `json:"access_key,omitempty"`
+	SecretKey string `json:"secret_key,omitempty"`
 }
 
 var (
@@ -56,16 +51,10 @@ type Bucket interface {
 type S3 struct {
 	cfg    Config
 	client *http.Client
-	role   *sigv4.Role
-	// Requests made, by price tier: 1 is PUT and LIST, 2 is GET, HEAD, and the rest.
-	tier1, tier2 atomic.Int64
 }
 
-// Requests returns the requests made so far, by price tier.
-func (s *S3) Requests() (tier1, tier2 int64) { return s.tier1.Load(), s.tier2.Load() }
-
 func New(cfg Config) (*S3, error) {
-	if cfg.Name == "" || cfg.Region == "" || (!cfg.InstanceRole && (cfg.AccessKey == "" || cfg.SecretKey == "")) {
+	if cfg.Name == "" || cfg.Region == "" || cfg.AccessKey == "" || cfg.SecretKey == "" {
 		return nil, errors.New("bucket: name, region, and credentials are required")
 	}
 	if cfg.Endpoint != "" {
@@ -74,11 +63,7 @@ func New(cfg Config) (*S3, error) {
 			return nil, fmt.Errorf("bucket endpoint %q: want https://host[:port]", cfg.Endpoint)
 		}
 	}
-	s := &S3{cfg: cfg, client: &http.Client{Timeout: 5 * time.Minute}}
-	if cfg.InstanceRole {
-		s.role = &sigv4.Role{}
-	}
-	return s, nil
+	return &S3{cfg: cfg, client: &http.Client{Timeout: 5 * time.Minute}}, nil
 }
 
 // url addresses AWS buckets virtual-hosted and others path-style, which every
@@ -97,11 +82,6 @@ func (s *S3) url(key string, query url.Values) *url.URL {
 }
 
 func (s *S3) do(ctx context.Context, method, key string, query url.Values, body []byte, header http.Header) (*http.Response, error) {
-	if method == http.MethodPut || (method == http.MethodGet && key == "") {
-		s.tier1.Add(1)
-	} else if method != http.MethodDelete {
-		s.tier2.Add(1)
-	}
 	u := s.url(key, query)
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), bytes.NewReader(body))
 	if err != nil {
@@ -112,11 +92,6 @@ func (s *S3) do(ctx context.Context, method, key string, query url.Values, body 
 		req.Header[k] = v
 	}
 	creds := sigv4.Credentials{AccessKey: s.cfg.AccessKey, SecretKey: s.cfg.SecretKey}
-	if s.role != nil {
-		if creds, err = s.role.Credentials(ctx); err != nil {
-			return nil, err
-		}
-	}
 	sigv4.Sign(req, body, "s3", s.cfg.Region, creds, time.Now())
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -169,29 +144,6 @@ func (s *S3) Create(ctx context.Context) error {
 		body = []byte(`<CreateBucketConfiguration><LocationConstraint>` + s.cfg.Region + `</LocationConstraint></CreateBucketConfiguration>`)
 	}
 	resp, err := s.do(ctx, http.MethodPut, "", nil, body, nil)
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	return nil
-}
-
-// Tag replaces the bucket's tags; on AWS they attribute its costs.
-func (s *S3) Tag(ctx context.Context, tags map[string]string) error {
-	var b strings.Builder
-	b.WriteString("<Tagging><TagSet>")
-	for k, v := range tags {
-		b.WriteString("<Tag><Key>")
-		xml.EscapeText(&b, []byte(k))
-		b.WriteString("</Key><Value>")
-		xml.EscapeText(&b, []byte(v))
-		b.WriteString("</Value></Tag>")
-	}
-	b.WriteString("</TagSet></Tagging>")
-	body := []byte(b.String())
-	sum := md5.Sum(body)
-	h := http.Header{"Content-Md5": {base64.StdEncoding.EncodeToString(sum[:])}}
-	resp, err := s.do(ctx, http.MethodPut, "", url.Values{"tagging": {""}}, body, h)
 	if err != nil {
 		return err
 	}

@@ -10,7 +10,6 @@ import (
 
 	"github.com/mouizahmed/hutch/internal/bucket"
 	"github.com/mouizahmed/hutch/internal/guestproto"
-	"github.com/mouizahmed/hutch/internal/sigv4"
 )
 
 // Methods the server serves to the CLI. The box.* methods are also served by
@@ -71,13 +70,9 @@ const (
 
 	ServerInit   = "server.init"
 	ServerGC     = "server.gc"
-	ProviderAdd  = "provider.add"
-	CostsGet     = "costs.get"
 	BoxMove      = "box.move"
 	WorkerDrain  = "worker.drain"
 	WorkerRm     = "worker.rm"
-	Prestart     = "fleet.prestart"
-	FleetInfo    = "fleet.info"
 	Doctor       = "doctor"        // the server's checks
 	WorkerDoctor = "worker.doctor" // hutchd only
 )
@@ -97,30 +92,13 @@ type DoctorResult struct {
 	Checks  []Check `json:"checks"`
 }
 
-// Fleet describes the elastic workers the server starts; empty without a provider.
-type Fleet struct {
-	WorkerType string  `json:"worker_type,omitempty"`
-	VCPUs      int     `json:"vcpus,omitempty"`
-	MemMiB     int     `json:"mem_mib,omitempty"`
-	PerHour    float64 `json:"per_hour,omitempty"`
-}
-
-// PrestartParams asks for a worker with room for a box of this size, started in
-// the background when providers.prestart is on.
-type PrestartParams struct {
-	VCPUs  int `json:"vcpus"`
-	MemMiB int `json:"mem_mib"`
-}
-
 // Plan is what hutch new would do, without doing it.
 type Plan struct {
 	Template string   `json:"template"` // "v3 (recipe @ 1a2b3c)"
 	Size     string   `json:"size"`
 	Worker   string   `json:"worker,omitempty"`
-	Kind     string   `json:"kind,omitempty"` // persistent or elastic
 	Why      string   `json:"why"`
 	Class    string   `json:"class,omitempty"`
-	PerHour  float64  `json:"per_hour,omitempty"`
 	Warnings []string `json:"warnings,omitempty"`
 }
 
@@ -148,41 +126,6 @@ type MoveResult struct {
 type DrainParams struct {
 	Worker string `json:"worker"`
 	Undo   bool   `json:"undo,omitempty"`
-}
-
-// CostsParams asks for the last Days days of the ledger, by box or by project.
-type CostsParams struct {
-	Days int    `json:"days"`
-	By   string `json:"by,omitempty"`
-}
-
-// CostRow is one ledger amount. Box is "" for fleet overhead; by project, it holds
-// the project.
-type CostRow struct {
-	Day      string  `json:"day"`
-	Box      string  `json:"box,omitempty"`
-	Category string  `json:"category"`
-	USD      float64 `json:"usd"`
-}
-
-type Costs struct {
-	Rows   []CostRow `json:"rows"`
-	Billed []CostRow `json:"billed"`
-}
-
-// ProviderParams connects the server to AWS with credentials that can run instances.
-type ProviderParams struct {
-	Credentials     sigv4.Credentials `json:"credentials"`
-	InstanceProfile string            `json:"instance_profile,omitempty"`
-	// Set by hutch server init, which tagged what it created with Fleet.
-	Fleet        string `json:"fleet,omitempty"`
-	ServerDiskGB int    `json:"server_disk_gb,omitempty"`
-}
-
-type ProviderInfo struct {
-	Region  string `json:"region"`
-	Image   string `json:"image"`
-	Address string `json:"address"`
 }
 
 // ServerInitParams connects the server to its bucket and backs up its master key
@@ -290,8 +233,6 @@ type Box struct {
 	Merged string `json:"merged,omitempty"`
 	// Path is the laptop directory /workspace also appears at; threads start there.
 	Path string `json:"path,omitempty"`
-	// PerHour is the box's share of its worker's price while awake (by reserved memory).
-	PerHour float64 `json:"per_hour,omitempty"`
 }
 
 const (
@@ -463,9 +404,6 @@ type Report struct {
 	// Uploading counts boxes with snapshots not yet in the bucket; a worker isn't
 	// stopped until it's zero.
 	Uploading int `json:"uploading"`
-	// Requests counts bucket requests since hutchd started, by price tier, for
-	// cost estimates.
-	Requests [2]int64 `json:"requests"`
 	// The worker's memory in MiB, and, under overcommit, "high" when it asks the
 	// server to move a working box off it, and the boxes it slept at critical.
 	MemTotal     int      `json:"mem_total,omitempty"`
@@ -538,14 +476,10 @@ type Worker struct {
 	Disk    Disk     `json:"disk"`
 	Boxes   []Box    `json:"boxes,omitempty"`
 	// ReservedMiB is the memory its awake boxes reserve; set by the server.
-	ReservedMiB int `json:"reserved_mib,omitempty"`
-	// Node is the cloud instance of a provisioned worker ("" for persistent ones).
-	Node    string    `json:"node,omitempty"`
-	Stopped time.Time `json:"stopped,omitzero"` // when the server stopped it
-	Gone    bool      `json:"gone,omitempty"`   // destroyed; its boxes restore elsewhere
+	ReservedMiB int  `json:"reserved_mib,omitempty"`
+	Gone        bool `json:"gone,omitempty"` // removed; its boxes restore elsewhere
 	// Draining workers take no new boxes.
-	Draining bool    `json:"draining,omitempty"`
-	PerHour  float64 `json:"per_hour,omitempty"`
+	Draining bool `json:"draining,omitempty"`
 }
 
 // Disk is a worker's data volume, in bytes.
