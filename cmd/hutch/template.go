@@ -497,6 +497,9 @@ func sizesCommand() *cobra.Command {
 				Memory  string         `json:"memory"`
 				Current bool           `json:"current,omitempty"`
 				Fits    map[string]int `json:"fits"` // boxes of this size per worker, by name
+				// Caps names the gVisor machines, where a size is a cap: Fits boxes
+				// at full use, and more when they use less (idle ones about 100 MB).
+				Caps []string `json:"caps,omitempty"`
 			}
 			var opts []option
 			project := boxSize{int(cfg.Int("size.cpu")), int(cfg.Size("size.memory") >> 20)}
@@ -508,6 +511,9 @@ func sizesCommand() *cobra.Command {
 				o := option{CPU: sz.cpu, Memory: mib(sz.memMiB), Fits: map[string]int{}, Current: sz == project}
 				for _, t := range targets {
 					o.Fits[t.name] = t.perWorker(sz, margin)
+					if t.gvisor {
+						o.Caps = append(o.Caps, t.name)
+					}
 				}
 				opts = append(opts, o)
 			}
@@ -521,7 +527,11 @@ func sizesCommand() *cobra.Command {
 			for _, o := range opts {
 				var fits []string
 				for name, n := range o.Fits {
-					fits = append(fits, fmt.Sprintf("%s: %d", name, n))
+					if n > 0 && slices.Contains(o.Caps, name) {
+						fits = append(fits, fmt.Sprintf("%s: %d at full use, more as they use less", name, n))
+					} else {
+						fits = append(fits, fmt.Sprintf("%s: %d", name, n))
+					}
 				}
 				mark := ""
 				if o.Current {
