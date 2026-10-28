@@ -141,6 +141,13 @@ func projectForm(ctx context.Context, sess *yamux.Session, cfg *config.Config, t
 	}
 
 	cur := boxSize{int(cfg.Int("size.cpu")), int(cfg.Size("size.memory") >> 20)}
+	propose := cur
+	// Nobody chose a size yet: propose one that suits this machine.
+	if c, _ := cfg.Get("size.cpu"); c.Layer == config.Default {
+		if m, _ := cfg.Get("size.memory"); m.Layer == config.Default {
+			propose = suggestSize(targets, margin, cur)
+		}
+	}
 	sizeOpts := sizes
 	if !slices.Contains(sizeOpts, cur) {
 		sizeOpts = append(slices.Clone(sizeOpts), cur)
@@ -163,8 +170,10 @@ func projectForm(ctx context.Context, sess *yamux.Session, cfg *config.Config, t
 			label += "   doesn't fit the machine"
 			unfit[value] = true
 		}
-		if sz == cur {
+		if sz == cur && propose == cur {
 			label += "   (current)"
+		} else if sz == propose {
+			label += "   (suggested for this machine)"
 		}
 		sizeChoices = append(sizeChoices, huh.NewOption(label, value))
 	}
@@ -176,7 +185,7 @@ func projectForm(ctx context.Context, sess *yamux.Session, cfg *config.Config, t
 		sizeDesc = append(sizeDesc, fmt.Sprintf("The last build peaked at %.1f GB and %.1f vCPUs (in %d vCPU, %s).",
 			float64(pk.MemMiB)/1024, pk.CPUs, pk.OfVCPUs, mib(pk.OfMiB)))
 	}
-	size := fmt.Sprintf("%d/%d", cur.cpu, cur.memMiB)
+	size := fmt.Sprintf("%d/%d", propose.cpu, propose.memMiB)
 
 	diskCur, _ := cfg.Get("disk.size")
 	diskVal := diskCur.String()
@@ -217,6 +226,10 @@ func projectForm(ctx context.Context, sess *yamux.Session, cfg *config.Config, t
 	}
 
 	changes := map[string]any{}
+	// The proposal counts as a change: it's not what the defaults say.
+	if propose != cur && size == fmt.Sprintf("%d/%d", propose.cpu, propose.memMiB) {
+		cur = boxSize{}
+	}
 	cpu, mem, _ := strings.Cut(size, "/")
 	if n, _ := strconv.Atoi(cpu); n != cur.cpu {
 		changes["size.cpu"] = int64(n)
@@ -303,6 +316,8 @@ func orEmpty(v any) any {
 type fitTarget struct {
 	name         string
 	cpus, memMiB int
+	// gvisor: its boxes take memory as they use it, so a size is a cap.
+	gvisor bool
 }
 
 func fitTargets(ctx context.Context, sess *yamux.Session) ([]fitTarget, error) {
@@ -313,16 +328,49 @@ func fitTargets(ctx context.Context, sess *yamux.Session) ([]fitTarget, error) {
 	var out []fitTarget
 	for _, w := range ws {
 		if w.Online && w.MemMiB > 0 {
-			out = append(out, fitTarget{w.Name, w.CPUs, w.MemMiB})
+			out = append(out, fitTarget{w.Name, w.CPUs, w.MemMiB, api.GVisorClass(w.Class)})
 		}
 	}
 	return out, nil
 }
 
 // perWorker is how many boxes of a size fit on a target, after the host's margin.
+// On gVisor a size is a cap, so any size up to the machine fits, as one box at
+// its full size.
 func (t fitTarget) perWorker(sz boxSize, margin float64) int {
 	if sz.cpu > t.cpus {
 		return 0
 	}
+	if t.gvisor {
+		if sz.memMiB <= (t.memMiB+1023)/1024*1024 {
+			return max(1, int(float64(t.memMiB)*(1-margin)/float64(sz.memMiB)))
+		}
+		return 0
+	}
 	return int(float64(t.memMiB) * (1 - margin) / float64(sz.memMiB))
+}
+
+// suggestSize proposes the largest standard size of which at least three boxes fit
+// every machine (VMs reserve their size), or on gVisor, where a size is a cap, the
+// largest using at most half the machine's memory and all its vCPUs. With no
+// machine to judge by, the default stays.
+func suggestSize(targets []fitTarget, margin float64, def boxSize) boxSize {
+	if len(targets) == 0 {
+		return def
+	}
+	best := sizes[0]
+	for _, sz := range sizes {
+		ok := true
+		for _, t := range targets {
+			if t.gvisor {
+				ok = ok && sz.cpu <= t.cpus && sz.memMiB <= t.memMiB/2
+			} else {
+				ok = ok && t.perWorker(sz, margin) >= 3
+			}
+		}
+		if ok {
+			best = sz
+		}
+	}
+	return best
 }
