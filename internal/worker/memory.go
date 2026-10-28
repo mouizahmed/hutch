@@ -13,10 +13,14 @@ import (
 	"github.com/mouizahmed/hutch/internal/firecracker"
 )
 
-// MemUse returns the host memory a running box's VM holds, in MiB: its
-// proportional share, so pages it shares with its template or other forks count
-// once across them.
+// MemUse returns the host memory a running box holds, in MiB: a VM's proportional
+// share, so pages it shares with its template or other forks count once across
+// them, or a sandbox cgroup's use.
 func (w *Worker) MemUse(b *Box) (int, error) {
+	if b.GVisor != "" {
+		n, err := w.cgroupStat(b, "memory.current", "")
+		return int(n >> 20), err
+	}
 	f, err := os.Open(fmt.Sprintf("/proc/%d/smaps_rollup", b.PID))
 	if err != nil {
 		return 0, err
@@ -59,6 +63,9 @@ func HostMemory() (total, available int) {
 // Reclaim inflates a running box's balloon over the memory its guest doesn't need,
 // keeping headroom free, and returns the MiB taken. Release gives it all back.
 func (w *Worker) Reclaim(ctx context.Context, b *Box, headroomMiB int) (int, error) {
+	if b.GVisor != "" {
+		return 0, nil // gVisor hands freed memory back to the host itself
+	}
 	c := firecracker.NewClient(w.jailAPIPath(b.ID))
 	st, err := c.BalloonStats(ctx)
 	if err != nil {
@@ -72,5 +79,8 @@ func (w *Worker) Reclaim(ctx context.Context, b *Box, headroomMiB int) (int, err
 }
 
 func (w *Worker) Release(ctx context.Context, b *Box) error {
+	if b.GVisor != "" {
+		return nil
+	}
 	return firecracker.NewClient(w.jailAPIPath(b.ID)).SetBalloon(ctx, 0)
 }

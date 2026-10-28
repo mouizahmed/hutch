@@ -15,8 +15,9 @@ import (
 	"github.com/mouizahmed/hutch/internal/durable"
 )
 
-// The files of a snapshot; an archived box has only its disk.
-var snapshotFiles = []string{"rootfs.ext4", "mem", "vmstate"}
+// The files of a snapshot, a Firecracker VM's or a gVisor sandbox's; an archived
+// box has only its disk.
+var snapshotFiles = append([]string{"rootfs.ext4", "mem", "vmstate"}, checkpointFiles...)
 
 func (w *Worker) refDir(id string) string { return filepath.Join(w.boxDir(id), "ref") }
 
@@ -64,7 +65,7 @@ func (w *Worker) Upload(ctx context.Context, id string, s *durable.Store, k dura
 		}
 	}
 	m := &durable.Manifest{Created: time.Now().UTC(), Files: map[string]*durable.File{},
-		Box: &durable.BoxInfo{Image: b.Image, VCPUs: b.VCPUs, MemMiB: b.MemMiB, FCVersion: b.FCVersion, Class: b.Class,
+		Box: &durable.BoxInfo{Image: b.Image, VCPUs: b.VCPUs, MemMiB: b.MemMiB, FCVersion: b.FCVersion, GVisor: b.GVisor, Class: b.Class,
 			IdleTimeout: b.Idle.Timeout, CPUThreshold: b.Idle.CPUThreshold, Allow: b.Allow, Watch: b.Watch}}
 	for _, name := range snapshotFiles {
 		f, err := os.Open(filepath.Join(work, name))
@@ -86,7 +87,7 @@ func (w *Worker) Upload(ctx context.Context, id string, s *durable.Store, k dura
 		m.Files[name] = file
 		st[name] = fst
 	}
-	m.Box.Archived = m.Files["mem"] == nil
+	m.Box.Archived = m.Files["mem"] == nil && m.Files["pages.img"] == nil
 	name := ManifestName(b.Store, b.Generation)
 	// Already there: an earlier attempt stored it before failing to record that.
 	if err := s.PutManifest(ctx, k, name, m); err != nil && !errors.Is(err, bucket.ErrExists) {
@@ -241,7 +242,7 @@ func (w *Worker) Restore(ctx context.Context, id string, store *Store, gen int, 
 		return nil, err
 	}
 	ok = true
-	b := &Box{ID: id, Image: m.Box.Image, VCPUs: m.Box.VCPUs, MemMiB: m.Box.MemMiB, FCVersion: m.Box.FCVersion, Class: m.Box.Class,
+	b := &Box{ID: id, Image: m.Box.Image, VCPUs: m.Box.VCPUs, MemMiB: m.Box.MemMiB, FCVersion: m.Box.FCVersion, GVisor: m.Box.GVisor, Class: m.Box.Class,
 		State: Asleep, Generation: gen, Uploaded: gen, Created: time.Now().UTC(), Store: store,
 		Idle: Idle{Timeout: m.Box.IdleTimeout, CPUThreshold: m.Box.CPUThreshold}, Allow: m.Box.Allow, Watch: m.Box.Watch}
 	if !warm {
@@ -288,11 +289,7 @@ func (w *Worker) Archive(id string) (*Box, error) {
 
 // coldWake boots an archived box from its disk. Its processes start fresh.
 func (w *Worker) coldWake(ctx context.Context, b *Box) (*Box, error) {
-	b.BaseMem, b.Class, b.FCVersion = "", w.Class(), w.FCVersion
-	err := w.start(ctx, b, map[string]string{
-		jailKernel: w.kernelPath(),
-		jailRootfs: filepath.Join(w.boxDir(b.ID), "rootfs.ext4"),
-	}, func(m *vm) error { return m.coldBoot(ctx, w.vendor) }, 60*time.Second)
+	err := w.coldStart(ctx, b)
 	if err != nil {
 		b.State, b.PID = Archived, 0
 		w.save(b)
@@ -369,7 +366,7 @@ func (w *Worker) RollBack(id string) (*Box, error) {
 	if b.State != Running || w.Alive(b) {
 		return nil, fmt.Errorf("box %q is %s", id, b.State)
 	}
-	w.killFirecracker(b)
+	w.stop(b)
 	if b.Slot != 0 {
 		slot(b.Slot).teardown()
 	}
@@ -388,9 +385,11 @@ func (w *Worker) RollBack(id string) (*Box, error) {
 	if err := os.Rename(rootfs+".rollback", rootfs); err != nil {
 		return nil, err
 	}
-	b.State = Asleep
-	if _, err := os.Stat(filepath.Join(gen, "mem")); err != nil {
-		b.State = Archived
+	b.State = Archived
+	for _, mem := range []string{"mem", "pages.img"} {
+		if _, err := os.Stat(filepath.Join(gen, mem)); err == nil {
+			b.State = Asleep
+		}
 	}
 	return b, w.save(b)
 }

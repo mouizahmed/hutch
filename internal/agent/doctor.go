@@ -28,8 +28,11 @@ func doctor(w *worker.Worker) []api.Check {
 		}
 		out = append(out, c)
 	}
-	_, err := os.Stat("/dev/kvm")
-	add("/dev/kvm", err == nil, "", "enable virtualization: a dedicated server or a VPS plan with nested virtualization; on your own hardware, VT-x or AMD-V in firmware")
+	if w.GVisor != "" {
+		add("backend", true, "gVisor sandboxes (no /dev/kvm): builds about 1.5× slower than a VM", "")
+	} else {
+		add("backend", true, "Firecracker VMs (/dev/kvm)", "")
+	}
 
 	var u unix.Utsname
 	unix.Uname(&u)
@@ -59,7 +62,7 @@ func doctor(w *worker.Worker) []api.Check {
 	}
 	add("XFS with reflink", reflink, w.Root, fmt.Sprintf("put %s on XFS made with mkfs.xfs -m reflink=1", w.Root))
 
-	err = pressureEvents()
+	err := pressureEvents()
 	detail := ""
 	if err != nil {
 		detail = err.Error()
@@ -67,6 +70,10 @@ func doctor(w *worker.Worker) []api.Check {
 	add("memory pressure events", err == nil, detail, "boot with psi=1 (or a kernel with CONFIG_PSI), so overcommit reacts at once rather than at the next check")
 
 	classes := w.Classes()
-	add("Firecracker", len(classes) > 0, strings.Join(classes, ", "), "install a Firecracker release under "+filepath.Join(w.Root, "firecracker"))
+	if w.GVisor != "" {
+		add("gVisor", len(classes) > 0, strings.Join(classes, ", "), "run hutch setup again")
+	} else {
+		add("Firecracker", len(classes) > 0, strings.Join(classes, ", "), "install a Firecracker release under "+filepath.Join(w.Root, "firecracker"))
+	}
 	return out
 }

@@ -40,7 +40,7 @@ func (w *Worker) Boot(ctx context.Context, id, image string, vcpus, memMiB int, 
 		}
 		return nil, err
 	}
-	b := &Box{ID: id, Image: image, VCPUs: vcpus, MemMiB: memMiB, FCVersion: w.FCVersion, Class: w.Class(), Created: time.Now().UTC(), Idle: idle, Allow: allow, Store: store}
+	b := &Box{ID: id, Image: image, VCPUs: vcpus, MemMiB: memMiB, FCVersion: w.FCVersion, GVisor: w.GVisor, Class: w.Class(), Created: time.Now().UTC(), Idle: idle, Allow: allow, Store: store}
 	rootfs := filepath.Join(w.boxDir(id), "rootfs.ext4")
 	if err := clone(filepath.Join(w.imageDir(image), "rootfs.ext4"), rootfs); err != nil {
 		os.RemoveAll(w.boxDir(id))
@@ -50,10 +50,7 @@ func (w *Worker) Boot(ctx context.Context, id, image string, vcpus, memMiB int, 
 		os.RemoveAll(w.boxDir(id))
 		return nil, err
 	}
-	err = w.start(ctx, b, map[string]string{
-		jailKernel: w.kernelPath(),
-		jailRootfs: filepath.Join(w.boxDir(id), "rootfs.ext4"),
-	}, func(m *vm) error { return m.coldBoot(ctx, w.vendor) }, 60*time.Second)
+	err = w.coldStart(ctx, b)
 	if err != nil {
 		b.State, b.PID, b.Slot = Failed, 0, 0
 		w.save(b)
@@ -139,11 +136,15 @@ func (w *Worker) Fork(ctx context.Context, srcID, id string, idle Idle, allow []
 	b, err := w.copyFromSnapshot(srcID, id)
 	if err == nil {
 		b.Idle, b.Allow, b.Store = idle, allow, store
-		err = w.start(ctx, b, map[string]string{
-			jailRootfs: filepath.Join(w.boxDir(id), "rootfs.ext4"),
-			jailState:  filepath.Join(w.boxDir(id), "base.vmstate"),
-			jailMem:    b.BaseMem,
-		}, func(m *vm) error { return m.restore(ctx) }, 10*time.Second)
+		if b.GVisor != "" {
+			err = w.startSandbox(ctx, b, filepath.Join(w.boxDir(id), "base"), 10*time.Second)
+		} else {
+			err = w.start(ctx, b, map[string]string{
+				jailRootfs: filepath.Join(w.boxDir(id), "rootfs.ext4"),
+				jailState:  filepath.Join(w.boxDir(id), "base.vmstate"),
+				jailMem:    b.BaseMem,
+			}, func(m *vm) error { return m.restore(ctx) }, 10*time.Second)
+		}
 	}
 	if err != nil {
 		os.RemoveAll(w.boxDir(id))
@@ -175,11 +176,24 @@ func (w *Worker) copyFromSnapshot(srcID, id string) (*Box, error) {
 	if err := clone(filepath.Join(w.boxDir(srcID), "rootfs.ext4"), filepath.Join(dir, "rootfs.ext4")); err != nil {
 		return nil, err
 	}
-	if err := os.Link(filepath.Join(gen, "mem"), filepath.Join(dir, "base.mem")); err != nil {
-		return nil, err
-	}
-	if err := os.Link(filepath.Join(gen, "vmstate"), filepath.Join(dir, "base.vmstate")); err != nil {
-		return nil, err
+	if src.GVisor != "" {
+		// The checkpoint a fork restores from; its pages load lazily, so it stays
+		// until the fork's first sleep.
+		if err := os.Mkdir(filepath.Join(dir, "base"), 0o755); err != nil {
+			return nil, err
+		}
+		for _, f := range checkpointFiles {
+			if err := os.Link(filepath.Join(gen, f), filepath.Join(dir, "base", f)); err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		if err := os.Link(filepath.Join(gen, "mem"), filepath.Join(dir, "base.mem")); err != nil {
+			return nil, err
+		}
+		if err := os.Link(filepath.Join(gen, "vmstate"), filepath.Join(dir, "base.vmstate")); err != nil {
+			return nil, err
+		}
 	}
 	// The source's stored chunks are the fork's until it changes them, so its first
 	// upload compares against them.
@@ -188,8 +202,12 @@ func (w *Worker) copyFromSnapshot(srcID, id string) (*Box, error) {
 			os.RemoveAll(w.refDir(id))
 		}
 	}
-	return &Box{ID: id, Image: src.Image, VCPUs: src.VCPUs, MemMiB: src.MemMiB, FCVersion: src.FCVersion, Class: src.Class,
-		Created: time.Now().UTC(), BaseMem: filepath.Join(dir, "base.mem")}, nil
+	b := &Box{ID: id, Image: src.Image, VCPUs: src.VCPUs, MemMiB: src.MemMiB, FCVersion: src.FCVersion, GVisor: src.GVisor, Class: src.Class,
+		Created: time.Now().UTC()}
+	if src.GVisor == "" {
+		b.BaseMem = filepath.Join(dir, "base.mem")
+	}
+	return b, nil
 }
 
 // Wake restores a sleeping box from its latest snapshot.
@@ -213,12 +231,16 @@ func (w *Worker) Wake(ctx context.Context, id string) (*Box, error) {
 		return nil, fmt.Errorf("box %q has snapshot class %s, this worker runs %s; it needs a cold boot", id, b.Class, strings.Join(w.Classes(), ", "))
 	}
 	gen := w.genDir(id, b.Generation)
-	b.BaseMem = filepath.Join(gen, "mem")
-	err = w.start(ctx, b, map[string]string{
-		jailRootfs: filepath.Join(w.boxDir(id), "rootfs.ext4"),
-		jailState:  filepath.Join(gen, "vmstate"),
-		jailMem:    b.BaseMem,
-	}, func(m *vm) error { return m.restore(ctx) }, 10*time.Second)
+	if b.GVisor != "" {
+		err = w.startSandbox(ctx, b, gen, 10*time.Second)
+	} else {
+		b.BaseMem = filepath.Join(gen, "mem")
+		err = w.start(ctx, b, map[string]string{
+			jailRootfs: filepath.Join(w.boxDir(id), "rootfs.ext4"),
+			jailState:  filepath.Join(gen, "vmstate"),
+			jailMem:    b.BaseMem,
+		}, func(m *vm) error { return m.restore(ctx) }, 10*time.Second)
+	}
 	if err != nil {
 		b.State, b.PID, b.BaseMem = Asleep, 0, ""
 		w.save(b)
@@ -261,7 +283,7 @@ func (w *Worker) start(ctx context.Context, b *Box, links map[string]string, boo
 func (w *Worker) guestRestore(ctx context.Context, b *Box, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	c := &guestproto.Client{UDSPath: w.vsockPath(b.ID)}
+	c := w.guest(b)
 	for {
 		attempt, cancelAttempt := context.WithTimeout(ctx, 2*time.Second)
 		_, err := c.Hello(attempt)
@@ -294,11 +316,16 @@ func (w *Worker) Sleep(ctx context.Context, id string) (*Box, error) {
 	if b.State != Running {
 		return nil, fmt.Errorf("box %q is %s", id, b.State)
 	}
-	cleanup, err := w.snapshotGen(ctx, b, w.running(b))
+	var cleanup func()
+	if b.GVisor != "" {
+		cleanup, err = w.snapshotSandbox(ctx, b, false)
+	} else {
+		cleanup, err = w.snapshotGen(ctx, b, w.running(b))
+	}
 	if err != nil {
 		return nil, err
 	}
-	w.killFirecracker(b)
+	w.stop(b)
 	slot(b.Slot).teardown()
 	b.State, b.Slot, b.BaseMem = Asleep, 0, ""
 	if err := w.save(b); err != nil {
@@ -307,6 +334,7 @@ func (w *Worker) Sleep(ctx context.Context, id string) (*Box, error) {
 	cleanup()
 	os.Remove(filepath.Join(w.boxDir(id), "base.mem"))
 	os.Remove(filepath.Join(w.boxDir(id), "base.vmstate"))
+	os.RemoveAll(filepath.Join(w.boxDir(id), "base"))
 	return b, nil
 }
 
@@ -323,6 +351,17 @@ func (w *Worker) Checkpoint(ctx context.Context, id string) (*Box, error) {
 	}
 	if b.State != Running {
 		return nil, fmt.Errorf("box %q is %s", id, b.State)
+	}
+	if b.GVisor != "" {
+		cleanup, err := w.snapshotSandbox(ctx, b, true)
+		if err != nil {
+			return nil, err
+		}
+		if err := w.save(b); err != nil {
+			return nil, err
+		}
+		cleanup()
+		return b, nil
 	}
 	m := w.running(b)
 	cleanup, err := w.snapshotGen(ctx, b, m)
@@ -347,7 +386,7 @@ func (w *Worker) Checkpoint(ctx context.Context, id string) (*Box, error) {
 func (w *Worker) syncGuest(ctx context.Context, b *Box) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	(&guestproto.Client{UDSPath: w.vsockPath(b.ID)}).Exec(ctx, guestproto.Exec{Argv: []string{"sync"}, User: "root"}, io.Discard, io.Discard)
+	w.guest(b).Exec(ctx, guestproto.Exec{Argv: []string{"sync"}, User: "root"}, io.Discard, io.Discard)
 }
 
 // Recover resumes running boxes whose VMs a hutchd stopped mid-snapshot left paused.
@@ -357,7 +396,12 @@ func (w *Worker) Recover(ctx context.Context) {
 		return
 	}
 	for _, b := range boxes {
-		if w.Alive(b) {
+		if !w.Alive(b) {
+			continue
+		}
+		if b.GVisor != "" {
+			w.runsc(b.GVisor, "resume", b.ID)
+		} else {
 			w.running(b).api.Resume(ctx)
 		}
 	}
@@ -434,7 +478,7 @@ func (w *Worker) Remove(id string) error {
 	if err != nil {
 		return err
 	}
-	w.killFirecracker(b)
+	w.stop(b)
 	if b.Slot != 0 {
 		slot(b.Slot).teardown()
 	}
@@ -453,7 +497,7 @@ func (w *Worker) Exec(ctx context.Context, id string, e guestproto.Exec, stdout,
 	if b.State != Running {
 		return 0, fmt.Errorf("box %q is %s", id, b.State)
 	}
-	c := &guestproto.Client{UDSPath: w.vsockPath(id)}
+	c := w.guest(b)
 	return c.Exec(ctx, e, stdout, stderr)
 }
 
@@ -468,7 +512,7 @@ func (w *Worker) WriteFiles(ctx context.Context, id string, f guestproto.Files, 
 		return fmt.Errorf("box %q is %s", id, b.State)
 	}
 	if len(f.Files) > 0 {
-		if err := (&guestproto.Client{UDSPath: w.vsockPath(id)}).Files(ctx, f); err != nil {
+		if err := w.guest(b).Files(ctx, f); err != nil {
 			return err
 		}
 	}
@@ -500,7 +544,7 @@ func (w *Worker) DialPort(ctx context.Context, id string, port int) (net.Conn, e
 	if b.State != Running {
 		return nil, fmt.Errorf("box %q is %s", id, b.State)
 	}
-	return (&guestproto.Client{UDSPath: w.vsockPath(id)}).DialPort(ctx, port)
+	return w.guest(b).DialPort(ctx, port)
 }
 
 // DialGuest opens a raw connection to a running box's hutch-guest.
@@ -512,11 +556,16 @@ func (w *Worker) DialGuest(ctx context.Context, id string) (net.Conn, error) {
 	if b.State != Running {
 		return nil, fmt.Errorf("box %q is %s", id, b.State)
 	}
-	return (&guestproto.Client{UDSPath: w.vsockPath(id)}).Dial(ctx)
+	return w.guest(b).Dial(ctx)
 }
 
-// CPUTime returns the total CPU time a running box's Firecracker has used.
+// CPUTime returns the total CPU time a running box has used: its Firecracker's, or
+// its sandbox cgroup's.
 func (w *Worker) CPUTime(b *Box) (time.Duration, error) {
+	if b.GVisor != "" {
+		us, err := w.cgroupStat(b, "cpu.stat", "usage_usec")
+		return time.Duration(us) * time.Microsecond, err
+	}
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", b.PID))
 	if err != nil {
 		return 0, err
@@ -537,10 +586,10 @@ func (w *Worker) GuestStatus(ctx context.Context, id string) (guestproto.Status,
 	if err != nil {
 		return guestproto.Status{}, err
 	}
-	return (&guestproto.Client{UDSPath: w.vsockPath(id)}).Status(ctx, b.Watch...)
+	return w.guest(b).Status(ctx, b.Watch...)
 }
 
-// Alive reports whether a running box's Firecracker process still exists.
+// Alive reports whether a running box's Firecracker or sandbox process still exists.
 func (w *Worker) Alive(b *Box) bool { return b.State == Running && b.PID > 0 && processAlive(b.PID) }
 
 func (b *Box) ReachIP() string {
@@ -567,4 +616,34 @@ func clone(src, dst string) error {
 		return fmt.Errorf("reflink %s: %w (is %s on XFS with reflink?)", src, err, filepath.Dir(dst))
 	}
 	return out.Close()
+}
+
+// guest is the client for a box's hutch-guest: vsock for a VM, TCP with the
+// machine's token for a sandbox, through the address DNATed to it.
+func (w *Worker) guest(b *Box) *guestproto.Client {
+	if b.GVisor != "" {
+		return &guestproto.Client{Addr: net.JoinHostPort(b.ReachIP(), fmt.Sprint(guestproto.Port)), Token: w.token}
+	}
+	return &guestproto.Client{UDSPath: w.vsockPath(b.ID)}
+}
+
+// stop ends a box's VM or sandbox.
+func (w *Worker) stop(b *Box) {
+	if b.GVisor != "" {
+		w.killSandbox(b)
+		return
+	}
+	w.killFirecracker(b)
+}
+
+// coldStart boots a box from its disk alone, on this worker's backend.
+func (w *Worker) coldStart(ctx context.Context, b *Box) error {
+	b.BaseMem, b.Class, b.FCVersion, b.GVisor = "", w.Class(), w.FCVersion, w.GVisor
+	if b.GVisor != "" {
+		return w.startSandbox(ctx, b, "", 60*time.Second)
+	}
+	return w.start(ctx, b, map[string]string{
+		jailKernel: w.kernelPath(),
+		jailRootfs: filepath.Join(w.boxDir(b.ID), "rootfs.ext4"),
+	}, func(m *vm) error { return m.coldBoot(ctx, w.vendor) }, 60*time.Second)
 }

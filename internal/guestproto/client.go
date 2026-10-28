@@ -67,7 +67,7 @@ func (c *Client) dialOnce(ctx context.Context) (net.Conn, error) {
 func ReadLine(r io.Reader) (string, error) {
 	var b strings.Builder
 	var c [1]byte
-	for b.Len() < 64 {
+	for b.Len() < 256 {
 		if _, err := r.Read(c[:]); err != nil {
 			return "", err
 		}

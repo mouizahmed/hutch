@@ -31,6 +31,14 @@ func writePages(t *testing.T, path string, size int, pages map[int][]byte) {
 
 func TestApplyDiff(t *testing.T) {
 	dir := t.TempDir()
+	if f, err := os.Create(filepath.Join(dir, "probe")); err == nil {
+		f.Truncate(pageSize)
+		err := unix.Fallocate(int(f.Fd()), unix.FALLOC_FL_PUNCH_HOLE|unix.FALLOC_FL_KEEP_SIZE, 0, pageSize)
+		f.Close()
+		if err != nil {
+			t.Skipf("this file system can't punch holes (gVisor's can't): %v", err)
+		}
+	}
 	base, diff := filepath.Join(dir, "base"), filepath.Join(dir, "diff")
 	writePages(t, base, 8, map[int][]byte{0: page(1), 1: page(2), 2: page(3), 5: page(4)})
 	// Pages 1-3 changed (2 to zero), page 6 written for the first time; 0 and 5 untouched.

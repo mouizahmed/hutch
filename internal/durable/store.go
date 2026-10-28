@@ -58,6 +58,7 @@ type BoxInfo struct {
 	VCPUs     int    `json:"vcpus"`
 	MemMiB    int    `json:"mem_mib"`
 	FCVersion string `json:"fc_version"`
+	GVisor    string `json:"gvisor,omitempty"`
 	Class     string `json:"snapshot_class"`
 	// Archived boxes keep only their disk; waking them is a cold boot.
 	Archived bool `json:"archived,omitempty"`

@@ -220,6 +220,9 @@ func (w *Worker) ConsoleInput(id string) (*os.File, error) {
 	if !w.Alive(b) {
 		return nil, fmt.Errorf("box %q is not running", id)
 	}
+	if b.GVisor != "" {
+		return nil, fmt.Errorf("gVisor boxes have no serial console; hutch shell %s opens a root shell with --user root", id)
+	}
 	f, err := os.OpenFile(w.consoleInPath(id), os.O_WRONLY|syscall.O_NONBLOCK, 0)
 	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENXIO) {
 		return nil, fmt.Errorf("box %q was started without console input; sleep and wake it first", id)

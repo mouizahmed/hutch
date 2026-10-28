@@ -30,7 +30,12 @@ import (
 type Worker struct {
 	Root      string
 	FCVersion string
-	vendor    string
+	// GVisor is the gVisor version boxes run in on a machine without /dev/kvm; it is
+	// empty where boxes are Firecracker VMs. The backend follows the host.
+	GVisor string
+	vendor string
+	// token is what hutchd presents to hutch-guest in gVisor boxes, over TCP.
+	token string
 }
 
 type State string
@@ -66,6 +71,8 @@ type Box struct {
 	Allow []string `json:"allow,omitempty"`
 	// Store says where the box's snapshots go in the bucket; nil for boxes never stored.
 	Store *Store `json:"store,omitempty"`
+	// GVisor is the gVisor version a gVisor box runs (FCVersion is empty then).
+	GVisor string `json:"gvisor,omitempty"`
 	// Uploaded is the generation the bucket last stored.
 	Uploaded int `json:"uploaded,omitempty"`
 	// Checkpointed is when the box's state was last captured: a snapshot, or the start
@@ -94,9 +101,20 @@ func New(root, fcVersion string) (*Worker, error) {
 		return nil, err
 	}
 	w := &Worker{Root: root, FCVersion: fcVersion, vendor: vendor}
-	for _, f := range []string{"firecracker", "jailer"} {
-		if _, err := os.Stat(w.fcBin("", f)); err != nil {
-			return nil, fmt.Errorf("firecracker %s not installed: %w", fcVersion, err)
+	if _, err := os.Stat("/dev/kvm"); err == nil {
+		for _, f := range []string{"firecracker", "jailer"} {
+			if _, err := os.Stat(w.fcBin("", f)); err != nil {
+				return nil, fmt.Errorf("firecracker %s not installed: %w", fcVersion, err)
+			}
+		}
+	} else {
+		v := w.gvisorVersions()
+		if len(v) == 0 {
+			return nil, errors.New("no /dev/kvm, and gVisor isn't installed: run hutch setup again")
+		}
+		w.FCVersion, w.GVisor = "", v[len(v)-1]
+		if w.token, err = guestToken(root); err != nil {
+			return nil, err
 		}
 	}
 	if err := hostNAT(); err != nil {
@@ -105,13 +123,24 @@ func New(root, fcVersion string) (*Worker, error) {
 	return w, os.MkdirAll(filepath.Join(root, "boxes"), 0o755)
 }
 
-// Class is the snapshot class new boxes get: the newest Firecracker's.
-func (w *Worker) Class() string { return firecracker.SnapshotClass(w.vendor, w.FCVersion) }
+// Class is the snapshot class new boxes get: the newest Firecracker's or gVisor's.
+func (w *Worker) Class() string {
+	if w.GVisor != "" {
+		return gvisorClass(w.vendor, w.GVisor)
+	}
+	return firecracker.SnapshotClass(w.vendor, w.FCVersion)
+}
 
 // Classes lists every snapshot class the worker restores warm: one per installed
-// Firecracker version, kept side by side so old snapshots outlive upgrades.
+// Firecracker or gVisor version, kept side by side so old snapshots outlive upgrades.
 func (w *Worker) Classes() []string {
 	var out []string
+	if w.GVisor != "" {
+		for _, v := range w.gvisorVersions() {
+			out = append(out, gvisorClass(w.vendor, v))
+		}
+		return out
+	}
 	for _, v := range w.versions() {
 		out = append(out, firecracker.SnapshotClass(w.vendor, v))
 	}
@@ -240,7 +269,7 @@ func (w *Worker) newNetwork(allow []string) (slot, error) {
 			if _, err := os.Stat(slot(s).netnsPath()); err == nil {
 				continue
 			}
-			return slot(s), slot(s).setup(slot(s).uid(), allow)
+			return slot(s), slot(s).setup(slot(s).uid(), allow, w.GVisor != "")
 		}
 	}
 	return 0, errors.New("no free network slots")

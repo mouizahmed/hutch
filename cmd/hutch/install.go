@@ -232,8 +232,10 @@ func checkMachine(p probe) error {
 	if err := check(fcSHA256[arch] != "", "architecture", arch, "Hutch runs on x86_64 and aarch64", true); err != nil {
 		return err
 	}
-	if err := check(p.get("kvm") == "yes", "/dev/kvm", "", "boxes need KVM until gVisor support lands: a dedicated server, a VPS plan with nested virtualization, or your own hardware with VT-x or AMD-V on", true); err != nil {
-		return err
+	if p.get("kvm") == "yes" {
+		check(true, "/dev/kvm", "boxes are Firecracker VMs", "", false)
+	} else {
+		fmt.Println("  · /dev/kvm: none, so boxes are gVisor sandboxes: builds run about 1.5× slower than in a VM, and isolation is gVisor's rather than a VM's")
 	}
 	if err := check(kernelAtLeast(p.get("kernel"), 6, 1), "kernel", p.get("kernel"), "Linux 6.1 or later", true); err != nil {
 		return err
@@ -361,7 +363,8 @@ func install(r remote, p probe, a artifacts, st storagePlan, start bool) error {
 	}
 	fc := "/var/lib/hutch/firecracker/" + fcVersion
 	tgz := fmt.Sprintf("firecracker-%s-%s.tgz", fcVersion, arch)
-	if err := step("Firecracker "+fcVersion, r.run(fmt.Sprintf(`
+	if p.get("kvm") == "yes" {
+		if err := step("Firecracker "+fcVersion, r.run(fmt.Sprintf(`
 if [ ! -x %[1]s/firecracker ]; then
   t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
   curl -fsSL -o "$t/fc.tgz" https://github.com/firecracker-microvm/firecracker/releases/download/%[2]s/%[3]s
@@ -371,7 +374,8 @@ if [ ! -x %[1]s/firecracker ]; then
   sudo install -m 755 "$t/release-%[2]s-%[5]s/firecracker-%[2]s-%[5]s" %[1]s/firecracker
   sudo install -m 755 "$t/release-%[2]s-%[5]s/jailer-%[2]s-%[5]s" %[1]s/jailer
 fi`, fc, fcVersion, tgz, fcSHA256[arch], arch))); err != nil {
-		return err
+			return err
+		}
 	}
 	gv := "/var/lib/hutch/gvisor/" + gvisorVersion
 	if err := step("gVisor "+gvisorVersion, r.run(fmt.Sprintf(`

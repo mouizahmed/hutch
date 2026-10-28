@@ -46,6 +46,12 @@ func (s slot) inputDrop() []string {
 
 func (s slot) netnsPath() string { return "/var/run/netns/" + s.netns() }
 
+// A gVisor box's sandbox sits in its own netns behind the slot's: gVisor's network
+// stack takes over every interface in its netns, so the slot's veth, NAT, and
+// rules can't share one with it. The box netns holds only eth0, at the guest address.
+func (s slot) boxNetns() string     { return s.netns() + "b" }
+func (s slot) boxNetnsPath() string { return "/var/run/netns/" + s.boxNetns() }
+
 func run(name string, args ...string) error {
 	var stderr bytes.Buffer
 	cmd := exec.Command(name, args...)
@@ -134,7 +140,9 @@ func inRanges(ip net.IP, cidrs []string) bool {
 	return false
 }
 
-func (s slot) setup(tapUID int, allow []string) error {
+// setup creates the slot's netns, with tap0 for a Firecracker VM, or with tap0 a
+// veth to the box netns of a gVisor sandbox.
+func (s slot) setup(tapUID int, allow []string, gvisor bool) error {
 	if _, err := os.Stat(s.netnsPath()); err == nil {
 		s.teardown()
 	}
@@ -147,15 +155,26 @@ addr add %[4]s/31 dev %[2]s
 link set %[2]s up
 `, ns, s.vethHost(), s.vethPeer(), s.hostIP())
 
+	tap := fmt.Sprintf("tuntap add dev tap0 mode tap user %d", tapUID)
+	if gvisor {
+		hostLinks += "netns add " + s.boxNetns() + "\n"
+		tap = "link add tap0 type veth peer name eth0 netns " + s.boxNetns()
+	}
 	nsLinks := fmt.Sprintf(`link set lo up
-tuntap add dev tap0 mode tap user %d
+%s
 link set tap0 address %s
 addr add %s/30 dev tap0
 link set tap0 up
 addr add %s/31 dev %s
 link set %s up
 route add default via %s
-`, tapUID, tapMAC, tapIP, s.peerIP(), s.vethPeer(), s.vethPeer(), s.hostIP())
+`, tap, tapMAC, tapIP, s.peerIP(), s.vethPeer(), s.vethPeer(), s.hostIP())
+	boxLinks := fmt.Sprintf(`link set lo up
+link set eth0 address %s
+addr add %s/30 dev eth0
+link set eth0 up
+route add default via %s
+`, guestMAC, guestIP, tapIP)
 
 	nsRules := fmt.Sprintf(`*nat
 -A POSTROUTING -o %s -s %s -j SNAT --to %s
@@ -176,6 +195,12 @@ COMMIT
 	steps := []func() error{
 		func() error { return runInput(hostLinks, "ip", "-batch", "-") },
 		func() error { return runInput(nsLinks, "ip", "-n", ns, "-batch", "-") },
+		func() error {
+			if !gvisor {
+				return nil
+			}
+			return runInput(boxLinks, "ip", "-n", s.boxNetns(), "-batch", "-")
+		},
 		func() error {
 			return runInput(nsRules, "ip", "netns", "exec", ns, "sh", "-c", "sysctl -qw net.ipv4.ip_forward=1 && iptables-restore --noflush")
 		},
@@ -199,5 +224,5 @@ func (s slot) teardown() {
 		run("iptables", "-D", "FORWARD", "-o", s.vethHost(), "-j", "ACCEPT")
 		run("iptables", append([]string{"-D"}, s.inputDrop()...)...)
 	}
-	runInput(fmt.Sprintf("route del %s/32\nlink del %s\nnetns del %s\n", s.ReachIP(), s.vethHost(), s.netns()), "ip", "-force", "-batch", "-")
+	runInput(fmt.Sprintf("route del %s/32\nlink del %s\nnetns del %s\nnetns del %s\n", s.ReachIP(), s.vethHost(), s.netns(), s.boxNetns()), "ip", "-force", "-batch", "-")
 }
