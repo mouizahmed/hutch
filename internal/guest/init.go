@@ -4,6 +4,7 @@ package guest
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -14,11 +15,9 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
-)
 
-// ServicesPath lists the project's services, one shell command per line, started
-// as dev; a SIGHUP to PID 1 applies changes.
-const ServicesPath = "/etc/hutch/services"
+	"github.com/mouizahmed/hutch/internal/guestproto"
+)
 
 // TokenEnv carries the token TCP clients must present; init hands it to serve only.
 const TokenEnv = "HUTCH_GUEST_TOKEN"
@@ -31,6 +30,7 @@ type service struct {
 	tty   string // run as a login shell with this terminal as its controlling tty
 	uid   int
 	pid   int
+	since time.Time
 	fails int
 	next  time.Time
 }
@@ -46,7 +46,7 @@ func Init(listen, backend string) error {
 		unix.Sethostname([]byte(strings.TrimSpace(string(b))))
 	}
 	loopbackUp()
-	for _, d := range []string{"/run/sshd", "/var/lib/hutch-guest", "/var/log/hutch"} {
+	for _, d := range []string{"/run/sshd", "/run/hutch", "/var/lib/hutch-guest", "/var/log/hutch"} {
 		os.MkdirAll(d, 0o755)
 	}
 	os.Chmod("/tmp", 0o1777)
@@ -87,25 +87,32 @@ func Init(listen, backend string) error {
 	defer tick.Stop()
 	for {
 		now := time.Now()
+		changed := false
 		for _, s := range all {
 			if s.pid == 0 && !now.Before(s.next) {
+				changed = true
 				if pid, err := s.start(); err != nil {
 					log.Printf("start %s: %v", s.name, err)
 					s.backoff(now)
 				} else {
-					s.pid = pid
+					s.pid, s.since = pid, now
 					running[pid] = s
 				}
 			}
+		}
+		if changed {
+			writeStatus(all)
 		}
 		select {
 		case sig := <-sigs:
 			switch sig {
 			case syscall.SIGCHLD:
 				reap(running)
+				writeStatus(all)
 			case syscall.SIGHUP:
 				all = append(append([]*service{}, fixed...), readServices(all)...)
 				stopRemoved(running, all)
+				writeStatus(all)
 			default:
 				shutdown()
 				return nil
@@ -153,6 +160,17 @@ func (s *service) start() (int, error) {
 	return syscall.ForkExec(s.argv[0], s.argv, attr)
 }
 
+func writeStatus(all []*service) {
+	var st []guestproto.ServiceStatus
+	for _, s := range all {
+		st = append(st, guestproto.ServiceStatus{Name: s.name, PID: s.pid, UID: s.uid, Since: s.since, Fails: s.fails})
+	}
+	data, _ := json.Marshal(st)
+	if os.WriteFile(guestproto.InitStatusPath+".tmp", data, 0o644) == nil {
+		os.Rename(guestproto.InitStatusPath+".tmp", guestproto.InitStatusPath)
+	}
+}
+
 // backoff delays a failing service's next start: 1 s, doubling to a minute.
 func (s *service) backoff(now time.Time) {
 	s.fails++
@@ -178,6 +196,9 @@ func reap(running map[int]*service) {
 			continue // removed from the services file
 		}
 		log.Printf("%s exited (%s); restarting", s.name, describe(ws))
+		if time.Since(s.since) > time.Minute {
+			s.fails = 0
+		}
 		s.backoff(time.Now())
 	}
 }
@@ -197,7 +218,7 @@ func readServices(prev []*service) []*service {
 			byLine[s.name] = s
 		}
 	}
-	f, err := os.Open(ServicesPath)
+	f, err := os.Open(guestproto.ServicesPath)
 	if err != nil {
 		return nil
 	}

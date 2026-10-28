@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"log"
 	"path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -18,9 +20,6 @@ import (
 	"github.com/mouizahmed/hutch/internal/guestproto"
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
-
-// Every template build starts from this worker image.
-const baseImage = "base"
 
 // The repository lives at /workspace in every box; the recipe is .hutch/ in it.
 const workspace = "/workspace"
@@ -99,6 +98,12 @@ func (s *Server) build(ctx context.Context, proj api.Project, p api.TemplatePara
 			return api.Box{}, err
 		}
 	}
+	if _, ok := p.Recipe["verify.sh"]; !ok {
+		if _, old := p.Recipe["setup.sh"]; old {
+			return api.Box{}, errors.New(".hutch/setup.sh is replaced by .hutch/Dockerfile: hutch init converts it")
+		}
+		return api.Box{}, errors.New("the recipe needs .hutch/verify.sh at that commit (hutch init writes a prompt to draft it)")
+	}
 	b, w, err := s.bootTemplate(ctx, proj, p, id, stdout, stderr)
 	if err != nil {
 		return b, err
@@ -110,9 +115,6 @@ func (s *Server) build(ctx context.Context, proj api.Project, p api.TemplatePara
 	step(stdout, "checkout %.12s", p.Commit)
 	if err := s.run(ctx, w, id, api.ExecParams{Dir: workspace, Argv: []string{"git", "checkout", "-q", "--detach", p.Commit}}, stdout, stderr); err != nil {
 		return fail(fmt.Errorf("commit %.12s is not on the remote (push it first): %w", p.Commit, err))
-	}
-	if err := s.run(ctx, w, id, api.ExecParams{Dir: workspace, Argv: []string{"test", "-f", ".hutch/setup.sh", "-a", "-f", ".hutch/verify.sh"}}, io.Discard, io.Discard); err != nil {
-		return fail(errors.New("the recipe needs .hutch/setup.sh and .hutch/verify.sh at that commit (hutch init writes a prompt to draft them)"))
 	}
 
 	secrets, digest, err := s.projectSecretFiles(proj.ID)
@@ -131,14 +133,21 @@ func (s *Server) build(ctx context.Context, proj api.Project, p api.TemplatePara
 	go func() { peaks <- s.samplePeaks(sampleCtx, w, id) }()
 	defer stopSampling()
 
-	step(stdout, "setup.sh (as root)")
-	if err := s.run(ctx, w, id, api.ExecParams{User: "root", Dir: workspace, Env: []string{"DEBIAN_FRONTEND=noninteractive"},
-		Argv: []string{"bash", "-eo", "pipefail", ".hutch/setup.sh"}}, stdout, stderr); err != nil {
-		return fail(err)
-	}
-
 	if err := s.installAgents(ctx, w, id, stdout, stderr); err != nil {
 		return fail(err)
+	}
+	if _, ok := p.Recipe["services"]; ok {
+		step(stdout, "services")
+		if err := s.run(ctx, w, id, api.ExecParams{User: "root", Argv: []string{"sh", "-c",
+			"install -m644 " + workspace + "/.hutch/services " + guestproto.ServicesPath + " && kill -HUP 1"}}, stdout, stderr); err != nil {
+			return fail(err)
+		}
+	}
+	if _, ok := p.Recipe["on-create.sh"]; ok {
+		step(stdout, "on-create.sh (as dev)")
+		if err := s.run(ctx, w, id, api.ExecParams{Dir: workspace, Argv: []string{"bash", "-eo", "pipefail", ".hutch/on-create.sh"}}, stdout, stderr); err != nil {
+			return fail(err)
+		}
 	}
 
 	step(stdout, "verify.sh (as dev)")
@@ -151,8 +160,9 @@ func (s *Server) build(ctx context.Context, proj api.Project, p api.TemplatePara
 	s.store.setPeaks(proj.ID, pk)
 	fmt.Fprintf(stdout, "\nPeak use: %.1f GB memory, %.1f vCPUs (of %d vCPU, %.0f GB)\n", float64(pk.MemMiB)/1024, pk.CPUs, p.VCPUs, float64(p.MemMiB)/1024)
 
-	// Whatever verify.sh left running would be running in every box.
-	s.run(ctx, w, id, api.ExecParams{User: "root", Argv: []string{"pkill", "-KILL", "-u", "dev"}}, io.Discard, io.Discard)
+	// Whatever verify.sh left running would be running in every box; the services
+	// (each in its own session, started by init) stay.
+	s.run(ctx, w, id, api.ExecParams{User: "root", Argv: []string{"sh", "-c", stopLeftovers}}, io.Discard, io.Discard)
 
 	if err := s.store.putMeta(id, boxMeta{project: proj.ID, kind: api.BoxTemplate, commit: p.Commit, verified: true, secrets: digest}); err != nil {
 		return b, err
@@ -161,8 +171,12 @@ func (s *Server) build(ctx context.Context, proj api.Project, p api.TemplatePara
 	return b, nil
 }
 
-// bootTemplate cold boots the project's template box from the base image with the
-// repository cloned at /workspace.
+// stopLeftovers kills dev's processes outside the sessions of init's services.
+const stopLeftovers = `keep=" $(sed 's/},{/}\n{/g' ` + guestproto.InitStatusPath + ` 2>/dev/null | grep '"uid":1000' | sed 's/.*"pid":\([0-9]*\).*/\1/' | tr '\n' ' ') "
+for p in $(pgrep -u dev); do s=$(ps -o sid= -p $p | tr -d ' '); case "$keep" in *" $s "*) ;; *) kill -KILL $p 2>/dev/null;; esac; done; true`
+
+// bootTemplate cold boots the project's template box from its image (built first
+// when the recipe changed) with the repository cloned at /workspace.
 func (s *Server) bootTemplate(ctx context.Context, proj api.Project, p api.TemplateParams, id string, stdout, stderr io.Writer) (api.Box, *workerConn, error) {
 	n := need{memMiB: p.MemMiB, vcpus: p.VCPUs}
 	if err := s.checkFits(ctx, n); err != nil {
@@ -173,8 +187,12 @@ func (s *Server) bootTemplate(ctx context.Context, proj api.Project, p api.Templ
 		return api.Box{}, nil, err
 	}
 	defer release()
+	img, err := s.buildImage(ctx, w, proj, p, stdout)
+	if err != nil {
+		return api.Box{}, nil, err
+	}
 	step(stdout, "boot %s (%d vCPU, %d MiB)", id, p.VCPUs, p.MemMiB)
-	b, err := s.callForBox(ctx, w, api.BoxBoot, api.BootParams{ID: id, Image: baseImage, VCPUs: p.VCPUs, MemMiB: p.MemMiB, DiskBytes: p.DiskBytes, Idle: p.Idle, Allow: p.Allow})
+	b, err := s.callForBox(ctx, w, api.BoxBoot, api.BootParams{ID: id, Image: img, VCPUs: p.VCPUs, MemMiB: p.MemMiB, DiskBytes: p.DiskBytes, Idle: p.Idle, Allow: p.Allow})
 	if err != nil {
 		return b, nil, err
 	}
@@ -193,6 +211,47 @@ func (s *Server) bootTemplate(ctx context.Context, proj api.Project, p api.Templ
 		return b, w, fmt.Errorf("clone: %w", err)
 	}
 	return b, w, nil
+}
+
+// buildImage builds the template's image on w: the recipe's Dockerfile, the
+// published image the project names, or neither, the default image. An image is
+// named after what it's built from, so an unchanged recipe reuses it.
+func (s *Server) buildImage(ctx context.Context, w *workerConn, proj api.Project, p api.TemplateParams, out io.Writer) (string, error) {
+	cfg, err := s.settings()
+	if err != nil {
+		return "", err
+	}
+	bp := api.ImageBuildParams{Name: api.DefaultImage, CacheBytes: cfg.Size("machine.build_cache"), Reuse: true}
+	switch {
+	case p.Image != "":
+		bp.Name, bp.Ref = fmt.Sprintf("%s-%x", proj.Slug, sha256.Sum256([]byte(p.Image)))[:len(proj.Slug)+13], p.Image
+		step(out, "image %s", p.Image)
+	case p.Recipe["Dockerfile"] != nil:
+		h := sha256.New()
+		names := make([]string, 0, len(p.Recipe))
+		for n := range p.Recipe {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			fmt.Fprintf(h, "%s\x00%d\x00", n, len(p.Recipe[n]))
+			h.Write(p.Recipe[n])
+		}
+		bp.Name, bp.Files = fmt.Sprintf("%s-%x", proj.Slug, h.Sum(nil))[:len(proj.Slug)+13], p.Recipe
+		step(out, "image from .hutch/Dockerfile")
+	default:
+		return api.DefaultImage, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, p.BuildTimeout)
+	defer cancel()
+	var img api.Image
+	if err := rpc.CallOutput(ctx, w.sess, api.ImageBuild, bp, &img, out, out); err != nil {
+		return "", fmt.Errorf("image: %w", err)
+	}
+	if len(img.Sources) > 0 {
+		fmt.Fprintf(out, "%s, from %s\n", img.Name, strings.Join(img.Sources, ", "))
+	}
+	return img.Name, nil
 }
 
 func (s *Server) templateSnapshot(ctx context.Context, params json.RawMessage, out *rpc.Out) (any, error) {
@@ -225,7 +284,7 @@ func (s *Server) templateSnapshot(ctx context.Context, params json.RawMessage, o
 		return nil, err
 	}
 
-	step(stdout, "wait for systemd to be quiet")
+	step(stdout, "wait for services")
 	if err := s.waitQuiet(ctx, w, id, p.QuietTimeout); err != nil {
 		return nil, err
 	}
@@ -271,23 +330,30 @@ func (s *Server) templateSnapshot(ctx context.Context, params json.RawMessage, o
 	return t, nil
 }
 
-// waitQuiet waits until systemd has no queued jobs and no transient units: anything
-// pending in the snapshot would run again in every box restored from it.
+// waitQuiet waits until every service init runs has been up a few seconds: the
+// snapshot has them running, not starting.
 func (s *Server) waitQuiet(ctx context.Context, w *workerConn, box string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
 		var out bytes.Buffer
-		err := s.run(ctx, w, box, api.ExecParams{User: "root", Argv: []string{"sh", "-c",
-			"systemctl list-jobs --no-legend --no-pager; ls -A /run/systemd/transient 2>/dev/null || true"}}, &out, io.Discard)
-		if err != nil {
+		if err := s.run(ctx, w, box, api.ExecParams{User: "root", Argv: []string{"cat", guestproto.InitStatusPath}}, &out, io.Discard); err != nil {
 			return err
 		}
-		pending := strings.TrimSpace(out.String())
-		if pending == "" {
+		var st []guestproto.ServiceStatus
+		if err := json.Unmarshal(out.Bytes(), &st); err != nil {
+			return fmt.Errorf("init status: %w", err)
+		}
+		var down []string
+		for _, sv := range st {
+			if sv.PID == 0 || time.Since(sv.Since) < 3*time.Second {
+				down = append(down, fmt.Sprintf("%s (restarted %d times; see /var/log/hutch)", sv.Name, sv.Fails))
+			}
+		}
+		if len(down) == 0 {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("systemd still has queued jobs or transient units after %s; they would run in every box:\n%s", timeout, pending)
+			return fmt.Errorf("services not up after %s; every box would start with them down:\n  %s", timeout, strings.Join(down, "\n  "))
 		}
 		select {
 		case <-ctx.Done():

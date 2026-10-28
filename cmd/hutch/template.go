@@ -97,7 +97,37 @@ func templateParams(repo *config.Repo, cfg *config.Config, needCommit bool) (api
 		return p, fmt.Errorf("HEAD (%.12s) is not on the remote; push it first", commit)
 	}
 	p.Commit = commit
+	p.Image = cfg.String("image")
+	if p.Recipe, err = recipeAt(repo.Root, commit); err != nil {
+		return p, err
+	}
 	return p, nil
+}
+
+// maxRecipe caps .hutch/, which goes to the machine as the image's build context.
+const maxRecipe = 8 << 20
+
+// recipeAt reads .hutch/ at a commit, file name → content.
+func recipeAt(root, commit string) (map[string][]byte, error) {
+	list, err := git(root, "ls-tree", "-r", "--name-only", commit, "--", ".hutch")
+	if err != nil {
+		return nil, err
+	}
+	files, total := map[string][]byte{}, 0
+	for _, path := range strings.Split(list, "\n") {
+		if path == "" {
+			continue
+		}
+		out, err := exec.Command("git", "-C", root, "show", commit+":"+path).Output()
+		if err != nil {
+			return nil, fmt.Errorf("git show %s: %w", path, err)
+		}
+		if total += len(out); total > maxRecipe {
+			return nil, fmt.Errorf(".hutch/ is over %d MB; it's the image's build context, so keep large files out of it", maxRecipe>>20)
+		}
+		files[strings.TrimPrefix(path, ".hutch/")] = out
+	}
+	return files, nil
 }
 
 func initCommand() *cobra.Command {
@@ -126,9 +156,17 @@ func initCommand() *cobra.Command {
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				return err
 			}
+			if converted, err := convertSetup(dir); err != nil {
+				return err
+			} else if converted {
+				fmt.Println("\nWrote .hutch/Dockerfile from .hutch/setup.sh, which templates no longer run directly.\n" +
+					"  Steps that need the repository (its dependencies, a build) fail in the image:\n" +
+					"  move them to .hutch/on-create.sh, which runs as dev in /workspace after checkout.\n" +
+					"  Steps that enable systemd services: put the service's command in .hutch/services.")
+			}
 			var prompt bytes.Buffer
 			err = template.Must(template.New("setup").Parse(setupPrompt)).Execute(&prompt, map[string]string{
-				"Slug": proj.Slug, "TemplateBox": proj.Slug + "-template", "Node": "24"})
+				"Slug": proj.Slug, "TemplateBox": proj.Slug + "-template", "Node": "24", "DefaultRef": api.DefaultImageRef, "Arch": "x86_64 or arm64"})
 			if err != nil {
 				return err
 			}
@@ -153,6 +191,26 @@ func initCommand() *cobra.Command {
 			return nil
 		}),
 	}
+}
+
+// convertedDockerfile runs a project's old setup.sh as an image build step.
+const convertedDockerfile = `FROM ` + api.DefaultImageRef + `
+# Converted from setup.sh by hutch init. It runs without the repository: install
+# the project's own dependencies in on-create.sh.
+COPY setup.sh /tmp/hutch-setup.sh
+RUN cd /tmp && DEBIAN_FRONTEND=noninteractive bash -eo pipefail /tmp/hutch-setup.sh && rm /tmp/hutch-setup.sh
+`
+
+// convertSetup writes a Dockerfile that runs setup.sh when a recipe has setup.sh
+// and no Dockerfile.
+func convertSetup(dir string) (bool, error) {
+	if _, err := os.Stat(filepath.Join(dir, "setup.sh")); err != nil {
+		return false, nil
+	}
+	if _, err := os.Stat(filepath.Join(dir, "Dockerfile")); err == nil {
+		return false, nil
+	}
+	return true, os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(convertedDockerfile), 0o644)
 }
 
 func projectCommands() *cobra.Command {
@@ -310,7 +368,7 @@ func templateCommands() *cobra.Command {
 }
 
 // templatePrompt tells an agent on the template box what its changes are for.
-const templatePrompt = `You are in this project's template box. Hutch builds every box of the project from the recipe in .hutch/: setup.sh runs as root in a fresh VM, verify.sh must pass, and on-create.sh runs in each new box. Make this change in the recipe, try it here, and commit it on the current branch (hutch/template), which Hutch pushes. Anything changed outside the recipe is thrown away at the next build.
+const templatePrompt = `You are in this project's template box. Hutch builds every box of the project from the recipe in .hutch/: an image from .hutch/Dockerfile (its build context is .hutch/), services from .hutch/services, then on-create.sh and verify.sh as dev in /workspace; on-create.sh also runs in each new box. Make this change in the recipe, try the commands here, and commit it on the current branch (hutch/template), which Hutch pushes. Anything changed outside the recipe is thrown away at the next build.
 
 `
 

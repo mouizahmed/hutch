@@ -22,6 +22,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/mouizahmed/hutch/internal/api"
 )
 
 // Under Root (/var/lib/hutch):
@@ -33,7 +35,9 @@ import (
 const Socket = "/run/hutch/buildkit.sock"
 
 // Default is the image projects without a Dockerfile use.
-const Default = "base"
+const Default = api.DefaultImage
+
+const DefaultRef = api.DefaultImageRef
 
 //go:embed default.Dockerfile
 var defaultDockerfile []byte
@@ -76,9 +80,16 @@ func (b *Builder) Get(name string) (Info, error) {
 	return info, json.Unmarshal(data, &info)
 }
 
-// BuildDefault builds Hutch's default image.
+// BuildDefault builds Hutch's default image, kept also as an OCI layout for project
+// images built FROM it.
 func (b *Builder) BuildDefault(ctx context.Context, out io.Writer) (Info, error) {
-	return b.Build(ctx, Default, map[string][]byte{"Dockerfile": defaultDockerfile}, out)
+	layout := filepath.Join(b.Dir(Default), "oci")
+	os.RemoveAll(layout)
+	if err := os.MkdirAll(b.Dir(Default), 0o755); err != nil {
+		return Info{}, err
+	}
+	return b.build(ctx, Default, map[string][]byte{"Dockerfile": defaultDockerfile}, out,
+		"--output", "type=oci,tar=false,dest="+layout)
 }
 
 // FromRef builds an image that is a published image plus Hutch's layer.
@@ -89,6 +100,32 @@ func (b *Builder) FromRef(ctx context.Context, name, ref string, out io.Writer) 
 // Build builds the Dockerfile in files (the build context: file name → content)
 // into image name, replacing any image of that name.
 func (b *Builder) Build(ctx context.Context, name string, files map[string][]byte, out io.Writer) (Info, error) {
+	layout := filepath.Join(b.Dir(Default), "oci")
+	digest, err := layoutDigest(layout)
+	if err != nil {
+		return Info{}, fmt.Errorf("the default image: %w (hutch machine upgrade builds it)", err)
+	}
+	return b.build(ctx, name, files, out, "--oci-layout", "hutch-default="+layout,
+		"--opt", "context:"+DefaultRef+"=oci-layout://hutch-default@"+digest)
+}
+
+func layoutDigest(layout string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(layout, "index.json"))
+	if err != nil {
+		return "", err
+	}
+	var index struct {
+		Manifests []struct {
+			Digest string `json:"digest"`
+		} `json:"manifests"`
+	}
+	if err := json.Unmarshal(data, &index); err != nil || len(index.Manifests) == 0 {
+		return "", fmt.Errorf("bad OCI layout %s", layout)
+	}
+	return index.Manifests[0].Digest, nil
+}
+
+func (b *Builder) build(ctx context.Context, name string, files map[string][]byte, out io.Writer, extra ...string) (Info, error) {
 	if err := b.ensure(ctx); err != nil {
 		return Info{}, fmt.Errorf("start buildkit: %w", err)
 	}
@@ -117,9 +154,10 @@ func (b *Builder) Build(ctx context.Context, name string, files map[string][]byt
 	}
 
 	// The tar export keeps owners and xattrs; a directory export would not.
-	build := exec.CommandContext(ctx, b.bin("buildctl"), "--addr", "unix://"+Socket, "build",
-		"--frontend", "dockerfile.v0", "--local", "context="+bctx, "--local", "dockerfile="+bctx,
-		"--opt", "attest:provenance=mode=min", "--output", "type=tar,dest=-", "--progress", "plain")
+	args := append([]string{"--addr", "unix://" + Socket, "build",
+		"--frontend", "dockerfile.v0", "--local", "context=" + bctx, "--local", "dockerfile=" + bctx,
+		"--opt", "attest:provenance=mode=min", "--output", "type=tar,dest=-", "--progress", "plain"}, extra...)
+	build := exec.CommandContext(ctx, b.bin("buildctl"), args...)
 	untar := exec.CommandContext(ctx, "tar", "-x", "-p", "--numeric-owner", "--xattrs", "--xattrs-include=*", "-f", "-", "-C", tree)
 	pipe, err := build.StdoutPipe()
 	if err != nil {

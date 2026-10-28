@@ -22,6 +22,7 @@ import (
 
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/guestproto"
+	"github.com/mouizahmed/hutch/internal/image"
 	"github.com/mouizahmed/hutch/internal/rpc"
 	"github.com/mouizahmed/hutch/internal/version"
 	"github.com/mouizahmed/hutch/internal/wire"
@@ -50,7 +51,7 @@ func Run(ctx context.Context, w *worker.Worker, name string, conn net.Conn) erro
 	go m.run(ctx, &server)
 	go m.watchPressure(ctx)
 	go u.run(ctx)
-	return rpc.Serve(ctx, sess, handlers(w, name, m, u), streamHandlers(w))
+	return rpc.Serve(ctx, sess, handlers(w, name, m, u, &image.Builder{Root: w.Root}), streamHandlers(w))
 }
 
 func toAPI(w *worker.Worker, b *worker.Box) api.Box {
@@ -69,7 +70,7 @@ func toStore(s *api.Store) *worker.Store {
 	return &worker.Store{Project: s.Project, Prefix: s.Prefix}
 }
 
-func handlers(w *worker.Worker, name string, m *monitor, u *uploader) rpc.Mux {
+func handlers(w *worker.Worker, name string, m *monitor, u *uploader, images *image.Builder) rpc.Mux {
 	box := func(f func(context.Context, json.RawMessage) (*worker.Box, error)) rpc.Handler {
 		return func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
 			b, err := f(ctx, params)
@@ -97,6 +98,33 @@ func handlers(w *worker.Worker, name string, m *monitor, u *uploader) rpc.Mux {
 		})
 	}
 	return rpc.Mux{
+		api.ImageBuild: func(ctx context.Context, params json.RawMessage, out *rpc.Out) (any, error) {
+			var p api.ImageBuildParams
+			if err := rpc.Decode(params, &p); err != nil {
+				return nil, err
+			}
+			info, err := images.Get(p.Name)
+			if err != nil || !p.Reuse {
+				stdout, _ := out.Writers()
+				images.CacheBytes = p.CacheBytes
+				switch {
+				case p.Ref != "":
+					info, err = images.FromRef(ctx, p.Name, p.Ref, stdout)
+				case p.Files != nil:
+					info, err = images.Build(ctx, p.Name, p.Files, stdout)
+				default:
+					info, err = images.BuildDefault(ctx, stdout)
+				}
+				if err != nil {
+					return nil, err
+				}
+			}
+			res := api.Image{Name: info.Name, Built: info.Built}
+			for _, s := range info.Sources {
+				res.Sources = append(res.Sources, s.String())
+			}
+			return res, nil
+		},
 		api.WorkerHello: func(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any, error) {
 			boxes, err := w.List()
 			if err != nil {

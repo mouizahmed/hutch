@@ -41,6 +41,8 @@ const (
 	UserLoginBox  = "user.login_box"
 	UserCapture   = "user.capture"
 
+	ImageBuild = "image.build" // hutchd only
+
 	ProjectInit      = "project.init"
 	TemplateBuild    = "template.build"
 	TemplateSnapshot = "template.snapshot"
@@ -319,6 +321,10 @@ type TemplateParams struct {
 	Allow        []string      `json:"allow,omitempty"`
 	BuildTimeout time.Duration `json:"build_timeout"`
 	QuietTimeout time.Duration `json:"quiet_timeout"`
+	// Recipe is .hutch/ at Commit, file name → content: the Dockerfile's build context.
+	Recipe map[string][]byte `json:"recipe,omitempty"`
+	// Image is a published image to build from instead of the recipe's Dockerfile.
+	Image string `json:"image,omitempty"`
 	// Worker pins the build to one worker: a template built for its snapshot class.
 	Worker string `json:"worker,omitempty"`
 }
@@ -506,6 +512,30 @@ type Worker struct {
 type Disk struct {
 	Total int64 `json:"total,omitempty"`
 	Free  int64 `json:"free,omitempty"`
+}
+
+// DefaultImage is the image projects without a Dockerfile use.
+const DefaultImage = "base"
+
+// DefaultImageRef is how a project's Dockerfile names the default image (FROM it).
+// Builds on the machine take it from the machine's own copy, never a registry.
+const DefaultImageRef = "ghcr.io/mouizahmed/hutch-default"
+
+// ImageBuildParams builds image Name: from a Dockerfile in Files (the build
+// context), from a published image Ref, or with neither, Hutch's default image.
+type ImageBuildParams struct {
+	Name       string            `json:"name"`
+	Files      map[string][]byte `json:"files,omitempty"`
+	Ref        string            `json:"ref,omitempty"`
+	CacheBytes int64             `json:"cache_bytes"`
+	// Reuse keeps an existing image of that name instead of building it again.
+	Reuse bool `json:"reuse,omitempty"`
+}
+
+type Image struct {
+	Name    string    `json:"name"`
+	Sources []string  `json:"sources"` // base images, pinned by digest
+	Built   time.Time `json:"built"`
 }
 
 type BootParams struct {

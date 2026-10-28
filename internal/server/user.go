@@ -257,6 +257,13 @@ func (s *Server) installAgents(ctx context.Context, w *workerConn, box string, s
 		if a.Install == "" || !a.Agent() {
 			continue
 		}
+		// An image that has the agent's command keeps its own.
+		if cmd := strings.Fields(a.Start); len(cmd) > 0 {
+			if s.run(ctx, w, box, api.ExecParams{Argv: []string{"sh", "-c", "command -v " + cmd[0]}}, io.Discard, io.Discard) == nil {
+				fmt.Fprintf(stdout, "%s: the image has %s\n", a.Name, cmd[0])
+				continue
+			}
+		}
 		step(stdout, "install %s", a.Name)
 		if err := s.run(ctx, w, box, api.ExecParams{Argv: []string{"bash", "-eo", "pipefail", "-c", a.Install}}, stdout, stderr); err != nil {
 			return fmt.Errorf("install %s: %w", a.Name, err)
@@ -292,7 +299,7 @@ func (s *Server) userLoginBox(ctx context.Context, params json.RawMessage, out *
 	rand.Read(suffix)
 	id := "login-" + hex.EncodeToString(suffix)
 	step(stdout, "boot %s", id)
-	b, err := s.callForBox(ctx, w, api.BoxBoot, api.BootParams{ID: id, Image: baseImage, VCPUs: 2, MemMiB: 4096,
+	b, err := s.callForBox(ctx, w, api.BoxBoot, api.BootParams{ID: id, Image: api.DefaultImage, VCPUs: 2, MemMiB: 4096,
 		Idle: api.Idle{Timeout: time.Hour}})
 	if err != nil {
 		return nil, err

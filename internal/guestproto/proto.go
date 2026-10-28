@@ -171,3 +171,18 @@ type ThreadInfo struct {
 }
 
 const ThreadsDir = "/var/lib/hutch-guest/threads"
+
+// ServicesPath lists a box's services, one shell command per line, run as dev by
+// its init; a SIGHUP to PID 1 applies changes.
+const ServicesPath = "/etc/hutch/services"
+
+// InitStatusPath is where a box's init keeps what it runs: a list of ServiceStatus.
+const InitStatusPath = "/run/hutch/init.json"
+
+type ServiceStatus struct {
+	Name  string    `json:"name"`
+	PID   int       `json:"pid"`
+	UID   int       `json:"uid"`
+	Since time.Time `json:"since,omitzero"`
+	Fails int       `json:"fails"`
+}
