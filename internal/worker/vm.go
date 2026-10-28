@@ -140,7 +140,7 @@ func (m *vm) coldBoot(ctx context.Context, vendor string) error {
 		func() error {
 			return m.api.PutBootSource(ctx, firecracker.BootSource{
 				KernelImagePath: jailKernel,
-				BootArgs:        "console=ttyS0 reboot=k panic=1 pci=off clocksource=kvm-clock " + bootIPArg,
+				BootArgs:        "console=ttyS0 reboot=k panic=1 pci=off clocksource=kvm-clock init=/usr/local/bin/hutch-guest " + bootIPArg,
 			})
 		},
 		func() error {

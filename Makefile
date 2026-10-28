@@ -1,7 +1,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X github.com/mouizahmed/hutch/internal/version.Version=$(VERSION)
 
-.PHONY: build linux test vet vuln check clean images kernel rootfs compat
+.PHONY: build linux test vet vuln check clean images kernel layer compat
 
 build:
 	go build -trimpath -ldflags '$(LDFLAGS)' -o bin/ ./cmd/...
@@ -26,13 +26,14 @@ check: vet test vuln
 compat:
 	docker run --rm --privileged -v $(CURDIR):/src -w /src golang@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 compat/run.sh
 
-images: kernel rootfs
+images: kernel layer
 
 kernel:
 	images/kernel/build.sh dist/images
 
-rootfs: linux
-	images/rootfs/build.sh dist/images bin/linux-amd64/hutch-guest
+# Static tmux and terminfo for images that lack them.
+layer:
+	images/layer/build.sh dist/images x86_64
 
 clean:
 	rm -rf bin dist

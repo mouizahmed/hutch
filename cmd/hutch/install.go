@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base32"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +40,22 @@ const fcVersion = "v1.17.0"
 var fcSHA256 = map[string]string{
 	"x86_64":  "06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558",
 	"aarch64": "e351ebe4f7a16b5873bbd51005d2e6767103cff4d5ebc829df2d3f95a93e2256",
+}
+
+// gVisor runs every image build step, and gVisor boxes on machines without KVM.
+const gvisorVersion = "20261012.0"
+
+var gvisorSHA256 = map[string]string{
+	"x86_64":  "21c1f60222826204e57eda551efc68fcdfd94a3ba2ef3e01d2a43d8bc4429e51",
+	"aarch64": "bc76435fe7ca56f918d9a61aa27013989fee26d5731ee0ed82b99bb1241faa20",
+}
+
+// BuildKit builds images from Dockerfiles on the machine.
+const buildkitVersion = "v0.34.0"
+
+var buildkitSHA256 = map[string]string{
+	"x86_64":  "14813b1fb2a40082114e6d386c6fc5e7dd5298176ce7ee1a18bc33e73e109ac3",
+	"aarch64": "0619ca3e3205a32ea2beb115e0242136e4a0716cc1917ba0ceaa4ef4d52382c9",
 }
 
 const hutchdUnit = `[Unit]
@@ -114,7 +132,8 @@ echo "root_free_kb=$(df -Pk / | awk 'NR==2{print $4}')"
 echo "hutch_fs=$(findmnt -n -o FSTYPE /var/lib/hutch 2>/dev/null || true)"
 lsblk -nrpbo NAME,TYPE,FSTYPE,SIZE,PKNAME 2>/dev/null | sed 's/^/blk=/' || true
 echo "hutchd=$(hutchd version 2>/dev/null | awk '{print $2}' || true)"
-if [ -d /var/lib/hutch/images/base ]; then echo base=yes; fi
+if [ -f /var/lib/hutch/images/base/image.json ]; then echo base=yes; fi
+for f in kernel/vmlinux layer/hutch-guest layer/tmux-$(uname -m) layer/terminfo.tar; do echo "sum_$(basename $f)=$(sudo -n sha256sum /var/lib/hutch/$f 2>/dev/null | cut -c1-64)"; done
 if [ -n "$(sudo -n ls /var/lib/hutch/state/hutch.db 2>/dev/null)" ]; then echo state=yes; fi
 `
 
@@ -274,9 +293,9 @@ func planStorage(p probe, disk string, imageGB int64, yes bool) (storagePlan, er
 	return storagePlan{imageSize: imageGB}, nil
 }
 
-// artifacts are what setup puts on the machine from this computer: hutchd and
-// the base image, built for the machine's architecture.
-type artifacts struct{ hutchd, kernel, rootfs string }
+// artifacts are what setup puts on the machine from this computer, built for its
+// architecture: hutchd, the Firecracker guest kernel, and Hutch's image layer.
+type artifacts struct{ hutchd, guest, kernel, tmux, terminfo string }
 
 func findArtifacts(arch, hutchd, images string) (artifacts, error) {
 	goarch := map[string]string{"x86_64": "amd64", "aarch64": "arm64"}[arch]
@@ -294,8 +313,9 @@ func findArtifacts(arch, hutchd, images string) (artifacts, error) {
 	if images == "" {
 		images = filepath.Join(dir, "..", "dist", "images")
 	}
-	a := artifacts{hutchd, filepath.Join(images, "vmlinux-"+arch), filepath.Join(images, "rootfs-"+arch+".ext4")}
-	for _, f := range []string{a.hutchd, a.kernel, a.rootfs} {
+	a := artifacts{hutchd, filepath.Join(filepath.Dir(hutchd), "hutch-guest"), filepath.Join(images, "vmlinux-"+arch),
+		filepath.Join(images, "tmux-"+arch), filepath.Join(images, "terminfo.tar")}
+	for _, f := range []string{a.hutchd, a.guest, a.kernel, a.tmux, a.terminfo} {
 		if _, err := os.Stat(f); err != nil {
 			return a, fmt.Errorf("%s: build it with make linux images, or pass --hutchd and --images", f)
 		}
@@ -353,20 +373,62 @@ if [ ! -x %[1]s/firecracker ]; then
 fi`, fc, fcVersion, tgz, fcSHA256[arch], arch))); err != nil {
 		return err
 	}
+	gv := "/var/lib/hutch/gvisor/" + gvisorVersion
+	if err := step("gVisor "+gvisorVersion, r.run(fmt.Sprintf(`
+if [ ! -x %[1]s/runsc ]; then
+  t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
+  curl -fsSL -o "$t/gvisor.tar.zstd" https://storage.googleapis.com/gvisor/releases/release/%[2]s/%[3]s/gvisor.tar.zstd
+  echo "%[4]s  $t/gvisor.tar.zstd" | sha256sum -c --quiet
+  sudo mkdir -p %[1]s.new && sudo tar -C %[1]s.new --zstd -xf "$t/gvisor.tar.zstd" && sudo mv %[1]s.new %[1]s
+fi`, gv, gvisorVersion, arch, gvisorSHA256[arch]))); err != nil {
+		return err
+	}
+	bk := "/var/lib/hutch/buildkit/" + buildkitVersion
+	goarch := map[string]string{"x86_64": "amd64", "aarch64": "arm64"}[arch]
+	if err := step("BuildKit "+buildkitVersion, r.run(fmt.Sprintf(`
+if [ ! -x %[1]s/bin/buildkitd ]; then
+  t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
+  curl -fsSL -o "$t/bk.tgz" https://github.com/moby/buildkit/releases/download/%[2]s/buildkit-%[2]s.linux-%[3]s.tar.gz
+  echo "%[4]s  $t/bk.tgz" | sha256sum -c --quiet
+  sudo mkdir -p %[1]s.new && sudo tar -C %[1]s.new -xzf "$t/bk.tgz" && sudo mv %[1]s.new %[1]s
+fi`, bk, buildkitVersion, goarch, buildkitSHA256[arch]))); err != nil {
+		return err
+	}
 	if err := step("hutchd", r.upload(a.hutchd, "/usr/local/bin/hutchd", 0o755)); err != nil {
 		return err
 	}
-	if p.get("base") != "yes" {
-		fmt.Println("  … base image (a few hundred MB compressed)")
-		if err := r.upload(a.kernel, "/var/lib/hutch/tmp/vmlinux", 0o644); err != nil {
+	files := []struct{ local, path string }{
+		{a.guest, "/var/lib/hutch/layer/hutch-guest"},
+		{a.tmux, "/var/lib/hutch/layer/tmux-" + arch},
+		{a.terminfo, "/var/lib/hutch/layer/terminfo.tar"},
+	}
+	if p.get("kvm") == "yes" {
+		files = append(files, struct{ local, path string }{a.kernel, "/var/lib/hutch/kernel/vmlinux"})
+	}
+	guestChanged := false
+	for _, f := range files {
+		sum, err := fileSHA256(f.local)
+		if err != nil {
 			return err
 		}
-		if err := r.upload(a.rootfs, "/var/lib/hutch/tmp/rootfs.ext4", 0o644); err != nil {
+		if p.get("sum_"+filepath.Base(f.path)) == sum {
+			continue
+		}
+		if err := r.upload(f.local, f.path, 0o755); err != nil {
 			return err
 		}
-		if err := step("base image", r.run("sudo hutchd image import base /var/lib/hutch/tmp/vmlinux /var/lib/hutch/tmp/rootfs.ext4 >/dev/null && sudo rm -rf /var/lib/hutch/tmp")); err != nil {
-			return err
+		guestChanged = guestChanged || filepath.Base(f.path) == "hutch-guest"
+	}
+	fmt.Println("  ✓ guest kernel and Hutch's image layer")
+	if p.get("base") != "yes" || guestChanged {
+		fmt.Println("  … the default image, built on the machine (a minute or two the first time)")
+		var out bytes.Buffer
+		c := r.cmd("sudo hutchd image build base")
+		c.Stdout, c.Stderr = &out, &out
+		if err := c.Run(); err != nil {
+			return fmt.Errorf("default image: %v\n%s", err, lastLines(out.String(), 30))
 		}
+		fmt.Println("  ✓ default image")
 	}
 	if err := step("group hutch, with "+p.get("user")+" in it", r.run(`sudo groupadd -f hutch && sudo usermod -aG hutch "$(id -un)"`)); err != nil {
 		return err
@@ -393,7 +455,7 @@ func (f *installFlags) register(c *cobra.Command, setup bool) {
 	c.Flags().StringVar(&f.disk, "disk", "", "blank disk to format for /var/lib/hutch (default: the only blank disk; none: an image file)")
 	c.Flags().Int64Var(&f.imageSize, "image-size", 0, "size in GB of /var/lib/hutch.img when there's no blank disk (default: 80% of free space)")
 	c.Flags().StringVar(&f.hutchd, "hutchd", "", "hutchd binary for the machine (default: linux-<arch>/hutchd next to this program)")
-	c.Flags().StringVar(&f.images, "images", "", "directory with vmlinux-<arch> and rootfs-<arch>.ext4 (default: dist/images in this checkout)")
+	c.Flags().StringVar(&f.images, "images", "", "directory with vmlinux-<arch>, tmux-<arch> and terminfo.tar (default: dist/images in this checkout)")
 	if setup {
 		c.Flags().BoolVar(&f.noBucket, "no-bucket", false, "no bucket for now (add one later with hutch machine bucket)")
 		c.Flags().BoolVar(&f.noNotify, "no-notify", false, "no ntfy notifications")
@@ -430,7 +492,8 @@ func setupCommand() *cobra.Command {
 		Use:   "setup <ssh-host>",
 		Short: "Set up your machine: hutchd, checks, notifications, and an optional bucket",
 		Long: `Set up a machine you reach over SSH to run your boxes. It checks the machine,
-installs what's missing (packages, Firecracker, hutchd as a service, the base image),
+installs what's missing (packages, Firecracker, gVisor, BuildKit, hutchd as a
+service, the default image),
 makes it your machine, offers ntfy notifications and a bucket, and ends with
 hutch doctor. Run it again to update hutchd; boxes and state are kept.`,
 		GroupID: "setup",
@@ -907,4 +970,25 @@ func checkPassphrase(cmd *cobra.Command, cfg bucket.Config, pass string) error {
 	}
 	_, err = r.Unwrap(pass)
 	return err
+}
+
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func lastLines(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
 }

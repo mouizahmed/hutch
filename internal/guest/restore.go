@@ -83,10 +83,19 @@ func newSSHHostKeys() error {
 	for _, f := range old {
 		os.Remove(f)
 	}
-	for _, t := range []string{"ed25519", "ecdsa"} {
+	// Made under temporary names and renamed, ed25519 last: sshd starts once it exists.
+	for _, t := range []string{"ecdsa", "ed25519"} {
 		key := "/etc/ssh/ssh_host_" + t + "_key"
-		if out, err := exec.Command("ssh-keygen", "-q", "-t", t, "-N", "", "-f", key).CombinedOutput(); err != nil {
+		os.Remove(key + ".tmp")
+		os.Remove(key + ".tmp.pub")
+		if out, err := exec.Command("ssh-keygen", "-q", "-t", t, "-N", "", "-f", key+".tmp").CombinedOutput(); err != nil {
 			return fmt.Errorf("%v: %s", err, out)
+		}
+		if err := os.Rename(key+".tmp.pub", key+".pub"); err != nil {
+			return err
+		}
+		if err := os.Rename(key+".tmp", key); err != nil {
+			return err
 		}
 	}
 	// A running sshd reloads its host keys on SIGHUP.

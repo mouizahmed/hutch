@@ -51,7 +51,7 @@ func (w *Worker) Boot(ctx context.Context, id, image string, vcpus, memMiB int, 
 		return nil, err
 	}
 	err = w.start(ctx, b, map[string]string{
-		jailKernel: filepath.Join(w.imageDir(image), "vmlinux"),
+		jailKernel: w.kernelPath(),
 		jailRootfs: filepath.Join(w.boxDir(id), "rootfs.ext4"),
 	}, func(m *vm) error { return m.coldBoot(ctx, w.vendor) }, 60*time.Second)
 	if err != nil {

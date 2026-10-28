@@ -20,7 +20,8 @@ import (
 // Worker manages boxes under Root (an XFS volume with reflink):
 //
 //	firecracker/<version>/{firecracker,jailer}
-//	images/<name>/{vmlinux,rootfs.ext4}
+//	kernel/vmlinux                                          Firecracker guest kernel
+//	images/<name>/{rootfs.ext4,image.json}                 built by package image
 //	boxes/<id>/{box.json,rootfs.ext4,base.mem,console.log,console.in,firecracker.log}
 //	boxes/<id>/snapshots/<gen>/{rootfs.ext4,vmstate,mem}   latest snapshot (disk reflinked)
 //	boxes/<id>/ref/{rootfs.ext4,vmstate,mem,manifest.json}  what the bucket last stored
@@ -140,6 +141,7 @@ func (w *Worker) fcBin(version, name string) string {
 	return filepath.Join(w.Root, "firecracker", version, name)
 }
 func (w *Worker) imageDir(name string) string { return filepath.Join(w.Root, "images", name) }
+func (w *Worker) kernelPath() string          { return filepath.Join(w.Root, "kernel", "vmlinux") }
 func (w *Worker) boxDir(id string) string     { return filepath.Join(w.Root, "boxes", id) }
 func (w *Worker) jailRoot(id string) string {
 	return filepath.Join(w.Root, "jail", "firecracker", id, "root")

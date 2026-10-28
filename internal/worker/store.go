@@ -290,7 +290,7 @@ func (w *Worker) Archive(id string) (*Box, error) {
 func (w *Worker) coldWake(ctx context.Context, b *Box) (*Box, error) {
 	b.BaseMem, b.Class, b.FCVersion = "", w.Class(), w.FCVersion
 	err := w.start(ctx, b, map[string]string{
-		jailKernel: filepath.Join(w.imageDir(b.Image), "vmlinux"),
+		jailKernel: w.kernelPath(),
 		jailRootfs: filepath.Join(w.boxDir(b.ID), "rootfs.ext4"),
 	}, func(m *vm) error { return m.coldBoot(ctx, w.vendor) }, 60*time.Second)
 	if err != nil {

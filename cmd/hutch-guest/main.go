@@ -28,6 +28,13 @@ func main() {
 		return
 	}
 
+	// The kernel starts it as init with no arguments in Firecracker boxes.
+	if os.Getpid() == 1 && flag.NArg() == 0 {
+		if err := guest.Init("", "firecracker"); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	switch flag.Arg(0) {
 	case "init":
 		fs := flag.NewFlagSet("init", flag.ExitOnError)

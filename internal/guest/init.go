@@ -115,7 +115,8 @@ func Init(listen, backend string) error {
 	}
 }
 
-const sshdScript = `for t in ed25519 ecdsa; do [ -f /etc/ssh/ssh_host_${t}_key ] || ssh-keygen -q -t $t -N "" -f /etc/ssh/ssh_host_${t}_key; done
+// sshd waits for its host keys: hutch-guest makes them for every new box.
+const sshdScript = `while [ ! -f /etc/ssh/ssh_host_ed25519_key ]; do sleep 0.5; done
 exec /usr/sbin/sshd -D -e`
 
 func (s *service) start() (int, error) {

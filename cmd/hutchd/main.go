@@ -13,7 +13,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"os/user"
 	"path/filepath"
@@ -27,6 +26,7 @@ import (
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/client"
 	"github.com/mouizahmed/hutch/internal/guestproto"
+	"github.com/mouizahmed/hutch/internal/image"
 	"github.com/mouizahmed/hutch/internal/server"
 	"github.com/mouizahmed/hutch/internal/version"
 	"github.com/mouizahmed/hutch/internal/worker"
@@ -42,7 +42,7 @@ commands:
   box exec <id> [--user NAME] -- <command> [args...]
   box console <id>                                       print the serial console log
   box status <id>                                        print what hutch-guest reports (threads, sessions, ports)
-  image import <name> <vmlinux> <rootfs.ext4>
+  image build <name> [<context-dir>]                     build an image from the Dockerfile in a directory (none: the default image)
   run [--name NAME]                                      run the machine: boxes, their state, and the API
   api                                                    bridge stdio to the API (what ssh <machine> hutchd api runs)
   restore                                                recover the state from a bucket: {"bucket": ..., "passphrase": ...} on stdin
@@ -91,11 +91,8 @@ func dispatch(ctx context.Context, root, fcVersion, socket string, args []string
 		fmt.Printf("restored the backup from %s\n", at.Local().Format(time.DateTime))
 		return nil
 	}
-	if len(args) >= 2 && args[0] == "image" && args[1] == "import" {
-		if len(args) != 5 {
-			return fmt.Errorf("usage: hutchd image import <name> <vmlinux> <rootfs.ext4>")
-		}
-		return importImage(root, args[2], args[3], args[4])
+	if len(args) >= 2 && args[0] == "image" && args[1] == "build" {
+		return buildImage(ctx, root, args[2:])
 	}
 	if len(args) < 2 || args[0] != "box" {
 		flag.Usage()
@@ -232,29 +229,34 @@ func oneArg(fs *flag.FlagSet, args []string, use string) (string, error) {
 	return fs.Arg(0), nil
 }
 
-func importImage(root, name, kernel, rootfs string) error {
-	dir := filepath.Join(root, "images", name)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+func buildImage(ctx context.Context, root string, args []string) error {
+	if len(args) < 1 || len(args) > 2 {
+		return fmt.Errorf("usage: hutchd image build <name> [<context-dir>]")
 	}
-	for src, dst := range map[string]string{kernel: "vmlinux", rootfs: "rootfs.ext4"} {
-		if err := copyFile(src, filepath.Join(dir, dst)); err != nil {
+	b := &image.Builder{Root: root, CacheBytes: 20 << 30}
+	var info image.Info
+	var err error
+	if len(args) == 1 {
+		info, err = b.BuildDefault(ctx, os.Stdout)
+	} else {
+		files := map[string][]byte{}
+		err = filepath.WalkDir(args[1], func(p string, d os.DirEntry, err error) error {
+			if err != nil || !d.Type().IsRegular() {
+				return err
+			}
+			rel, _ := filepath.Rel(args[1], p)
+			files[rel], err = os.ReadFile(p)
 			return err
+		})
+		if err == nil {
+			info, err = b.Build(ctx, args[0], files, os.Stdout)
 		}
 	}
-	fmt.Println("imported", dir)
-	return nil
-}
-
-func copyFile(src, dst string) error {
-	out, err := exec.Command("cp", "--sparse=always", src, dst+".tmp").CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("copy %s: %v: %s", src, err, out)
-	}
-	if err := os.Chmod(dst+".tmp", 0o644); err != nil {
 		return err
 	}
-	return os.Rename(dst+".tmp", dst)
+	fmt.Printf("built %s from %v\n", info.Name, info.Sources)
+	return nil
 }
 
 // run is the machine's one daemon: the server's state and scheduling, and the
