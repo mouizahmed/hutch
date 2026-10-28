@@ -256,6 +256,9 @@ func (s *Server) installAgents(ctx context.Context, w *workerConn, box string, s
 	if err != nil {
 		return err
 	}
+	if err := s.ensureFetch(ctx, w, box, stdout, stderr); err != nil {
+		return err
+	}
 	for _, a := range set.Sorted() {
 		if a.Install == "" || !a.Agent() {
 			continue
@@ -515,4 +518,18 @@ func (s *Server) refreshCredentials(ctx context.Context, w *workerConn, box stri
 func (s *Server) hasCommand(ctx context.Context, w *workerConn, box, command string) bool {
 	f := strings.Fields(command)
 	return len(f) > 0 && s.run(ctx, w, box, api.ExecParams{Argv: []string{"sh", "-c", "command -v " + f[0]}}, io.Discard, io.Discard) == nil
+}
+
+// ensureFetch installs curl, which agents' installers download with, in an image
+// that lacks it, using the image's own package manager.
+func (s *Server) ensureFetch(ctx context.Context, w *workerConn, box string, stdout, stderr io.Writer) error {
+	if s.hasCommand(ctx, w, box, "curl") {
+		return nil
+	}
+	step(stdout, "install curl (agent installers need it)")
+	script := `if command -v apt-get >/dev/null; then apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends curl ca-certificates >/dev/null
+elif command -v apk >/dev/null; then apk add -q curl ca-certificates bash
+elif command -v dnf >/dev/null; then dnf install -yq curl ca-certificates
+else echo "no package manager to install curl with; add curl to the image" >&2; exit 1; fi`
+	return s.run(ctx, w, box, api.ExecParams{User: "root", Argv: []string{"sh", "-c", script}}, stdout, stderr)
 }
