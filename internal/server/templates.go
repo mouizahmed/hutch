@@ -98,11 +98,8 @@ func (s *Server) build(ctx context.Context, proj api.Project, p api.TemplatePara
 			return api.Box{}, err
 		}
 	}
-	if _, ok := p.Recipe["verify.sh"]; !ok {
-		if _, old := p.Recipe["setup.sh"]; old {
-			return api.Box{}, errors.New(".hutch/setup.sh is replaced by .hutch/Dockerfile: hutch init converts it")
-		}
-		return api.Box{}, errors.New("the recipe needs .hutch/verify.sh at that commit (hutch init writes a prompt to draft it)")
+	if _, old := p.Recipe["setup.sh"]; old && p.Recipe["Dockerfile"] == nil {
+		return api.Box{}, errors.New(".hutch/setup.sh is replaced by .hutch/Dockerfile: hutch init converts it")
 	}
 	b, w, err := s.bootTemplate(ctx, proj, p, id, stdout, stderr)
 	if err != nil {
@@ -150,9 +147,12 @@ func (s *Server) build(ctx context.Context, proj api.Project, p api.TemplatePara
 		}
 	}
 
-	step(stdout, "verify.sh (as dev)")
-	if err := s.run(ctx, w, id, api.ExecParams{Dir: workspace, Argv: []string{"bash", "-eo", "pipefail", ".hutch/verify.sh"}}, stdout, stderr); err != nil {
-		return fail(err)
+	_, verify := p.Recipe["verify.sh"]
+	if verify {
+		step(stdout, "verify.sh (as dev)")
+		if err := s.run(ctx, w, id, api.ExecParams{Dir: workspace, Argv: []string{"bash", "-eo", "pipefail", ".hutch/verify.sh"}}, stdout, stderr); err != nil {
+			return fail(err)
+		}
 	}
 	stopSampling()
 	pk := <-peaks
@@ -167,7 +167,11 @@ func (s *Server) build(ctx context.Context, proj api.Project, p api.TemplatePara
 	if err := s.store.putMeta(id, boxMeta{project: proj.ID, kind: api.BoxTemplate, commit: p.Commit, verified: true, secrets: digest}); err != nil {
 		return b, err
 	}
-	fmt.Fprintf(stdout, "\nBuilt and verified %.12s in %s.\n", p.Commit, id)
+	if verify {
+		fmt.Fprintf(stdout, "\nBuilt and verified %.12s in %s.\n", p.Commit, id)
+	} else {
+		fmt.Fprintf(stdout, "\nBuilt %.12s in %s. There is no .hutch/verify.sh, so nothing checked that the project builds or runs here.\n", p.Commit, id)
+	}
 	return b, nil
 }
 
@@ -224,7 +228,7 @@ func (s *Server) buildImage(ctx context.Context, w *workerConn, proj api.Project
 	if err != nil {
 		return "", "", err
 	}
-	bp := api.ImageBuildParams{Name: api.DefaultImage, CacheBytes: cfg.Size("machine.build_cache"), Reuse: true}
+	bp := api.ImageBuildParams{Name: api.DefaultImage, CacheBytes: cfg.Size("machine.build_cache"), Reuse: true, Pins: p.Pins}
 	switch {
 	case p.Image != "":
 		bp.Name, bp.Ref = fmt.Sprintf("%s-%x", proj.Slug, sha256.Sum256([]byte(p.Image)))[:len(proj.Slug)+13], p.Image

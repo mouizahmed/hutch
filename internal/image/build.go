@@ -93,20 +93,73 @@ func (b *Builder) BuildDefault(ctx context.Context, out io.Writer) (Info, error)
 }
 
 // FromRef builds an image that is a published image plus Hutch's layer.
-func (b *Builder) FromRef(ctx context.Context, name, ref string, out io.Writer) (Info, error) {
-	return b.Build(ctx, name, map[string][]byte{"Dockerfile": []byte("FROM " + ref + "\n")}, out)
+func (b *Builder) FromRef(ctx context.Context, name, ref string, pins []string, out io.Writer) (Info, error) {
+	return b.Build(ctx, name, map[string][]byte{"Dockerfile": []byte("FROM " + ref + "\n")}, pins, out)
 }
 
 // Build builds the Dockerfile in files (the build context: file name → content)
-// into image name, replacing any image of that name.
-func (b *Builder) Build(ctx context.Context, name string, files map[string][]byte, out io.Writer) (Info, error) {
+// into image name, replacing any image of that name. Base images named in pins
+// ("ref@sha256:…") are used at those digests, whatever their tags point to now.
+func (b *Builder) Build(ctx context.Context, name string, files map[string][]byte, pins []string, out io.Writer) (Info, error) {
 	layout := filepath.Join(b.Dir(Default), "oci")
 	digest, err := layoutDigest(layout)
 	if err != nil {
 		return Info{}, fmt.Errorf("the default image: %w (hutch machine upgrade builds it)", err)
 	}
-	return b.build(ctx, name, files, out, "--oci-layout", "hutch-default="+layout,
-		"--opt", "context:"+DefaultRef+"=oci-layout://hutch-default@"+digest)
+	args := []string{"--oci-layout", "hutch-default=" + layout, "--opt", "context:" + DefaultRef + "=oci-layout://hutch-default@" + digest}
+	if policy := sourcePolicy(pins); policy != nil {
+		path := filepath.Join(b.Root, "tmp", name+"-policy.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return Info{}, err
+		}
+		if err := os.WriteFile(path, policy, 0o644); err != nil {
+			return Info{}, err
+		}
+		defer os.Remove(path)
+		args = append(args, "--source-policy-file", path)
+	}
+	return b.build(ctx, name, files, out, args...)
+}
+
+// sourcePolicy makes BuildKit resolve each pinned image at its digest. The default
+// image isn't pinned: it always comes from the machine's own copy.
+func sourcePolicy(pins []string) []byte {
+	type rule struct {
+		Action   string            `json:"action"`
+		Selector map[string]string `json:"selector"`
+		Updates  map[string]string `json:"updates"`
+	}
+	var rules []rule
+	for _, p := range pins {
+		ref, digest, ok := strings.Cut(p, "@sha256:")
+		if !ok || strings.HasPrefix(ref, DefaultRef) {
+			continue
+		}
+		full := normalize(ref)
+		rules = append(rules, rule{Action: "CONVERT", Selector: map[string]string{"identifier": "docker-image://" + full},
+			Updates: map[string]string{"identifier": "docker-image://" + full + "@sha256:" + digest}})
+	}
+	if len(rules) == 0 {
+		return nil
+	}
+	data, _ := json.Marshal(map[string]any{"rules": rules})
+	return data
+}
+
+// normalize spells an image reference out as BuildKit matches it:
+// node:22 is docker.io/library/node:22.
+func normalize(ref string) string {
+	first, _, hasSlash := strings.Cut(ref, "/")
+	if !hasSlash || !(strings.ContainsAny(first, ".:") || first == "localhost") {
+		if !hasSlash {
+			ref = "library/" + ref
+		}
+		ref = "docker.io/" + ref
+	}
+	if last := ref[strings.LastIndex(ref, "/")+1:]; !strings.Contains(last, ":") {
+		ref += ":latest"
+	}
+	return ref
 }
 
 func layoutDigest(layout string) (string, error) {
@@ -225,7 +278,11 @@ func provenance(path string) ([]Source, error) {
 		if m.Digest["sha256"] == "" || !strings.HasPrefix(m.URI, "pkg:") {
 			continue
 		}
+		// pkg:docker/alpine@3.20?platform=… is alpine:3.20.
 		ref, _, _ := strings.Cut(m.URI[strings.Index(m.URI, "/")+1:], "?")
+		if i := strings.LastIndex(ref, "@"); i > strings.LastIndex(ref, "/") {
+			ref = ref[:i] + ":" + ref[i+1:]
+		}
 		out = append(out, Source{Ref: ref, Digest: "sha256:" + m.Digest["sha256"]})
 	}
 	return out, nil

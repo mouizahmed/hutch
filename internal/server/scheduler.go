@@ -352,6 +352,10 @@ func (s *Server) buildForClass(ctx context.Context, v api.Template, w *workerCon
 		return "", err
 	}
 	p.Worker = w.id
+	// The same base images as the version was built from, not what their tags are now.
+	if v.Image != "" {
+		p.Pins = strings.Split(v.Image, ", ")
+	}
 	class := w.info.Class
 	tag := fmt.Sprintf("%x", sha256.Sum256([]byte(class)))[:6]
 	id, buildID := fmt.Sprintf("%s-v%d-%s", proj.Slug, v.Version, tag), fmt.Sprintf("%s-v%d-%s-build", proj.Slug, v.Version, tag)

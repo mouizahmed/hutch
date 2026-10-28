@@ -44,8 +44,8 @@ It is thrown away when the template is built; only what is in `.hutch/` survives
    template. Install the project's dependencies and generated files here, incrementally
    (`npm install --prefer-offline`, pending migrations): the template does the slow
    first run, so later runs are fast.
-4. **`.hutch/verify.sh`**: runs as `dev` after on-create.sh and must exit 0, or no template
-   is made. Prove the app actually works: build it, run a fast test subset, or start the
+4. **`.hutch/verify.sh`** (optional, but write one): runs as `dev` after on-create.sh and
+   must exit 0, or no template is made. Without it, nothing checks the environment works. Prove the app actually works: build it, run a fast test subset, or start the
    server and curl a health endpoint. Stop whatever it starts before it exits.
 5. **`.hutch/uploads.txt`** (optional): one local path per line, relative to the repo, for
    files the environment needs but that must never be committed (`.env.local`,

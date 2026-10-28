@@ -42,7 +42,7 @@ commands:
   box exec <id> [--user NAME] -- <command> [args...]
   box console <id>                                       print the serial console log
   box status <id>                                        print what hutch-guest reports (threads, sessions, ports)
-  image build <name> [<context-dir>]                     build an image from the Dockerfile in a directory (none: the default image)
+  image build [--pin REF@DIGEST]... <name> [<dir>]       build an image from the Dockerfile in a directory (none: the default image)
   run [--name NAME]                                      run the machine: boxes, their state, and the API
   api                                                    bridge stdio to the API (what ssh <machine> hutchd api runs)
   restore                                                recover the state from a bucket: {"bucket": ..., "passphrase": ...} on stdin
@@ -230,8 +230,12 @@ func oneArg(fs *flag.FlagSet, args []string, use string) (string, error) {
 }
 
 func buildImage(ctx context.Context, root string, args []string) error {
+	var pins []string
+	for len(args) > 1 && args[0] == "--pin" {
+		pins, args = append(pins, args[1]), args[2:]
+	}
 	if len(args) < 1 || len(args) > 2 {
-		return fmt.Errorf("usage: hutchd image build <name> [<context-dir>]")
+		return fmt.Errorf("usage: hutchd image build [--pin ref@sha256:…]... <name> [<context-dir>]")
 	}
 	b := &image.Builder{Root: root, CacheBytes: 20 << 30}
 	var info image.Info
@@ -249,7 +253,7 @@ func buildImage(ctx context.Context, root string, args []string) error {
 			return err
 		})
 		if err == nil {
-			info, err = b.Build(ctx, args[0], files, os.Stdout)
+			info, err = b.Build(ctx, args[0], files, pins, os.Stdout)
 		}
 	}
 	if err != nil {

@@ -109,9 +109,9 @@ func handlers(w *worker.Worker, name string, m *monitor, u *uploader, images *im
 				images.CacheBytes = p.CacheBytes
 				switch {
 				case p.Ref != "":
-					info, err = images.FromRef(ctx, p.Name, p.Ref, stdout)
+					info, err = images.FromRef(ctx, p.Name, p.Ref, p.Pins, stdout)
 				case p.Files != nil:
-					info, err = images.Build(ctx, p.Name, p.Files, stdout)
+					info, err = images.Build(ctx, p.Name, p.Files, p.Pins, stdout)
 				default:
 					info, err = images.BuildDefault(ctx, stdout)
 				}

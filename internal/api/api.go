@@ -329,6 +329,8 @@ type TemplateParams struct {
 	Recipe map[string][]byte `json:"recipe,omitempty"`
 	// Image is a published image to build from instead of the recipe's Dockerfile.
 	Image string `json:"image,omitempty"`
+	// Pins are the base images of the version being rebuilt, at their digests.
+	Pins []string `json:"pins,omitempty"`
 	// Worker pins the build to one worker: a template built for its snapshot class.
 	Worker string `json:"worker,omitempty"`
 }
@@ -536,6 +538,8 @@ type ImageBuildParams struct {
 	Files      map[string][]byte `json:"files,omitempty"`
 	Ref        string            `json:"ref,omitempty"`
 	CacheBytes int64             `json:"cache_bytes"`
+	// Pins are base images ("ref@sha256:…") to use at those digests.
+	Pins []string `json:"pins,omitempty"`
 	// Reuse keeps an existing image of that name instead of building it again.
 	Reuse bool `json:"reuse,omitempty"`
 }
