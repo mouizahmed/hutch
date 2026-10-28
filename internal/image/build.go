@@ -222,11 +222,10 @@ func provenance(path string) ([]Source, error) {
 	}
 	var out []Source
 	for _, m := range p.Predicate.BuildDefinition.ResolvedDependencies {
-		ref, ok := strings.CutPrefix(m.URI, "pkg:docker/")
-		if !ok || m.Digest["sha256"] == "" {
+		if m.Digest["sha256"] == "" || !strings.HasPrefix(m.URI, "pkg:") {
 			continue
 		}
-		ref, _, _ = strings.Cut(ref, "?")
+		ref, _, _ := strings.Cut(m.URI[strings.Index(m.URI, "/")+1:], "?")
 		out = append(out, Source{Ref: ref, Digest: "sha256:" + m.Digest["sha256"]})
 	}
 	return out, nil

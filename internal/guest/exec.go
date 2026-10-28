@@ -20,6 +20,21 @@ import (
 	"github.com/mouizahmed/hutch/internal/guestproto"
 )
 
+// credential runs a process as u with its supplementary groups (docker, say).
+func credential(u *user.User) *syscall.Credential {
+	uid, _ := strconv.ParseUint(u.Uid, 10, 32)
+	gid, _ := strconv.ParseUint(u.Gid, 10, 32)
+	c := &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}
+	if ids, err := u.GroupIds(); err == nil {
+		for _, id := range ids {
+			if g, err := strconv.ParseUint(id, 10, 32); err == nil {
+				c.Groups = append(c.Groups, uint32(g))
+			}
+		}
+	}
+	return c
+}
+
 // userPath puts ~/.local/bin first: agents such as Claude Code install there.
 func userPath(home string) string {
 	return "PATH=" + home + "/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -48,8 +63,6 @@ func execute(ctx context.Context, e guestproto.Exec, r *responder) (int, error) 
 	if err != nil {
 		return 0, err
 	}
-	uid, _ := strconv.ParseUint(u.Uid, 10, 32)
-	gid, _ := strconv.ParseUint(u.Gid, 10, 32)
 
 	cmd := exec.CommandContext(ctx, lookPath(e.Argv[0], u.HomeDir), e.Argv[1:]...)
 	cmd.Dir = e.Dir
@@ -58,7 +71,7 @@ func execute(ctx context.Context, e guestproto.Exec, r *responder) (int, error) 
 	}
 	cmd.Env = append([]string{userPath(u.HomeDir), "HOME=" + u.HomeDir, "USER=" + u.Username, "LOGNAME=" + u.Username}, e.Env...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)},
+		Credential: credential(u),
 		Setpgid:    true,
 	}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }

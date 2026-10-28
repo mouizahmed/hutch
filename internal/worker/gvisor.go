@@ -38,8 +38,10 @@ const runscRoot = "/run/hutch/runsc"
 
 // runscFlags go on every runsc call for a box; they must agree across them. The
 // root's own overlay is off (writes reach the box's disk), raw sockets are allowed
-// (ping, Docker), and setuid binaries such as sudo work.
-var runscFlags = []string{"--root", runscRoot, "--overlay2=none", "--net-raw", "--allow-suid"}
+// (ping, Docker), setuid binaries such as sudo work, and a checkpoint of a running
+// box keeps its connections (an agent's to its API) instead of resetting them.
+var runscFlags = []string{"--root", runscRoot, "--overlay2=none", "--net-raw", "--allow-suid",
+	"--allow-connected-on-save", "--host-settings=ignore"}
 
 func gvisorClass(vendor, version string) string {
 	arch := map[string]string{"amd64": "x86_64", "arm64": "aarch64"}[runtime.GOARCH]
@@ -167,6 +169,8 @@ func (w *Worker) writeSpec(b *Box, s slot) error {
 			{"destination": "/dev/pts", "type": "devpts", "source": "devpts", "options": []string{"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620"}},
 			tmpfs("/dev/shm", "nosuid,noexec,nodev,mode=1777"),
 			{"destination": "/sys", "type": "sysfs", "source": "sysfs", "options": []string{"nosuid", "noexec", "nodev"}},
+			// gVisor's own cgroups, for Docker in the box; it can't mount cgroup2 itself.
+			{"destination": "/sys/fs/cgroup", "type": "cgroup", "source": "cgroup", "options": []string{"nosuid", "noexec", "nodev"}},
 			tmpfs("/run", "nosuid,nodev,mode=755"),
 		},
 		"linux": map[string]any{

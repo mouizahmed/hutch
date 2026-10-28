@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -41,7 +42,7 @@ type service struct {
 func Init(listen, backend string) error {
 	log.SetPrefix("hutch-init: ")
 	log.SetFlags(0)
-	mountEssentials()
+	mountEssentials(backend)
 	if b, err := os.ReadFile("/etc/hostname"); err == nil {
 		unix.Sethostname([]byte(strings.TrimSpace(string(b))))
 	}
@@ -68,9 +69,10 @@ func Init(listen, backend string) error {
 	if p := dockerd(); p != "" {
 		argv := []string{p}
 		if backend == "gvisor" {
-			// gVisor has no nftables or addrtype match: Docker runs without its own
-			// iptables rules, and Compose services on host networking.
-			argv = append(argv, "--iptables=false", "--ip6tables=false")
+			if err := dockerForGVisor(); err != nil {
+				log.Printf("docker: %v", err)
+			}
+			argv = []string{"/bin/sh", "-c", gvisorDockerNAT + "\nexec " + p}
 		}
 		fixed = append(fixed, &service{name: "dockerd", argv: argv, log: "/var/log/hutch/dockerd.log"})
 	}
@@ -122,6 +124,45 @@ func Init(listen, backend string) error {
 	}
 }
 
+// gvisorDockerNAT runs before Docker in a gVisor box: gVisor's netstack has
+// legacy iptables only, and the one NAT rule Docker's bridge networks need is
+// added here, as Docker runs without its own rules (see dockerForGVisor).
+const gvisorDockerNAT = `for t in iptables ip6tables; do [ -x /usr/sbin/$t-legacy ] && update-alternatives --set $t /usr/sbin/$t-legacy >/dev/null 2>&1; done
+iptables -t nat -C POSTROUTING -s 172.16.0.0/12 ! -o docker0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s 172.16.0.0/12 ! -o docker0 -j MASQUERADE`
+
+// dockerForGVisor sets what Docker needs in a gVisor box in its daemon.json,
+// keeping the image's own settings: no iptables rules of its own (gVisor lacks the
+// addrtype match), and no address announcements on new networks (gVisor can't send
+// them). Compose files then work unchanged; Docker's default bridge doesn't.
+func dockerForGVisor() error {
+	const path = "/etc/docker/daemon.json"
+	conf := map[string]any{}
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &conf); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	conf["iptables"], conf["ip6tables"] = false, false
+	opts, _ := conf["default-network-opts"].(map[string]any)
+	if opts == nil {
+		opts = map[string]any{}
+	}
+	bridge, _ := opts["bridge"].(map[string]any)
+	if bridge == nil {
+		bridge = map[string]any{}
+	}
+	bridge["com.docker.network.advertise_addr_nmsgs"] = "0"
+	opts["bridge"], conf["default-network-opts"] = bridge, opts
+	data, err := json.MarshalIndent(conf, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll("/etc/docker", 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
 // sshd waits for its host keys: hutch-guest makes them for every new box.
 const sshdScript = `while [ ! -f /etc/ssh/ssh_host_ed25519_key ]; do sleep 0.5; done
 exec /usr/sbin/sshd -D -e`
@@ -135,6 +176,9 @@ func (s *service) start() (int, error) {
 	}
 	if s.uid != 0 {
 		attr.Sys.Credential = &syscall.Credential{Uid: uint32(s.uid), Gid: uint32(s.uid)}
+		if u, err := user.LookupId(fmt.Sprint(s.uid)); err == nil {
+			attr.Sys.Credential = credential(u)
+		}
 		attr.Dir = homeOf(s.uid)
 	}
 	switch {
@@ -313,7 +357,7 @@ func loginShell() string {
 
 // mountEssentials mounts what a kernel boot leaves out; a sandbox has most of it
 // already, and anything mounted is left alone.
-func mountEssentials() {
+func mountEssentials(backend string) {
 	unix.Mount("", "/", "", unix.MS_REMOUNT, "")
 	mounts := []struct {
 		target, fstype, data string
@@ -326,6 +370,9 @@ func mountEssentials() {
 		{"/dev/shm", "tmpfs", "mode=1777", unix.MS_NOSUID | unix.MS_NODEV},
 		{"/run", "tmpfs", "mode=0755", unix.MS_NOSUID | unix.MS_NODEV},
 		{"/sys/fs/cgroup", "cgroup2", "", unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC},
+	}
+	if backend == "gvisor" {
+		mounts = mounts[:len(mounts)-1] // the sandbox's spec mounts gVisor's cgroups
 	}
 	mounted := mountpoints()
 	for _, m := range mounts {

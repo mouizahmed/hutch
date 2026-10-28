@@ -123,12 +123,10 @@ func asDev(ctx context.Context, dir, name string, args ...string) (string, error
 	if err != nil {
 		return "", err
 	}
-	uid, _ := strconv.ParseUint(u.Uid, 10, 32)
-	gid, _ := strconv.ParseUint(u.Gid, 10, 32)
 	cmd := exec.CommandContext(ctx, lookPath(name, u.HomeDir), args...)
 	cmd.Dir = dir
 	cmd.Env = []string{userPath(u.HomeDir), "HOME=" + u.HomeDir, "USER=dev"}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: credential(u)}
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {

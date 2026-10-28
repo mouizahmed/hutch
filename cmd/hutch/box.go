@@ -75,7 +75,7 @@ func boxCommands() []*cobra.Command {
 				return err
 			}
 			if image != "" {
-				p := api.BootParams{ID: name, Image: image, VCPUs: cpus, MemMiB: memMiB, Idle: idle}
+				p := api.BootParams{ID: name, Image: image, VCPUs: cpus, MemMiB: memMiB, DiskBytes: cfg.Size("disk.size"), Idle: idle}
 				if err := rpc.Call(ctx, sess, api.BoxBoot, p, &b); err != nil {
 					return fmt.Errorf("%w\n  hutch console %s", err, name)
 				}

@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -29,8 +28,6 @@ func runPTY(conn net.Conn, p guestproto.PTY) error {
 	if err != nil {
 		return err
 	}
-	uid, _ := strconv.ParseUint(u.Uid, 10, 32)
-	gid, _ := strconv.ParseUint(u.Gid, 10, 32)
 	term := p.Term
 	if !hasTerminfo(term) {
 		term = "xterm-256color"
@@ -43,7 +40,7 @@ func runPTY(conn net.Conn, p guestproto.PTY) error {
 	}
 	cmd.Env = append([]string{userPath(u.HomeDir), "HOME=" + u.HomeDir, "USER=" + u.Username, "LOGNAME=" + u.Username,
 		"SHELL=/bin/bash", "TERM=" + term, "LANG=C.UTF-8"}, p.Env...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: credential(u)}
 
 	tty, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(p.Rows), Cols: uint16(p.Cols)})
 	if err != nil {
