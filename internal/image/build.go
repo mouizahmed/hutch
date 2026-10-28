@@ -8,6 +8,8 @@ package image
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -48,6 +50,20 @@ type Info struct {
 	// Sources are the images the build started from, pinned by digest.
 	Sources []Source  `json:"sources"`
 	Built   time.Time `json:"built"`
+	// Layer identifies the Hutch layer it was built with; a new one means a rebuild.
+	Layer string `json:"layer"`
+}
+
+// LayerID identifies the machine's current Hutch layer.
+func (b *Builder) LayerID() string {
+	h := sha256.New()
+	for _, f := range []string{"hutch-guest", "tmux-" + arch(), "terminfo.tar"} {
+		if data, err := os.ReadFile(filepath.Join(b.Root, "layer", f)); err == nil {
+			h.Write(data)
+		}
+	}
+	h.Write(tmuxConf)
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
 type Source struct {
@@ -229,7 +245,7 @@ func (b *Builder) build(ctx context.Context, name string, files map[string][]byt
 		return Info{}, fmt.Errorf("unpack: %v: %s", err, bytes.TrimSpace(tarErr.Bytes()))
 	}
 
-	info := Info{Name: name, Built: time.Now().UTC()}
+	info := Info{Name: name, Built: time.Now().UTC(), Layer: b.LayerID()}
 	if info.Sources, err = provenance(filepath.Join(tree, "provenance.json")); err != nil {
 		return Info{}, err
 	}

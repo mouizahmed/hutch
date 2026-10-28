@@ -78,7 +78,11 @@ func newMachineID() error {
 	return os.WriteFile("/etc/machine-id", []byte(hex.EncodeToString(b)+"\n"), 0o444)
 }
 
+// newSSHHostKeys gives the box its own host keys; an image without sshd needs none.
 func newSSHHostKeys() error {
+	if _, err := exec.LookPath("ssh-keygen"); err != nil {
+		return nil
+	}
 	old, _ := filepath.Glob("/etc/ssh/ssh_host_*")
 	for _, f := range old {
 		os.Remove(f)

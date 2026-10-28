@@ -104,7 +104,7 @@ func handlers(w *worker.Worker, name string, m *monitor, u *uploader, images *im
 				return nil, err
 			}
 			info, err := images.Get(p.Name)
-			if err != nil || !p.Reuse {
+			if err != nil || !p.Reuse || info.Layer != images.LayerID() {
 				stdout, _ := out.Writers()
 				images.CacheBytes = p.CacheBytes
 				switch {
