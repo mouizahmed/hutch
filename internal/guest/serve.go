@@ -4,11 +4,14 @@ package guest
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mdlayher/vsock"
 	"github.com/mouizahmed/hutch/internal/guestproto"
@@ -16,13 +19,20 @@ import (
 	"github.com/mouizahmed/hutch/internal/wire"
 )
 
-// ListenAndServe serves on vsock, or on a Unix socket when listen is "unix:PATH"
-// (used by the protocol compatibility tests).
+// ListenAndServe serves on vsock (Firecracker boxes), on TCP when listen is
+// "tcp:ADDR" (gVisor boxes, which have no vsock; clients present the token), or on
+// a Unix socket when listen is "unix:PATH" (the protocol compatibility tests).
 func ListenAndServe(ctx context.Context, listen string) error {
 	var ln net.Listener
 	var err error
+	token := os.Getenv(TokenEnv)
 	if path, ok := strings.CutPrefix(listen, "unix:"); ok {
 		ln, err = net.Listen("unix", path)
+	} else if addr, ok := strings.CutPrefix(listen, "tcp:"); ok {
+		if token == "" {
+			return fmt.Errorf("listening on TCP needs %s", TokenEnv)
+		}
+		ln, err = net.Listen("tcp", addr)
 	} else {
 		ln, err = vsock.Listen(guestproto.Port, nil)
 	}
@@ -42,8 +52,33 @@ func ListenAndServe(ctx context.Context, listen string) error {
 			}
 			return err
 		}
+		if _, ok := ln.(*net.TCPListener); ok {
+			go func() {
+				if checkToken(conn, token) {
+					handle(ctx, conn)
+				}
+			}()
+			continue
+		}
 		go handle(ctx, conn)
 	}
+}
+
+// checkToken reads the client's "TOKEN <t>" line and answers "OK" when it matches.
+func checkToken(conn net.Conn, token string) bool {
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	line, err := guestproto.ReadLine(conn)
+	conn.SetReadDeadline(time.Time{})
+	got, ok := strings.CutPrefix(line, "TOKEN ")
+	if err != nil || !ok || subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+		conn.Close()
+		return false
+	}
+	if _, err := conn.Write([]byte("OK hutch-guest\n")); err != nil {
+		conn.Close()
+		return false
+	}
+	return true
 }
 
 // responder serializes frames written by concurrent output streams.

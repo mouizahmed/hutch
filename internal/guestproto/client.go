@@ -12,9 +12,12 @@ import (
 	"github.com/mouizahmed/hutch/internal/wire"
 )
 
-// Client talks to hutch-guest through Firecracker's vsock Unix socket.
+// Client talks to hutch-guest through Firecracker's vsock Unix socket, or over TCP
+// with a token in gVisor boxes, which have no vsock.
 type Client struct {
 	UDSPath string
+	Addr    string
+	Token   string
 }
 
 // Dial opens a raw connection to hutch-guest, retrying failed handshakes for up
@@ -33,31 +36,35 @@ func (c *Client) Dial(ctx context.Context) (net.Conn, error) {
 
 func (c *Client) dialOnce(ctx context.Context) (net.Conn, error) {
 	var d net.Dialer
-	conn, err := d.DialContext(ctx, "unix", c.UDSPath)
+	network, addr, hello := "unix", c.UDSPath, fmt.Sprintf("CONNECT %d\n", Port)
+	if c.Addr != "" {
+		network, addr, hello = "tcp", c.Addr, "TOKEN "+c.Token+"\n"
+	}
+	conn, err := d.DialContext(ctx, network, addr)
 	if err != nil {
 		return nil, err
 	}
 	if dl, ok := ctx.Deadline(); ok {
 		conn.SetDeadline(dl)
 	}
-	if _, err := fmt.Fprintf(conn, "CONNECT %d\n", Port); err != nil {
+	if _, err := io.WriteString(conn, hello); err != nil {
 		conn.Close()
 		return nil, err
 	}
-	line, err := readLine(conn)
+	line, err := ReadLine(conn)
 	if err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("vsock handshake: %w", err)
+		return nil, fmt.Errorf("guest handshake: %w", err)
 	}
 	if !strings.HasPrefix(line, "OK ") {
 		conn.Close()
-		return nil, fmt.Errorf("vsock handshake: %q", line)
+		return nil, fmt.Errorf("guest handshake: %q", line)
 	}
 	return conn, nil
 }
 
-// readLine reads byte by byte so nothing after the handshake line is consumed.
-func readLine(r io.Reader) (string, error) {
+// ReadLine reads byte by byte so nothing after the handshake line is consumed.
+func ReadLine(r io.Reader) (string, error) {
 	var b strings.Builder
 	var c [1]byte
 	for b.Len() < 64 {

@@ -18,7 +18,7 @@ import (
 func main() {
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Usage = func() {
-		fmt.Fprintln(flag.CommandLine.Output(), "usage: hutch-guest [--version] serve")
+		fmt.Fprintln(flag.CommandLine.Output(), "usage: hutch-guest [--version] init|serve")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -29,9 +29,17 @@ func main() {
 	}
 
 	switch flag.Arg(0) {
+	case "init":
+		fs := flag.NewFlagSet("init", flag.ExitOnError)
+		listen := fs.String("listen", "", "tcp:ADDR instead of vsock")
+		backend := fs.String("backend", "firecracker", "firecracker or gvisor")
+		fs.Parse(flag.Args()[1:])
+		if err := guest.Init(*listen, *backend); err != nil {
+			log.Fatal(err)
+		}
 	case "serve":
 		fs := flag.NewFlagSet("serve", flag.ExitOnError)
-		listen := fs.String("listen", "", "unix:PATH instead of vsock (tests only)")
+		listen := fs.String("listen", "", "tcp:ADDR (with $HUTCH_GUEST_TOKEN) or unix:PATH (tests) instead of vsock")
 		fs.Parse(flag.Args()[1:])
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
