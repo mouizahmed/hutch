@@ -305,16 +305,17 @@ func (s *Server) templateSnapshot(ctx context.Context, params json.RawMessage, o
 		n = versions[0].Version + 1
 	}
 	vid := fmt.Sprintf("%s-v%d", proj.Slug, n)
+	// Read before the box's row goes: its meta goes with it.
+	built, err := s.store.meta(id)
+	if err != nil {
+		return nil, err
+	}
 	s.hostProject(ctx, w, proj.ID)
 	vb, err := s.callForBox(ctx, w, api.BoxRename, api.RenameParams{ID: id, NewID: vid, Store: s.versionStore(proj.ID, w.info.Class, n)})
 	if err != nil {
 		return nil, err
 	}
 	if err := s.store.deleteBox(id); err != nil {
-		return nil, err
-	}
-	built, err := s.store.meta(id)
-	if err != nil {
 		return nil, err
 	}
 	if err := s.store.putMeta(vid, boxMeta{project: proj.ID, kind: api.BoxVersion, commit: p.Commit, secrets: built.secrets}); err != nil {
