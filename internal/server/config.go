@@ -43,7 +43,7 @@ func (s *Server) configPut(ctx context.Context, params json.RawMessage, _ *rpc.O
 	if err != nil {
 		return nil, err
 	}
-	if !conflict && p.Name == "machine" {
+	if !conflict {
 		s.mu.Lock()
 		workers := make([]*workerConn, 0, len(s.workers))
 		for _, w := range s.workers {
@@ -82,10 +82,7 @@ func (s *Server) sendWorkerSettings(ctx context.Context, w *workerConn) {
 		log.Printf("worker %s: settings: %v", w.id, err)
 		return
 	}
-	p := api.WorkerSettingsParams{IdleInterval: c.Duration("idle.check_interval"), WorkingWindow: c.Duration("threads.working_window"),
-		Checkpoint: c.Duration("checkpoint.interval"), FirstCheckpoint: c.Duration("checkpoint.first_after"), ChunkCache: c.Percent("machine.chunk_cache"), Refresh: c.Duration("gc.grace") / 2,
-		Overcommit: c.Float("machine.overcommit"), MemoryHigh: c.Percent("machine.memory_high"), MemoryCritical: c.Percent("machine.memory_critical"),
-		PeakWindow: c.Duration("machine.peak_window"), PressureStall: c.Duration("machine.pressure_stall")}
+	p := api.NewWorkerSettings(c)
 	if v := s.vault.Load(); v != nil {
 		cfg := v.cfg
 		p.Bucket = &cfg

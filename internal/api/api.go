@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mouizahmed/hutch/internal/bucket"
+	"github.com/mouizahmed/hutch/internal/config"
 	"github.com/mouizahmed/hutch/internal/guestproto"
 )
 
@@ -214,6 +215,14 @@ type WorkerSettingsParams struct {
 	PeakWindow     time.Duration `json:"peak_window,omitempty"`
 	// PressureStall: memory stalls this long within a second trigger a check at once.
 	PressureStall time.Duration `json:"pressure_stall,omitempty"`
+}
+
+// NewWorkerSettings is the part of the worker's settings that comes from config.
+func NewWorkerSettings(c *config.Config) WorkerSettingsParams {
+	return WorkerSettingsParams{IdleInterval: c.Duration("idle.check_interval"), WorkingWindow: c.Duration("threads.working_window"),
+		Checkpoint: c.Duration("checkpoint.interval"), FirstCheckpoint: c.Duration("checkpoint.first_after"), ChunkCache: c.Percent("machine.chunk_cache"), Refresh: c.Duration("gc.grace") / 2,
+		Overcommit: c.Float("machine.overcommit"), MemoryHigh: c.Percent("machine.memory_high"), MemoryCritical: c.Percent("machine.memory_critical"),
+		PeakWindow: c.Duration("machine.peak_window"), PressureStall: c.Duration("machine.pressure_stall")}
 }
 
 // Store places a box's snapshots in the bucket (see worker.Store).

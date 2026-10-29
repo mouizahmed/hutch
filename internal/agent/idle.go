@@ -44,8 +44,10 @@ func newMonitor(w *worker.Worker, u *uploader) *monitor {
 	d := config.New()
 	m := &monitor{w: w, uploads: u, kicks: make(chan struct{}, 1), seen: map[string]*boxActivity{},
 		defaults: worker.Idle{Timeout: d.Duration("idle_timeout"), CPUThreshold: d.Percent("idle.cpu_threshold")}}
-	m.settings.Store(&api.WorkerSettingsParams{IdleInterval: d.Duration("idle.check_interval"), WorkingWindow: d.Duration("threads.working_window"),
-		Checkpoint: d.Duration("checkpoint.interval")})
+	// Defaults until the server sends its settings, which may never come if the
+	// server can't resolve its config.
+	p := api.NewWorkerSettings(d)
+	m.settings.Store(&p)
 	return m
 }
 
