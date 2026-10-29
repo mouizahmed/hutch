@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -53,7 +55,7 @@ func sessionCommands() []*cobra.Command {
 			}
 			argv := []string{"tmux", "new-session", "-A", "-s", agentSession}
 			if n > 0 {
-				argv = viewArgv(n, false)
+				argv = viewArgv(n)
 			}
 			return terminal(ctx, sess, box, argv)
 		}),
@@ -283,4 +285,14 @@ func connectTerminal(box, banner string, open func(rows, cols int) (net.Conn, er
 			return errors.New(r.Error)
 		}
 	}
+}
+
+// viewArgv attaches a thread in a session of its own grouped with the box's
+// "hutch" session, so several viewers can each show a different thread.
+func viewArgv(n int) []string {
+	b := make([]byte, 4)
+	rand.Read(b)
+	name := "view-" + hex.EncodeToString(b)
+	return []string{"tmux", "new-session", "-t", agentSession, "-s", name,
+		";", "set-option", "destroy-unattached", "on", ";", "select-window", "-t", name + ":" + strconv.Itoa(n)}
 }

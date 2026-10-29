@@ -318,9 +318,12 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 				}
 				s.mu.Lock()
 				prevStates := s.threadStates[br.Box.ID]
-				// A box put to sleep reports no threads; keep their last states.
-				if len(states) > 0 || br.Box.State == "running" {
+				// A box that stops forgets its threads' states, so the first report
+				// after a wake, whose redraw is output, is only a baseline.
+				if br.Box.State == "running" {
 					s.threadStates[br.Box.ID] = states
+				} else {
+					delete(s.threadStates, br.Box.ID)
 				}
 				for n, t := range states {
 					if t.SessionID != "" && prevStates[n].SessionID != t.SessionID {

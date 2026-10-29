@@ -155,6 +155,13 @@ var Keys = []*Key{
 		Doc: "command the machine runs on events, with HUTCH_EVENT, HUTCH_BOX, HUTCH_TITLE, HUTCH_MESSAGE set"},
 	{Path: "notify.waiting_after", Kind: Duration, Default: "2m", Min: "0s", Max: "24h", Layers: user,
 		Doc: "a thread that stops working notifies you once it has waited or been exited this long"},
+
+	{Path: "tui.list_width", Kind: Int, Default: int64(44), Min: "24", Max: "120", Layers: user,
+		Doc: "the TUI's list width in columns, beside the terminal"},
+	{Path: "tui.kept_panes", Kind: Int, Default: int64(4), Min: "1", Max: "16", Layers: user,
+		Doc: "terminals the TUI keeps connected, so returning to one paints at once"},
+	{Path: "tui.refresh", Kind: Duration, Default: "2s", Min: "250ms", Max: "1m", Layers: user,
+		Doc: "how often the TUI reads boxes and threads from the machine"},
 	{Path: "gc.grace", Kind: Duration, Default: "24h", Min: "1h", Max: "30d", Layers: machine,
 		Doc: "chunks younger than this are never deleted, so a sweep can't race an upload"},
 }

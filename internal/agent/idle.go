@@ -29,6 +29,9 @@ type boxActivity struct {
 	reclaimed bool
 	// Each thread's last output that wasn't a redraw.
 	output map[int]time.Time
+	// When this worker started watching the box; earlier output, like a wake's
+	// redraw, isn't work.
+	since time.Time
 }
 
 // monitor checks running boxes, puts idle ones to sleep, and reports to the server
@@ -173,7 +176,7 @@ func (m *monitor) checkBox(ctx context.Context, b *worker.Box) (api.BoxReport, b
 	policy := m.policy(b)
 	a := m.seen[b.ID]
 	if a == nil {
-		a = &boxActivity{lastActive: now}
+		a = &boxActivity{lastActive: now, since: now}
 		m.seen[b.ID] = a
 	}
 	r := api.BoxReport{Box: toAPI(m.w, b)}
@@ -221,7 +224,7 @@ func (m *monitor) checkBox(ctx context.Context, b *worker.Box) (api.BoxReport, b
 		switch {
 		case th.Dead:
 			state = api.ThreadExited
-		case !th.Bell && !th.Redraw && now.Sub(out) < window:
+		case !th.Bell && !th.Redraw && now.Sub(out) < window && out.After(a.since.Add(time.Second)):
 			state = api.ThreadWorking
 			a.working = true
 		}

@@ -1,154 +1,968 @@
 package main
 
 import (
-	"bufio"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"slices"
 	"sort"
-	"strconv"
 	"strings"
-	"syscall"
+	"sync/atomic"
+	"time"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/vt"
 	"github.com/hashicorp/yamux"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/config"
+	"github.com/mouizahmed/hutch/internal/names"
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
-// The TUI is Hutch's own tmux server on this machine (-L hutch, its own config):
-// the sidebar in the left pane, and the chosen thread's terminal in the right,
-// switched with respawn-pane. Agents render natively; nothing is emulated.
-const tuiSocket = "hutch"
+// The TUI is one program: boxes and their threads on the left, the selected
+// thread's terminal on the right, drawn through an in-process emulator. Anything
+// it doesn't do itself runs as the CLI command, in the terminal, and comes back.
 
-func tmuxCmd(args ...string) *exec.Cmd {
-	return exec.Command("tmux", append([]string{"-L", tuiSocket}, args...)...)
+type rowKind int
+
+const (
+	rowProject rowKind = iota
+	rowBox
+	rowThread
+	rowShell
+)
+
+type tuiRow struct {
+	kind   rowKind
+	label  string
+	box    api.Box
+	thread api.Thread
 }
 
-// runTUI opens the TUI, one tab per Hutch project, on the current folder's project
-// when it is one, reattaching when the TUI is already running. Each tab is a tmux
-// window: its own sidebar and right pane.
+func (r tuiRow) selectable() bool { return r.kind != rowProject }
+
+// key identifies a row across refreshes.
+func (r tuiRow) key() string {
+	switch r.kind {
+	case rowThread:
+		return paneKey(r.box.ID, r.thread.N)
+	case rowShell:
+		return paneKey(r.box.ID, 0)
+	case rowBox:
+		return r.box.ID
+	}
+	return "project " + r.label
+}
+
+type tui struct {
+	ctx      context.Context
+	sess     *yamux.Session
+	prog     *tea.Program
+	exe, cwd string
+	here     string // the launch folder's project
+
+	listWidth, kept int
+	refresh         time.Duration
+
+	boxes    []api.Box
+	projects map[string]string // id → slug
+	rows     []tuiRow
+	cursor   int
+	offset   int
+	shells   map[string]bool // boxes with a shell row
+
+	panes map[string]*pane
+	order []string // pane keys, most recently shown last
+	shown atomic.Value
+	dirty atomic.Bool
+
+	typing, zoom, below, focused bool
+	w, h                         int
+	frame                        int
+
+	input    textinput.Model
+	inputFor string // "new", or the box a new thread goes in
+	confirm  string // the row key d asks about
+	open     string // box/n to select once it appears
+	status   string
+	statusAt time.Time
+
+	states map[string]string // thread states at the last refresh, for notifications
+	read   map[string]bool   // threads you've looked at since they last worked
+}
+
+type boxesMsg struct {
+	boxes    []api.Box
+	projects []api.Project
+	err      error
+}
+type (
+	frameMsg   struct{}
+	refreshMsg struct{}
+	paneMsg    struct{}
+	clipMsg    string
+	doneMsg    struct{ status, open string }
+)
+
+var (
+	styleBold    = lipgloss.NewStyle().Bold(true)
+	styleDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	styleRule    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	styleCursor  = lipgloss.NewStyle().Background(lipgloss.Color("252")).Foreground(lipgloss.Color("235"))
+	styleBlurred = lipgloss.NewStyle().Background(lipgloss.Color("238"))
+	styleTyping  = lipgloss.NewStyle().Background(lipgloss.Color("42")).Foreground(lipgloss.Color("235"))
+	styleWorking = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	styleUnread  = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+	styleRead    = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	styleExited  = lipgloss.NewStyle().Foreground(lipgloss.Color("170"))
+	styleError   = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	spinner      = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+)
+
 func runTUI(cmd *cobra.Command, _ []string) error {
 	if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
 		return cmd.Help()
-	}
-	if os.Getenv("HUTCH_TUI") != "" {
-		return errors.New("already in the Hutch TUI")
-	}
-	tmux, err := exec.LookPath("tmux")
-	if err != nil {
-		return errors.New("the TUI runs in tmux, which isn't installed; hutch ls and hutch attach work without it")
-	}
-	// Inside the user's own tmux too: Hutch's runs on its own socket.
-	var env []string
-	for _, e := range os.Environ() {
-		if !strings.HasPrefix(e, "TMUX=") {
-			env = append(env, e)
-		}
 	}
 	sess, err := connect()
 	if err != nil {
 		return err
 	}
-	defer sess.Close()
-	var projects []api.Project
-	if err := rpc.Call(cmd.Context(), sess, api.ProjectList, struct{}{}, &projects); err != nil {
-		return err
-	}
-	boxes, err := listBoxes(cmd.Context(), sess)
+	ctx := cmd.Context()
+	cfg, err := loadConfig(ctx, sess)
 	if err != nil {
+		sess.Close()
 		return err
-	}
-	current := ""
-	if repo, _ := config.FindRepo("."); repo != nil {
-		for _, p := range projects {
-			if p.ID == repo.ID {
-				current = p.ID
-			}
-		}
-	}
-	attach := func() error {
-		return syscall.Exec(tmux, []string{"tmux", "-L", tuiSocket, "attach-session", "-t", "hutch"}, env)
-	}
-	if tmuxCmd("has-session", "-t", "hutch").Run() == nil {
-		if current != "" {
-			if err := openTab(current, projects, boxes); err != nil {
-				return err
-			}
-		}
-		return attach()
 	}
 	exe, err := selfPath()
 	if err != nil {
+		sess.Close()
 		return err
 	}
-	conf, err := writeTmuxConf(exe)
-	if err != nil {
-		return err
+	cwd, _ := os.Getwd()
+	m := &tui{ctx: ctx, sess: sess, exe: exe, cwd: cwd, focused: true, w: 120, h: 40,
+		listWidth: int(cfg.Int("tui.list_width")), kept: int(cfg.Int("tui.kept_panes")), refresh: cfg.Duration("tui.refresh"),
+		projects: map[string]string{}, shells: map[string]bool{}, panes: map[string]*pane{},
+		states: map[string]string{}, read: map[string]bool{}}
+	if repo, _ := config.FindRepo(cwd); repo != nil {
+		m.here = repo.ID
 	}
-	// The current project first, then the rest by name; with none, one tab for
-	// boxes outside projects.
-	sort.SliceStable(projects, func(i, j int) bool {
-		if (projects[i].ID == current) != (projects[j].ID == current) {
-			return projects[i].ID == current
+	m.shown.Store("")
+	m.input = textinput.New()
+	m.input.CharLimit = 4000
+	m.input.Prompt = ""
+	m.prog = tea.NewProgram(m, tea.WithContext(ctx))
+	_, err = m.prog.Run()
+	for _, p := range m.panes {
+		p.close()
+	}
+	m.sess.Close()
+	return err
+}
+
+func (m *tui) Init() tea.Cmd { return tea.Batch(m.poll(), frame()) }
+
+func frame() tea.Cmd { return tea.Tick(time.Second/8, func(time.Time) tea.Msg { return frameMsg{} }) }
+
+func (m *tui) poll() tea.Cmd {
+	ctx, sess := m.ctx, m.sess
+	return func() tea.Msg {
+		var msg boxesMsg
+		if msg.err = rpc.Call(ctx, sess, api.BoxList, struct{}{}, &msg.boxes); msg.err == nil {
+			msg.err = rpc.Call(ctx, sess, api.ProjectList, struct{}{}, &msg.projects)
 		}
-		return projects[i].Slug < projects[j].Slug
+		return msg
+	}
+}
+
+// layout is where the pane goes: beside the list, below it, or the whole screen
+// but the footer.
+func (m *tui) layout() (x, y, w, h int) {
+	switch {
+	case m.zoom:
+		return 0, 0, m.w, m.h - 1
+	case m.below:
+		lh := min(len(m.rows)+1, m.h/3)
+		return 0, lh + 1, m.w, max(m.h-lh-2, 1)
+	}
+	lw := min(m.listWidth, m.w/2)
+	return lw + 1, 0, max(m.w-lw-1, 1), m.h - 1
+}
+
+func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.w, m.h = msg.Width, msg.Height
+		m.resize()
+	case tea.FocusMsg:
+		m.focused = true
+		m.markHidden()
+	case tea.BlurMsg:
+		m.focused = false
+		m.markHidden()
+	case frameMsg:
+		m.frame++
+		if m.status != "" && time.Since(m.statusAt) > 8*time.Second && m.confirm == "" {
+			m.status = ""
+		}
+		return m, frame()
+	case refreshMsg:
+		return m, m.poll()
+	case paneMsg:
+		m.dirty.Store(false)
+	case clipMsg:
+		return m, tea.SetClipboard(string(msg))
+	case boxesMsg:
+		next := tea.Tick(m.refresh, func(time.Time) tea.Msg { return refreshMsg{} })
+		if msg.err != nil {
+			m.setStatus("can't reach the machine: " + msg.err.Error())
+			if m.sess.IsClosed() {
+				if s, err := connect(); err == nil {
+					m.sess = s
+					for k, p := range m.panes {
+						p.close()
+						delete(m.panes, k)
+					}
+					m.order = nil
+				}
+			}
+			return m, next
+		}
+		notes := m.changes(msg.boxes)
+		m.boxes = msg.boxes
+		for _, p := range msg.projects {
+			m.projects[p.ID] = p.Slug
+		}
+		m.build()
+		if m.open != "" {
+			if m.selectKey(m.open) {
+				m.open = ""
+			}
+		}
+		m.sync()
+		return m, tea.Batch(next, notes)
+	case doneMsg:
+		if msg.status != "" {
+			m.setStatus(msg.status)
+		}
+		if msg.open != "" {
+			m.open = msg.open
+		}
+		return m, m.poll()
+	case tea.PasteMsg:
+		if m.inputFor != "" {
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			return m, cmd
+		}
+		if p := m.shownPane(); m.typing && p != nil {
+			p.withEmu(func(e *vt.Emulator) { e.Paste(msg.Content) })
+		}
+	case tea.MouseMsg:
+		return m, m.mouse(msg)
+	case tea.KeyPressMsg:
+		switch {
+		case m.inputFor != "":
+			return m, m.inputKey(msg)
+		case m.confirm != "":
+			return m, m.confirmKey(msg)
+		case m.typing:
+			if msg.String() == "ctrl+]" {
+				m.typing = false
+				return m, nil
+			}
+			if p := m.shownPane(); p != nil {
+				k := uv.KeyPressEvent(uv.Key(msg))
+				p.withEmu(func(e *vt.Emulator) { e.SendKey(k) })
+			}
+			return m, nil
+		}
+		return m, m.key(msg)
+	}
+	return m, nil
+}
+
+func (m *tui) setStatus(s string) { m.status, m.statusAt = s, time.Now() }
+
+func (m *tui) key(msg tea.KeyPressMsg) tea.Cmd {
+	r := m.selected()
+	switch msg.String() {
+	case "q", "ctrl+c":
+		return tea.Quit
+	case "j", "down":
+		m.move(1)
+	case "k", "up":
+		m.move(-1)
+	case "enter":
+		return m.enter(r)
+	case "n":
+		if m.here == "" {
+			m.setStatus("new tasks start in a project: run hutch in a project's checkout")
+			return nil
+		}
+		return m.ask("new", "what should the agent do?")
+	case "N":
+		if r.box.ID != "" {
+			return m.ask(r.box.ID, "what should the new thread in "+r.box.ID+" do?")
+		}
+	case "t":
+		if r.box.ID != "" {
+			m.shells[r.box.ID] = true
+			m.build()
+			m.selectKey(paneKey(r.box.ID, 0))
+			m.sync()
+		}
+	case "s":
+		if r.box.ID != "" {
+			return m.sleepWake(r.box)
+		}
+	case "d":
+		if r.kind != rowProject && r.box.ID != "" {
+			m.confirm = r.key()
+			what := "box " + r.box.ID + " and its threads"
+			switch r.kind {
+			case rowThread:
+				what = "thread " + r.key() + " (" + r.thread.Title + ")"
+			case rowShell:
+				what = r.box.ID + "'s shell"
+			}
+			m.setStatus("Remove " + what + "? y removes, any other key keeps it")
+		}
+	case "\\":
+		m.below = !m.below
+		m.resize()
+	case "z":
+		m.zoom = !m.zoom
+		m.resize()
+	}
+	return nil
+}
+
+// enter wakes a sleeping box (saying so), reconnects a dropped terminal, or types
+// into a live one.
+func (m *tui) enter(r tuiRow) tea.Cmd {
+	if r.box.ID == "" {
+		return nil
+	}
+	if r.box.State != "running" {
+		return m.sleepWake(r.box)
+	}
+	p := m.shownPane()
+	switch {
+	case p == nil:
+		return nil
+	case p.ended.Load():
+		m.drop(m.shown.Load().(string))
+		m.sync()
+	default:
+		m.typing = true
+	}
+	return nil
+}
+
+func (m *tui) sleepWake(b api.Box) tea.Cmd {
+	ctx, sess := m.ctx, m.sess
+	method, doing, done := api.BoxSleep, "putting "+b.ID+" to sleep…", b.ID+" is asleep"
+	if b.State != "running" {
+		method, doing, done = api.BoxWake, "waking "+b.ID+"…", b.ID+" is awake"
+	}
+	m.setStatus(doing)
+	return func() tea.Msg {
+		if err := rpc.Call(ctx, sess, method, api.IDParams{ID: b.ID}, nil); err != nil {
+			return doneMsg{status: err.Error()}
+		}
+		return doneMsg{status: done}
+	}
+}
+
+func (m *tui) ask(target, placeholder string) tea.Cmd {
+	m.inputFor = target
+	m.input.Placeholder = placeholder
+	m.input.SetValue("")
+	m.input.SetWidth(max(m.w-30, 20))
+	return m.input.Focus()
+}
+
+func (m *tui) inputKey(msg tea.KeyPressMsg) tea.Cmd {
+	switch msg.String() {
+	case "esc":
+		m.inputFor = ""
+		m.input.Blur()
+		return nil
+	case "enter":
+		prompt := strings.TrimSpace(m.input.Value())
+		target := m.inputFor
+		m.inputFor = ""
+		m.input.Blur()
+		if prompt == "" {
+			return nil
+		}
+		if target == "new" {
+			taken := map[string]bool{}
+			for _, b := range m.boxes {
+				taken[b.ID] = true
+			}
+			name := names.New(taken)
+			return m.run(m.cwd, name+"/1", "new", "--name", name, prompt)
+		}
+		next := 1
+		for _, b := range m.boxes {
+			if b.ID == target {
+				for _, t := range b.Threads {
+					next = max(next, t.N+1)
+				}
+			}
+		}
+		dir := m.cwd
+		for _, b := range m.boxes {
+			if b.ID == target && b.Project != "" && b.Project != m.here {
+				if d := projectDir(b.Project, m.boxes); d != "" {
+					dir = d
+				}
+			}
+		}
+		return m.run(dir, paneKey(target, next), "thread", target, prompt)
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return cmd
+}
+
+func (m *tui) confirmKey(msg tea.KeyPressMsg) tea.Cmd {
+	key := m.confirm
+	m.confirm = ""
+	m.status = ""
+	if msg.String() != "y" {
+		return nil
+	}
+	for _, r := range m.rows {
+		if r.key() != key {
+			continue
+		}
+		switch r.kind {
+		case rowShell:
+			delete(m.shells, r.box.ID)
+			m.drop(key)
+			m.build()
+			m.sync()
+			return nil
+		case rowThread:
+			m.drop(key)
+			return m.run(m.cwd, "", "thread", "rm", key)
+		default:
+			for k, p := range m.panes {
+				if p.box == r.box.ID {
+					m.drop(k)
+				}
+			}
+			delete(m.shells, r.box.ID)
+			return m.run(m.cwd, "", "rm", r.box.ID)
+		}
+	}
+	return nil
+}
+
+// run runs a hutch command in the terminal, in dir, then comes back to the TUI,
+// pausing first if it failed so its error can be read.
+func (m *tui) run(dir, open string, args ...string) tea.Cmd {
+	c := exec.Command("sh", "-c", shellJoin(append([]string{m.exe}, args...)...)+` || { printf '\n[press Enter]'; read _; }`)
+	c.Dir = dir
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		if err != nil {
+			return doneMsg{status: err.Error()}
+		}
+		return doneMsg{open: open}
 	})
-	if len(projects) == 0 {
-		projects = []api.Project{{Slug: "hutch"}}
-	}
-	for i, p := range projects {
-		args := append([]string{"new-window", "-d", "-t", "hutch:"}, tabArgs(exe, p, boxes)...)
-		if i == 0 {
-			args = append([]string{"-f", conf, "new-session", "-d", "-s", "hutch"}, tabArgs(exe, p, boxes)...)
-		}
-		if out, err := tmuxCmd(args...).CombinedOutput(); err != nil {
-			return fmt.Errorf("tmux: %v: %s", err, out)
-		}
-	}
-	return attach()
 }
 
-// tabArgs are a project tab's window name, folder, and sidebar command.
-func tabArgs(exe string, p api.Project, boxes []api.Box) []string {
-	dir := projectDir(p.ID, boxes)
-	if dir == "" {
-		dir, _ = os.UserHomeDir()
+func (m *tui) projectName(id string) string {
+	if name := m.projects[id]; name != "" {
+		return name
 	}
-	return []string{"-n", p.Slug, "-c", dir, "env HUTCH_TUI=1 " + shellJoin(exe, "tui", "sidebar", "--project", p.ID)}
+	return path.Base(id)
 }
 
-// openTab selects a project's tab, opening one if there is none.
-func openTab(project string, projects []api.Project, boxes []api.Box) error {
-	out, err := tmuxCmd("list-windows", "-t", "hutch", "-F", "#{window_id} #{@hutch-key}").Output()
-	if err != nil {
-		return err
+func (m *tui) mouse(msg tea.MouseMsg) tea.Cmd {
+	mo := msg.Mouse()
+	px, py, pw, ph := m.layout()
+	inPane := mo.X >= px && mo.X < px+pw && mo.Y >= py && mo.Y < py+ph
+	if p := m.shownPane(); inPane && p != nil && !p.ended.Load() {
+		if _, click := msg.(tea.MouseClickMsg); click && !m.typing {
+			m.typing = true
+		}
+		e := uv.Mouse{X: mo.X - px, Y: mo.Y - py, Button: mo.Button, Mod: mo.Mod}
+		var ev vt.Mouse
+		switch msg.(type) {
+		case tea.MouseClickMsg:
+			ev = uv.MouseClickEvent(e)
+		case tea.MouseReleaseMsg:
+			ev = uv.MouseReleaseEvent(e)
+		case tea.MouseWheelMsg:
+			ev = uv.MouseWheelEvent(e)
+		case tea.MouseMotionMsg:
+			ev = uv.MouseMotionEvent(e)
+		}
+		if ev != nil {
+			p.withEmu(func(em *vt.Emulator) { em.SendMouse(ev) })
+		}
+		return nil
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if id, k, ok := strings.Cut(line, " "); ok && k == project {
-			return tmuxCmd("select-window", "-t", id).Run()
+	if m.zoom || inPane {
+		return nil
+	}
+	switch msg := msg.(type) {
+	case tea.MouseWheelMsg:
+		if msg.Button == tea.MouseWheelUp {
+			m.move(-1)
+		} else if msg.Button == tea.MouseWheelDown {
+			m.move(1)
+		}
+	case tea.MouseClickMsg:
+		m.typing = false
+		if i := m.offset + mo.Y; i >= 0 && i < len(m.rows) && m.rows[i].selectable() {
+			m.cursor = i
+			m.sync()
 		}
 	}
-	exe, err := selfPath()
-	if err != nil {
-		return err
-	}
-	for _, p := range projects {
-		if p.ID == project {
-			return tmuxCmd(append([]string{"new-window", "-t", "hutch:"}, tabArgs(exe, p, boxes)...)...).Run()
+	return nil
+}
+
+// changes notices threads that stopped working, and rings for those you aren't
+// looking at: the bell, and a desktop notification (OSC 9).
+func (m *tui) changes(boxes []api.Box) tea.Cmd {
+	var out strings.Builder
+	next := map[string]string{}
+	for _, b := range boxes {
+		for _, t := range b.Threads {
+			key := paneKey(b.ID, t.N)
+			next[key] = t.State
+			if t.State == api.ThreadWorking {
+				delete(m.read, key)
+			}
+			if m.states[key] != api.ThreadWorking || t.State == api.ThreadWorking || m.looking(key) {
+				continue
+			}
+			verb := "is waiting"
+			if t.State == api.ThreadExited {
+				verb = "exited"
+			}
+			fmt.Fprintf(&out, "\a\x1b]9;hutch: %s %s: %s\a", key, verb, strings.ReplaceAll(t.Title, "\a", ""))
 		}
 	}
-	return fmt.Errorf("no project %s", project)
+	m.states = next
+	if out.Len() == 0 {
+		return nil
+	}
+	return tea.Raw(out.String())
+}
+
+func (m *tui) looking(key string) bool { return m.focused && m.shown.Load().(string) == key }
+
+// build lays out the rows: each project, the launch folder's first, then its
+// boxes, most recently started first, with their threads and shell; template
+// boxes last.
+func (m *tui) build() {
+	selected := m.selected().key()
+	type group struct {
+		id    string
+		at    time.Time
+		boxes []api.Box
+	}
+	groups := map[string]*group{}
+	for _, b := range m.boxes {
+		if b.Kind == api.BoxVersion {
+			continue
+		}
+		g := groups[b.Project]
+		if g == nil {
+			g = &group{id: b.Project}
+			groups[b.Project] = g
+		}
+		g.boxes = append(g.boxes, b)
+		if at := boxActive(b); at.After(g.at) {
+			g.at = at
+		}
+	}
+	var order []*group
+	for _, g := range groups {
+		order = append(order, g)
+	}
+	sort.Slice(order, func(i, j int) bool {
+		if (order[i].id == m.here) != (order[j].id == m.here) {
+			return order[i].id == m.here
+		}
+		return order[i].at.After(order[j].at)
+	})
+	m.rows = nil
+	for _, g := range order {
+		name := m.projectName(g.id)
+		if g.id == "" {
+			name = "outside projects"
+		}
+		m.rows = append(m.rows, tuiRow{kind: rowProject, label: name})
+		sort.SliceStable(g.boxes, func(i, j int) bool {
+			if (g.boxes[i].Kind == api.BoxTemplate) != (g.boxes[j].Kind == api.BoxTemplate) {
+				return g.boxes[j].Kind == api.BoxTemplate
+			}
+			return boxActive(g.boxes[i]).After(boxActive(g.boxes[j]))
+		})
+		for _, b := range g.boxes {
+			label := b.ID
+			if b.Kind == api.BoxTemplate {
+				label = "template"
+			}
+			m.rows = append(m.rows, tuiRow{kind: rowBox, box: b, label: label})
+			for _, t := range b.Threads {
+				m.rows = append(m.rows, tuiRow{kind: rowThread, box: b, thread: t, label: t.Title})
+			}
+			if m.shells[b.ID] {
+				m.rows = append(m.rows, tuiRow{kind: rowShell, box: b, label: "shell"})
+			}
+		}
+	}
+	if !m.selectKey(selected) {
+		m.cursor = min(m.cursor, len(m.rows)-1)
+		if m.cursor < 0 || !m.rows[m.cursor].selectable() {
+			m.cursor = 0
+			m.move(1)
+		}
+	}
+}
+
+func boxActive(b api.Box) time.Time {
+	at := b.Created
+	for _, t := range b.Threads {
+		if t.Created.After(at) {
+			at = t.Created
+		}
+	}
+	return at
+}
+
+func (m *tui) selected() tuiRow {
+	if m.cursor >= 0 && m.cursor < len(m.rows) {
+		return m.rows[m.cursor]
+	}
+	return tuiRow{}
+}
+
+func (m *tui) selectKey(key string) bool {
+	for i, r := range m.rows {
+		if r.selectable() && r.key() == key {
+			m.cursor = i
+			return true
+		}
+	}
+	return false
+}
+
+func (m *tui) move(d int) {
+	for i := m.cursor + d; i >= 0 && i < len(m.rows); i += d {
+		if m.rows[i].selectable() {
+			m.cursor = i
+			m.typing = false
+			m.sync()
+			return
+		}
+	}
+}
+
+// target is the terminal a row shows: its thread, its shell, or for a box its
+// latest thread. A box that isn't running shows none: nothing wakes by browsing.
+func (m *tui) target(r tuiRow) (box string, n int, ok bool) {
+	if r.box.State != "running" {
+		return "", 0, false
+	}
+	switch r.kind {
+	case rowThread:
+		return r.box.ID, r.thread.N, true
+	case rowShell:
+		return r.box.ID, 0, true
+	case rowBox:
+		if len(r.box.Threads) > 0 {
+			return r.box.ID, r.box.Threads[len(r.box.Threads)-1].N, true
+		}
+	}
+	return "", 0, false
+}
+
+// sync shows the selected row's terminal, connecting it if it isn't kept, and
+// drops terminals of boxes that stopped and those past tui.kept_panes.
+func (m *tui) sync() {
+	running := map[string]bool{}
+	for _, b := range m.boxes {
+		running[b.ID] = b.State == "running"
+	}
+	for k, p := range m.panes {
+		if !running[p.box] {
+			m.drop(k)
+		}
+	}
+	key := ""
+	if box, n, ok := m.target(m.selected()); ok {
+		key = paneKey(box, n)
+		if m.panes[key] == nil {
+			m.connect(box, n)
+		}
+		m.order = append(slices.DeleteFunc(m.order, func(k string) bool { return k == key }), key)
+		for len(m.order) > m.kept {
+			m.drop(m.order[0])
+		}
+		if n > 0 && m.focused {
+			m.read[key] = true
+		}
+	}
+	if m.shown.Load().(string) != key {
+		m.typing = false
+	}
+	m.shown.Store(key)
+	m.markHidden()
+}
+
+func (m *tui) connect(box string, n int) {
+	_, _, w, h := m.layout()
+	p := newPane(box, n, w, h)
+	key := paneKey(box, n)
+	m.panes[key] = p
+	dir := "/workspace"
+	for _, b := range m.boxes {
+		if b.ID == box && b.Path != "" {
+			dir = b.Path
+		}
+	}
+	changed := func() {
+		if m.shown.Load().(string) == key && m.dirty.CompareAndSwap(false, true) {
+			go m.prog.Send(paneMsg{})
+		}
+	}
+	go p.run(m.ctx, m.sess, dir, changed, func(s string) { go m.prog.Send(clipMsg(s)) })
+}
+
+func (m *tui) drop(key string) {
+	if p := m.panes[key]; p != nil {
+		p.close()
+		delete(m.panes, key)
+	}
+	m.order = slices.DeleteFunc(m.order, func(k string) bool { return k == key })
+}
+
+// markHidden tells each kept thread terminal whether it's on screen, for unread.
+func (m *tui) markHidden() {
+	for key, p := range m.panes {
+		p.setHidden(m.ctx, m.sess, !m.looking(key))
+	}
+}
+
+func (m *tui) shownPane() *pane { return m.panes[m.shown.Load().(string)] }
+
+func (m *tui) resize() {
+	_, _, w, h := m.layout()
+	for _, p := range m.panes {
+		p.resize(w, h)
+	}
+}
+
+func (m *tui) View() tea.View {
+	px, py, pw, ph := m.layout()
+	screen, cursor := m.paneView(pw, ph)
+	var body string
+	switch {
+	case m.zoom:
+		body = screen
+	case m.below:
+		lh := py - 1
+		body = lipgloss.JoinVertical(lipgloss.Left, m.listView(m.w, lh), styleRule.Render(strings.Repeat("─", m.w)), screen)
+	default:
+		sep := styleRule.Render(strings.TrimSuffix(strings.Repeat("│\n", ph), "\n"))
+		body = lipgloss.JoinHorizontal(lipgloss.Top, m.listView(px-1, ph), sep, screen)
+	}
+	v := tea.NewView(lipgloss.JoinVertical(lipgloss.Left, body, m.footer()))
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	v.ReportFocus = true
+	v.WindowTitle = "hutch"
+	if m.typing && cursor != nil {
+		v.Cursor = tea.NewCursor(px+cursor.X, py+cursor.Y)
+	}
+	return v
+}
+
+func (m *tui) paneView(w, h int) (string, *uv.Position) {
+	box := lipgloss.NewStyle().Width(w).Height(h).MaxWidth(w).MaxHeight(h)
+	r := m.selected()
+	p := m.shownPane()
+	switch {
+	case len(m.rows) == 0:
+		return box.Render(styleDim.Render("\n  No boxes yet. n starts a task in a new box.")), nil
+	case p != nil && p.ended.Load():
+		why, _ := p.err.Load().(string)
+		return box.Render(styleDim.Render(fmt.Sprintf("\n  %s: %s. Enter reconnects.", m.shown.Load(), why))), nil
+	case p != nil:
+		s, cur := p.render()
+		return box.Render(s), cur
+	case r.box.ID != "" && r.box.State != "running":
+		return box.Render(styleDim.Render(fmt.Sprintf("\n  %s is %s. Enter wakes it.", r.box.ID, r.box.State))), nil
+	case r.kind == rowBox:
+		return box.Render(styleDim.Render("\n  No threads. N starts one, t opens a shell.")), nil
+	}
+	return box.Render(""), nil
+}
+
+func (m *tui) listView(w, h int) string {
+	if m.cursor < m.offset {
+		m.offset = m.cursor
+	}
+	if m.cursor >= m.offset+h {
+		m.offset = m.cursor - h + 1
+	}
+	m.offset = max(min(m.offset, len(m.rows)-h), 0)
+	var lines []string
+	for i := m.offset; i < len(m.rows) && len(lines) < h; i++ {
+		line := m.rowView(m.rows[i], w)
+		if i == m.cursor {
+			st := styleCursor
+			if m.typing || !m.focused {
+				st = styleBlurred
+			}
+			line = st.Render(padRight(ansi.Strip(line), w))
+		}
+		lines = append(lines, line)
+	}
+	return lipgloss.NewStyle().Width(w).Height(h).MaxWidth(w).Render(strings.Join(lines, "\n"))
+}
+
+func (m *tui) rowView(r tuiRow, w int) string {
+	switch r.kind {
+	case rowProject:
+		left := " " + styleBold.Render(truncate(r.label, w-4)) + " "
+		return left + styleRule.Render(strings.Repeat("─", max(w-lipgloss.Width(left), 0)))
+	case rowBox:
+		state := ""
+		switch r.box.State {
+		case "running":
+		case "asleep":
+			state = "asleep"
+		default:
+			state = r.box.State
+		}
+		if r.box.PushError != "" {
+			state = "push failed"
+		}
+		right := styleDim.Render(state)
+		branch := ""
+		if r.box.Branch != "" {
+			branch = styleDim.Render(" ↳ " + r.box.Branch)
+		}
+		name := styleBold.Render(r.label)
+		if r.box.State != "running" {
+			name = styleDim.Render(r.label)
+		}
+		return spread(" "+name+truncateStyled(branch, w-lipgloss.Width(r.label)-lipgloss.Width(state)-4), right, w)
+	case rowShell:
+		return spread("   "+styleDim.Render("❯")+" shell", "", w)
+	}
+	t := r.thread
+	key := r.key()
+	dot := styleDim.Render("●")
+	switch {
+	case r.box.State != "running":
+		dot = styleDim.Render("z")
+	case t.State == api.ThreadWorking:
+		dot = styleWorking.Render(spinner[m.frame%len(spinner)])
+	case t.State == api.ThreadExited:
+		dot = styleExited.Render("●")
+	case t.State == api.ThreadWaiting && t.Unread && !m.read[key]:
+		dot = styleUnread.Render("●")
+	case t.State == api.ThreadWaiting:
+		dot = styleRead.Render("●")
+	}
+	right := styleDim.Render(t.Agent + " " + shortAge(t.Created))
+	left := fmt.Sprintf("   %s %d ", dot, t.N)
+	text := truncate(t.Title, w-lipgloss.Width(left)-lipgloss.Width(right)-1)
+	if key == m.shown.Load().(string) {
+		text = styleBold.Render(text)
+	}
+	return spread(left+text, right, w)
+}
+
+func (m *tui) footer() string {
+	switch {
+	case m.inputFor != "":
+		label := "New task in " + m.projectName(m.here) + ": "
+		if m.inputFor != "new" {
+			label = "New thread in " + m.inputFor + ": "
+		}
+		return " " + styleBold.Render(label) + m.input.View() + styleDim.Render("  enter starts · esc cancels")
+	case m.status != "":
+		st := styleDim
+		if m.confirm != "" {
+			st = styleBold
+		}
+		return " " + st.Render(truncate(m.status, m.w-2))
+	case m.typing:
+		return styleTyping.Render(" typing ") + styleDim.Render(" ctrl+] gives the keys back")
+	}
+	keys := "n new · N thread · enter type · t shell · s sleep/wake · d rm · \\ move · z zoom · q quit"
+	return styleDim.Render(" " + truncate(keys, m.w-2))
+}
+
+// spread puts right at the right edge of a line of width w.
+func spread(left, right string, w int) string {
+	gap := w - lipgloss.Width(left) - lipgloss.Width(right)
+	return left + strings.Repeat(" ", max(gap, 1)) + right
+}
+
+// shortAge is how long ago, in at most three characters: now, 12m, 4h, 6d, 3w.
+func shortAge(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case t.IsZero():
+		return ""
+	case d < time.Minute:
+		return "now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	case d < 14*24*time.Hour:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+	return fmt.Sprintf("%dw", int(d.Hours()/24/7))
+}
+
+func truncate(s string, n int) string {
+	r := []rune(s)
+	if n < 1 {
+		return ""
+	}
+	if len(r) > n {
+		return string(r[:n-1]) + "…"
+	}
+	return s
+}
+
+func truncateStyled(s string, n int) string {
+	if n < 1 {
+		return ""
+	}
+	return ansi.Truncate(s, n, "…")
+}
+
+func padRight(s string, n int) string {
+	if w := lipgloss.Width(s); w < n {
+		return s + strings.Repeat(" ", n-w)
+	}
+	return s
 }
 
 // projectDir is where a project is checked out on this machine: where hutch last
@@ -182,7 +996,8 @@ func projectPaths() map[string]string {
 	return m
 }
 
-// rememberProject records where a repository is checked out, for its tab.
+// rememberProject records where a repository is checked out, for new boxes from
+// the TUI.
 func rememberProject(id, root string) {
 	m := projectPaths()
 	if m[id] == root {
@@ -212,184 +1027,4 @@ func shellJoin(args ...string) string {
 		q[i] = shellQuote(a)
 	}
 	return strings.Join(q, " ")
-}
-
-// Bindings have no prefix, so they work when hutch runs inside the user's own tmux.
-// Ctrl-] moves between the sidebar and the right pane; Ctrl-\ reaches the sidebar
-// as F12, which flips the right pane between agent and shell. The status line at
-// the top is the project tabs: + opens one, × closes one, each sidebar sets its
-// tab's counts in @hutch-status.
-const tmuxConf = `set -g prefix None
-unbind C-b
-set -g mouse on
-set -g escape-time 0
-set -g focus-events on
-set -g default-terminal tmux-256color
-set -as terminal-features ",*:RGB"
-set -g allow-passthrough on
-set -g set-titles on
-set -g set-titles-string hutch
-set -g automatic-rename off
-set -g allow-rename off
-set -g renumber-windows on
-set -g bell-action any
-set -g visual-bell off
-set -g pane-border-lines single
-set -g pane-border-indicators off
-set -g pane-border-style fg=colour240
-set -g pane-active-border-style fg=colour240
-set -g pane-border-status top
-set -g pane-border-format "#[fg=colour250]#{?pane_title, #{pane_title} ,}"
-set -g status on
-set -g status-position top
-set -g status-style bg=default,fg=colour244
-set -g status-justify left
-set -g status-left "#[fg=colour250] + "
-set -g status-left-length 6
-set -g window-status-separator "  "
-set -g window-status-style default
-set -g window-status-current-style default
-set -g window-status-last-style default
-set -g window-status-activity-style default
-set -g window-status-bell-style default
-set -g window-status-format "#[fg=colour250] #W#{?@hutch-status, #{E:@hutch-status},} #[range=user|close#{window_id},fg=colour240]×#[norange] "
-set -g window-status-current-format "#[bg=colour238,fg=colour255,bold] #W#[nobold]#{?@hutch-status, #{E:@hutch-status},} #[range=user|close#{window_id},fg=colour244]×#[norange] #[bg=default]"
-set -g status-right "#[fg=colour244]Ctrl-] sidebar ↔ right · Ctrl-\\ agent ↔ shell · ? keys "
-set -g status-right-length 80
-set-hook -g window-resized "resize-pane -t '{left}' -x SIDEBAR"
-set-hook -g client-resized "resize-pane -t '{left}' -x SIDEBAR"
-bind -n C-] select-pane -t :.+
-bind -n 'C-\' send-keys -t '{left}' F12
-bind -n C-PPage previous-window
-bind -n C-NPage next-window
-bind -n MouseDown1Status if -F "#{m:close*,#{mouse_status_range}}" "run-shell \"tmux kill-window -t '#{s/close//:mouse_status_range}'\"" "select-window -t ="
-bind -n MouseDown1StatusLeft display-popup -E -w 70 -h 16 -T " Open a project " EXE tui add
-`
-
-func writeTmuxConf(exe string) (string, error) {
-	dir, err := os.UserCacheDir()
-	if err != nil {
-		return "", err
-	}
-	path := filepath.Join(dir, "hutch", "tmux.conf")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return "", err
-	}
-	conf := strings.ReplaceAll(tmuxConf, "SIDEBAR", strconv.Itoa(sidebarWidth))
-	conf = strings.ReplaceAll(conf, "EXE", exe)
-	return path, os.WriteFile(path, []byte(conf), 0o600)
-}
-
-func tuiCommand() *cobra.Command {
-	c := &cobra.Command{Use: "tui", Hidden: true}
-	var project string
-	sidebarCmd := &cobra.Command{
-		Use:  "sidebar",
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error { return runSidebar(cmd.Context(), project) },
-	}
-	sidebarCmd.Flags().StringVar(&project, "project", "", "the tab's project")
-	c.AddCommand(sidebarCmd)
-	c.AddCommand(&cobra.Command{
-		Use:  "welcome",
-		Args: cobra.NoArgs,
-		Run: func(*cobra.Command, []string) {
-			fmt.Print("\n  Choose a thread on the left and press Enter,\n  or n for a new task in a new box.\n\n  Ctrl-] moves between the sidebar and this pane.\n")
-			select {}
-		},
-	})
-	// add opens the tab of a project that has none.
-	c.AddCommand(&cobra.Command{
-		Use:  "add",
-		Args: cobra.NoArgs,
-		RunE: withServer(func(ctx context.Context, sess *yamux.Session, _ []string) error {
-			var projects []api.Project
-			if err := rpc.Call(ctx, sess, api.ProjectList, struct{}{}, &projects); err != nil {
-				return err
-			}
-			boxes, err := listBoxes(ctx, sess)
-			if err != nil {
-				return err
-			}
-			out, _ := tmuxCmd("list-windows", "-t", "hutch", "-F", "#{@hutch-key}").Output()
-			open := map[string]bool{}
-			for _, k := range strings.Split(string(out), "\n") {
-				open[strings.TrimSpace(k)] = true
-			}
-			var opts []huh.Option[string]
-			for _, p := range projects {
-				if !open[p.ID] {
-					opts = append(opts, huh.NewOption(p.Slug+"  "+p.ID, p.ID))
-				}
-			}
-			if len(opts) == 0 {
-				fmt.Print("\n  Every project has a tab. A new one starts with hutch init in its repository.\n\n  Press Enter.")
-				fmt.Scanln()
-				return nil
-			}
-			var id string
-			if err := huh.NewSelect[string]().Title("Open which project?").Options(opts...).Value(&id).Run(); err != nil {
-				return nil
-			}
-			return openTab(id, projects, boxes)
-		}),
-	})
-	// connect shows one thread, waking its box, and reconnects on Enter after it
-	// drops, so the right pane stays usable.
-	c.AddCommand(&cobra.Command{
-		Use:  "connect <box>/<thread> | <box> --shell",
-		Args: cobra.ExactArgs(1),
-		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
-			box, n, err := parseTarget(args[0])
-			if err != nil {
-				return err
-			}
-			in := bufio.NewReader(os.Stdin)
-			for {
-				b, err := findBox(ctx, sess, box)
-				if err != nil {
-					return err
-				}
-				if b.State == "asleep" || b.State == "archived" {
-					fmt.Printf("waking %s…\n", box)
-					if err := rpc.Call(ctx, sess, api.BoxWake, api.IDParams{ID: box}, nil); err != nil {
-						fmt.Printf("%v\n", err)
-					}
-				}
-				dir := b.Path
-				if dir == "" {
-					dir = "/workspace"
-				}
-				argv := tmuxAttach("shell-1", dir)
-				if n > 0 {
-					argv = viewArgv(n, true)
-				}
-				err = terminal(ctx, sess, box, argv)
-				fmt.Print("\033[2J\033[H")
-				if err != nil {
-					fmt.Printf("%s: %v\n", args[0], err)
-				}
-				fmt.Printf("Disconnected from %s. Enter reconnects.\n", args[0])
-				if _, err := in.ReadString('\n'); err != nil {
-					return nil
-				}
-			}
-		}),
-	})
-	return c
-}
-
-// viewArgv attaches a thread in a session of its own grouped with the box's
-// "hutch" session, so several viewers can each show a different thread. Plain
-// hides the inner tmux's status bar and prefix, for the TUI.
-func viewArgv(n int, plain bool) []string {
-	b := make([]byte, 4)
-	rand.Read(b)
-	name := "view-" + hex.EncodeToString(b)
-	argv := []string{"tmux", "new-session", "-t", agentSession, "-s", name,
-		";", "set-option", "destroy-unattached", "on", ";", "select-window", "-t", name + ":" + strconv.Itoa(n)}
-	if plain {
-		argv = append(argv, ";", "set-option", "status", "off", ";", "set-option", "prefix", "None")
-	}
-	return argv
 }

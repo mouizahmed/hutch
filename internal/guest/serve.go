@@ -98,6 +98,31 @@ func (r *responder) fail(err error) {
 	r.send(guestproto.Response{Type: guestproto.RespError, Error: err.Error()})
 }
 
+var open = struct {
+	sync.Mutex
+	conns map[net.Conn]bool
+}{conns: map[net.Conn]bool{}}
+
+func track(conn net.Conn, on bool) {
+	open.Lock()
+	defer open.Unlock()
+	if on {
+		open.conns[conn] = true
+	} else {
+		delete(open.conns, conn)
+	}
+}
+
+func closeOthers(keep net.Conn) {
+	open.Lock()
+	defer open.Unlock()
+	for c := range open.conns {
+		if c != keep {
+			c.Close()
+		}
+	}
+}
+
 func handle(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	var req guestproto.Request
@@ -122,6 +147,8 @@ func handle(ctx context.Context, conn net.Conn) {
 	}
 	sessions.Add(1)
 	defer sessions.Add(-1)
+	track(conn, true)
+	defer track(conn, false)
 
 	if req.Type == guestproto.TypeDial {
 		if req.Dial == nil {
@@ -184,6 +211,9 @@ func handle(ctx context.Context, conn net.Conn) {
 			r.fail(fmt.Errorf("restore request without body"))
 			return
 		}
+		// Connections from before a sleep look open but their host is gone, and
+		// their terminals would count as watched forever.
+		closeOthers(conn)
 		if err := restore(*req.Restore); err != nil {
 			r.fail(err)
 			return
