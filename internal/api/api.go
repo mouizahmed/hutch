@@ -516,8 +516,10 @@ type Worker struct {
 	Classes []string `json:"classes,omitempty"`
 	Disk    Disk     `json:"disk"`
 	Boxes   []Box    `json:"boxes,omitempty"`
-	// ReservedMiB is the memory its awake boxes reserve; set by the server.
+	// ReservedMiB is the memory its awake boxes reserve, and UsedMiB what its
+	// last report found in use; set by the server.
 	ReservedMiB int  `json:"reserved_mib,omitempty"`
+	UsedMiB     int  `json:"used_mib,omitempty"`
 	Gone        bool `json:"gone,omitempty"` // removed; its boxes restore elsewhere
 	// Draining workers take no new boxes.
 	Draining bool `json:"draining,omitempty"`

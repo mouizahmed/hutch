@@ -76,6 +76,8 @@ type tui struct {
 	refresh         time.Duration
 
 	boxes    []api.Box
+	workers  []api.Worker
+	reached  bool              // the last refresh reached the machine
 	projects map[string]string // id → slug
 	rows     []tuiRow
 	cursor   int
@@ -105,6 +107,7 @@ type tui struct {
 type boxesMsg struct {
 	boxes    []api.Box
 	projects []api.Project
+	workers  []api.Worker
 	err      error
 }
 type (
@@ -181,6 +184,9 @@ func (m *tui) poll() tea.Cmd {
 		if msg.err = rpc.Call(ctx, sess, api.BoxList, struct{}{}, &msg.boxes); msg.err == nil {
 			msg.err = rpc.Call(ctx, sess, api.ProjectList, struct{}{}, &msg.projects)
 		}
+		if msg.err == nil {
+			msg.err = rpc.Call(ctx, sess, api.WorkerList, struct{}{}, &msg.workers)
+		}
 		return msg
 	}
 }
@@ -192,7 +198,7 @@ func (m *tui) layout() (x, y, w, h int) {
 	case m.zoom:
 		return 0, 0, m.w, m.h - 1
 	case m.below:
-		lh := min(len(m.rows)+1, m.h/3)
+		lh := min(len(m.rows)+2, m.h/3)
 		return 0, lh + 1, m.w, max(m.h-lh-2, 1)
 	}
 	lw := min(m.listWidth, m.w/2)
@@ -224,6 +230,7 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.SetClipboard(string(msg))
 	case boxesMsg:
 		next := tea.Tick(m.refresh, func(time.Time) tea.Msg { return refreshMsg{} })
+		m.reached = msg.err == nil
 		if msg.err != nil {
 			m.setStatus("can't reach the machine: " + msg.err.Error())
 			if m.sess.IsClosed() {
@@ -239,7 +246,7 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, next
 		}
 		notes := m.changes(msg.boxes)
-		m.boxes = msg.boxes
+		m.boxes, m.workers = msg.boxes, msg.workers
 		for _, p := range msg.projects {
 			m.projects[p.ID] = p.Slug
 		}
@@ -529,7 +536,7 @@ func (m *tui) mouse(msg tea.MouseMsg) tea.Cmd {
 		}
 	case tea.MouseClickMsg:
 		m.typing = false
-		if i := m.offset + mo.Y; i >= 0 && i < len(m.rows) && m.rows[i].selectable() {
+		if i := m.offset + mo.Y - 1; mo.Y > 0 && i < len(m.rows) && m.rows[i].selectable() {
 			m.cursor = i
 			m.sync()
 		}
@@ -819,14 +826,15 @@ func (m *tui) paneView(w, h int) (string, *uv.Position) {
 }
 
 func (m *tui) listView(w, h int) string {
+	rows := h - 1 // under the machine line
 	if m.cursor < m.offset {
 		m.offset = m.cursor
 	}
-	if m.cursor >= m.offset+h {
-		m.offset = m.cursor - h + 1
+	if m.cursor >= m.offset+rows {
+		m.offset = m.cursor - rows + 1
 	}
-	m.offset = max(min(m.offset, len(m.rows)-h), 0)
-	var lines []string
+	m.offset = max(min(m.offset, len(m.rows)-rows), 0)
+	lines := []string{m.machineLine(w)}
 	for i := m.offset; i < len(m.rows) && len(lines) < h; i++ {
 		line := m.rowView(m.rows[i], w)
 		if i == m.cursor {
@@ -839,6 +847,42 @@ func (m *tui) listView(w, h int) string {
 		lines = append(lines, line)
 	}
 	return lipgloss.NewStyle().Width(w).Height(h).MaxWidth(w).Render(strings.Join(lines, "\n"))
+}
+
+// machineLine is your machine: whether it's reachable, its memory in use, and how
+// many boxes are awake.
+func (m *tui) machineLine(w int) string {
+	name := machineTarget()
+	if name == "" {
+		name = "this computer"
+	}
+	var online, used, total, awake int
+	for _, wk := range m.workers {
+		if wk.Gone {
+			continue
+		}
+		if wk.Online {
+			online++
+			used += wk.UsedMiB
+			total += wk.MemMiB
+		}
+	}
+	for _, b := range m.boxes {
+		if b.State == "running" && b.Kind != api.BoxVersion {
+			awake++
+		}
+	}
+	left := " " + styleBold.Render(truncate(name, w/2)) + " "
+	var right string
+	switch {
+	case !m.reached:
+		right = styleError.Render("● unreachable")
+	case online == 0:
+		right = styleError.Render("● offline")
+	default:
+		right = styleRead.Render("●") + styleDim.Render(fmt.Sprintf(" %.1f/%.1f GB · %d awake", float64(used)/1024, float64(total)/1024, awake))
+	}
+	return spread(left, right, w)
 }
 
 func (m *tui) rowView(r tuiRow, w int) string {

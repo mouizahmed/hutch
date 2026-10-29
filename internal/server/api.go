@@ -106,6 +106,9 @@ func (s *Server) workerList(ctx context.Context, _ json.RawMessage, _ *rpc.Out) 
 		ws[i].ReservedMiB = reserved[ws[i].ID]
 		if w := s.workers[ws[i].ID]; w != nil {
 			ws[i].Online, ws[i].Disk = true, w.info.Disk
+			if w.memTotal > 0 {
+				ws[i].UsedMiB = w.memTotal - w.memAvailable
+			}
 		}
 	}
 	s.mu.Unlock()
