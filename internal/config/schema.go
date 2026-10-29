@@ -126,6 +126,8 @@ var Keys = []*Key{
 		Doc: "disk the image builder keeps for cached layers"},
 	{Path: "idle.check_interval", Kind: Duration, Default: "15s", Min: "1s", Max: "5m", Layers: machine,
 		Doc: "how often the machine checks boxes for activity"},
+	{Path: "threads.check_interval", Kind: Duration, Default: "1s", Min: "250ms", Max: "1m", Layers: machine,
+		Doc: "how often the machine reads awake boxes' thread states, between fuller checks"},
 	{Path: "threads.working_window", Kind: Duration, Default: "5s", Min: "1s", Max: "10m", Layers: machine,
 		Doc: "a thread with output this recent counts as working"},
 
@@ -160,8 +162,8 @@ var Keys = []*Key{
 		Doc: "the TUI's list width in columns, beside the terminal"},
 	{Path: "tui.kept_panes", Kind: Int, Default: int64(4), Min: "1", Max: "16", Layers: user,
 		Doc: "terminals the TUI keeps connected, so returning to one paints at once"},
-	{Path: "tui.refresh", Kind: Duration, Default: "2s", Min: "250ms", Max: "1m", Layers: user,
-		Doc: "how often the TUI reads boxes and threads from the machine"},
+	{Path: "tui.reconnect", Kind: Duration, Default: "2s", Min: "250ms", Max: "1m", Layers: user,
+		Doc: "how often the TUI tries the machine again after losing it"},
 	{Path: "gc.grace", Kind: Duration, Default: "24h", Min: "1h", Max: "30d", Layers: machine,
 		Doc: "chunks younger than this are never deleted, so a sweep can't race an upload"},
 }

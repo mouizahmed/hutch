@@ -66,6 +66,7 @@ type Server struct {
 	pushErrors map[string]string
 	// threadWatch decides when a thread's stop is worth a notification, by box/n.
 	threadWatch map[string]*threadWatch
+	events      *hub
 }
 
 type workerConn struct {
@@ -94,7 +95,10 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{cfg: cfg, store: st, master: master, workers: map[string]*workerConn{}, pending: map[string]int{}, peaks: map[string]int{}, relieving: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{}, threadWatch: map[string]*threadWatch{},
-		fileHashes: map[string]map[string]string{}, syncing: map[string]bool{}, pushErrors: map[string]string{}}
+		fileHashes: map[string]map[string]string{}, syncing: map[string]bool{}, pushErrors: map[string]string{}, events: newHub()}
+	st.onChange = s.changed
+	go s.publish()
+	s.changed()
 	b, bcfg, err := loadBucket(cfg.Dir)
 	if err != nil {
 		return nil, err
@@ -221,6 +225,7 @@ func (s *Server) AttachWorker(ctx context.Context, id, name string, conn net.Con
 	}
 	s.workers[id] = w
 	s.mu.Unlock()
+	s.changed()
 	log.Printf("worker %s (%s) connected: %s, %d boxes", id, info.Name, info.Class, len(info.Boxes))
 	go s.pruneAll(ctx)
 
@@ -231,6 +236,7 @@ func (s *Server) AttachWorker(ctx context.Context, id, name string, conn net.Con
 	}
 	s.mu.Unlock()
 	s.store.workerSeen(id, info)
+	s.changed()
 	log.Printf("worker %s disconnected", id)
 }
 
@@ -312,34 +318,8 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 				if err == nil && prev.State != br.Box.State {
 					s.store.event(br.Box.ID, "state", br.Box.State)
 				}
-				states := map[int]api.ThreadState{}
-				for _, t := range br.Threads {
-					states[t.N] = t
-				}
 				s.mu.Lock()
-				prevStates := s.threadStates[br.Box.ID]
-				// A box that stops forgets its threads' states, so the first report
-				// after a wake, whose redraw is output, is only a baseline.
-				if br.Box.State == "running" {
-					s.threadStates[br.Box.ID] = states
-				} else {
-					delete(s.threadStates, br.Box.ID)
-				}
-				for n, t := range states {
-					if t.SessionID != "" && prevStates[n].SessionID != t.SessionID {
-						s.store.updateThread(br.Box.ID, n, "session_id", t.SessionID)
-					}
-					// A thread that worked and stopped while nobody looked is unread, even
-					// when the turn fell between two reports; looking at it, or it
-					// working again, reads it.
-					prev, known := prevStates[n]
-					switch {
-					case t.Viewed || t.State == api.ThreadWorking:
-						s.store.setUnread(br.Box.ID, n, false)
-					case known && (prev.State == api.ThreadWorking || t.LastOutput.After(prev.LastOutput)):
-						s.store.setUnread(br.Box.ID, n, true)
-					}
-				}
+				states := s.applyThreads(br.Box.ID, br.Box.State == "running", br.Threads)
 				if br.Push != nil {
 					if prev := s.pushErrors[br.Box.ID]; br.Push.Error != prev && br.Push.Error != "" {
 						s.store.event(br.Box.ID, "push", br.Push.Error)
@@ -350,7 +330,56 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 				s.watchThreads(br.Box.ID, states)
 				s.watchReport(br)
 			}
+			s.changed()
+			return nil, nil
+		},
+		api.WorkerThreads: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+			var p api.WorkerThreadsParams
+			if err := rpc.Decode(params, &p); err != nil {
+				return nil, err
+			}
+			if b, err := s.store.box(p.Box); err != nil || b.Worker != workerID || b.State != "running" {
+				return nil, nil
+			}
+			s.mu.Lock()
+			states := s.applyThreads(p.Box, true, p.Threads)
+			s.mu.Unlock()
+			s.watchThreads(p.Box, states)
+			s.changed()
 			return nil, nil
 		},
 	}
+}
+
+// applyThreads takes a box's reported thread states, with s.mu held: their
+// sessions, and whether each is unread. A box that stops forgets its threads'
+// states, so the first report after a wake, whose redraw is output, is only a
+// baseline.
+func (s *Server) applyThreads(box string, running bool, threads []api.ThreadState) map[int]api.ThreadState {
+	states := map[int]api.ThreadState{}
+	for _, t := range threads {
+		states[t.N] = t
+	}
+	prevStates := s.threadStates[box]
+	if running {
+		s.threadStates[box] = states
+	} else {
+		delete(s.threadStates, box)
+	}
+	for n, t := range states {
+		if t.SessionID != "" && prevStates[n].SessionID != t.SessionID {
+			s.store.updateThread(box, n, "session_id", t.SessionID)
+		}
+		// A thread that worked and stopped while nobody looked is unread, even
+		// when the turn fell between two reports; looking at it, or it working
+		// again, reads it.
+		prev, known := prevStates[n]
+		switch {
+		case t.Viewed || t.State == api.ThreadWorking:
+			s.store.setUnread(box, n, false)
+		case known && (prev.State == api.ThreadWorking || t.LastOutput.After(prev.LastOutput)):
+			s.store.setUnread(box, n, true)
+		}
+	}
+	return states
 }

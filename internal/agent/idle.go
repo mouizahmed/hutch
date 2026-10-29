@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"log"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/config"
+	"github.com/mouizahmed/hutch/internal/guestproto"
 	"github.com/mouizahmed/hutch/internal/rpc"
 	"github.com/mouizahmed/hutch/internal/worker"
 )
@@ -32,6 +34,8 @@ type boxActivity struct {
 	// When this worker started watching the box; earlier output, like a wake's
 	// redraw, isn't work.
 	since time.Time
+	// The thread states the server has.
+	reported []api.ThreadState
 }
 
 // monitor checks running boxes, puts idle ones to sleep, and reports to the server
@@ -64,9 +68,18 @@ func (m *monitor) kick() {
 	}
 }
 
+// run checks boxes fully every idle.check_interval, and their threads every
+// threads.check_interval in between.
 func (m *monitor) run(ctx context.Context, server *atomic.Pointer[yamux.Session]) {
+	var full time.Time
 	for {
-		t := time.NewTimer(m.settings.Load().IdleInterval)
+		st := m.settings.Load()
+		every := st.ThreadInterval
+		if every <= 0 || every > st.IdleInterval {
+			every = st.IdleInterval
+		}
+		t := time.NewTimer(every)
+		kicked := false
 		select {
 		case <-ctx.Done():
 			t.Stop()
@@ -74,8 +87,14 @@ func (m *monitor) run(ctx context.Context, server *atomic.Pointer[yamux.Session]
 		case <-t.C:
 		case <-m.kicks:
 			t.Stop()
+			kicked = true
 		}
-		m.check(ctx, server)
+		if kicked || time.Since(full) >= st.IdleInterval {
+			m.check(ctx, server)
+			full = time.Now()
+		} else {
+			m.checkThreads(ctx, server)
+		}
 	}
 }
 
@@ -148,6 +167,84 @@ func (m *monitor) check(ctx context.Context, server *atomic.Pointer[yamux.Sessio
 	}
 }
 
+// threadStates reads each thread's state from its terminal. Agents print while
+// they work (spinners, timers) and stop when they hand back; a bell hands back at
+// once, and a redraw after a resize isn't work.
+func (m *monitor) threadStates(a *boxActivity, threads []guestproto.ThreadStatus, now time.Time) []api.ThreadState {
+	a.working = false
+	window := m.settings.Load().WorkingWindow
+	if a.output == nil {
+		a.output = map[int]time.Time{}
+	}
+	var out []api.ThreadState
+	for _, th := range threads {
+		last := time.Unix(th.LastOutput, 0)
+		if prev, ok := a.output[th.N]; th.Redraw && ok {
+			last = prev
+		}
+		a.output[th.N] = last
+		state := api.ThreadWaiting
+		switch {
+		case th.Dead:
+			state = api.ThreadExited
+		case !th.Bell && !th.Redraw && now.Sub(last) < window && last.After(a.since.Add(time.Second)):
+			state = api.ThreadWorking
+			a.working = true
+		}
+		if last.After(a.lastActive) {
+			a.lastActive = last
+		}
+		out = append(out, api.ThreadState{N: th.N, State: state, LastOutput: last, Viewed: th.Viewed, SessionID: th.SessionID})
+	}
+	return out
+}
+
+// checkThreads reads awake boxes' thread states between full checks, and tells
+// the server about the boxes whose threads changed.
+func (m *monitor) checkThreads(ctx context.Context, server *atomic.Pointer[yamux.Session]) {
+	boxes, err := m.w.List()
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	for _, b := range boxes {
+		if !m.w.Alive(b) {
+			continue
+		}
+		a := m.seen[b.ID]
+		if a == nil {
+			a = &boxActivity{lastActive: now, since: now}
+			m.seen[b.ID] = a
+		}
+		sctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		st, err := m.w.GuestThreads(sctx, b.ID)
+		cancel()
+		if err != nil {
+			continue
+		}
+		states := m.threadStates(a, st.Threads, now)
+		if sameThreads(a.reported, states) {
+			continue
+		}
+		a.reported = states
+		if sess := server.Load(); sess != nil {
+			rctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			if err := rpc.Call(rctx, sess, api.WorkerThreads, api.WorkerThreadsParams{Box: b.ID, Threads: states}, nil); err != nil {
+				log.Printf("threads: report %s: %v", b.ID, err)
+			}
+			cancel()
+		}
+	}
+}
+
+// sameThreads reports whether two readings show the same states; output times
+// alone don't count as a change.
+func sameThreads(a, b []api.ThreadState) bool {
+	return slices.EqualFunc(a, b, func(x, y api.ThreadState) bool {
+		return x.N == y.N && x.State == y.State && x.Viewed == y.Viewed && x.SessionID == y.SessionID
+	})
+}
+
 // dueCheckpoint reports whether a stored box has been active since its last
 // checkpoint, at least checkpoint.interval ago; for a box never snapshotted,
 // checkpoint.first_after, so it soon has a snapshot to recover from.
@@ -207,32 +304,8 @@ func (m *monitor) checkBox(ctx context.Context, b *worker.Box) (api.BoxReport, b
 	if a.attached {
 		a.lastActive = now
 	}
-	a.working = false
-	window := m.settings.Load().WorkingWindow
-	if a.output == nil {
-		a.output = map[int]time.Time{}
-	}
-	for _, th := range st.Threads {
-		out := time.Unix(th.LastOutput, 0)
-		if prev, ok := a.output[th.N]; th.Redraw && ok {
-			out = prev
-		}
-		a.output[th.N] = out
-		// Agents print while they work (spinners, timers) and stop when they hand
-		// back; a bell hands back at once.
-		state := api.ThreadWaiting
-		switch {
-		case th.Dead:
-			state = api.ThreadExited
-		case !th.Bell && !th.Redraw && now.Sub(out) < window && out.After(a.since.Add(time.Second)):
-			state = api.ThreadWorking
-			a.working = true
-		}
-		if out.After(a.lastActive) {
-			a.lastActive = out
-		}
-		r.Threads = append(r.Threads, api.ThreadState{N: th.N, State: state, LastOutput: out, Viewed: th.Viewed, SessionID: th.SessionID})
-	}
+	r.Threads = m.threadStates(a, st.Threads, now)
+	a.reported = r.Threads
 	r.LastActive = a.lastActive
 	return r, now.Sub(a.lastActive) >= policy.Timeout
 }

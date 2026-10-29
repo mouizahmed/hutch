@@ -38,6 +38,9 @@ const (
 	BoxDial    = "box.dial"
 	// BoxRelease gives a branch a box took over back to the laptop (hutch local).
 	BoxRelease = "box.release"
+	// Events is a stream of Event: the current boxes, threads, and workers, then
+	// each change.
+	Events = "events"
 
 	UserGet       = "user.get"
 	UserPutConfig = "user.put_config"
@@ -71,6 +74,7 @@ const (
 	WorkerHello    = "worker.hello"
 	WorkerSettings = "worker.settings"
 	WorkerReport   = "worker.report"
+	WorkerThreads  = "worker.threads" // a box's threads changed state, between reports
 
 	ServerInit   = "server.init"
 	ServerGC     = "server.gc"
@@ -198,6 +202,7 @@ type ConfigPutResult struct {
 // with the keys of the projects it hosts. hutchd keeps them in memory only.
 type WorkerSettingsParams struct {
 	IdleInterval    time.Duration `json:"idle_interval"`
+	ThreadInterval  time.Duration `json:"thread_interval"`
 	WorkingWindow   time.Duration `json:"working_window"`
 	Checkpoint      time.Duration `json:"checkpoint"`
 	FirstCheckpoint time.Duration `json:"first_checkpoint"`
@@ -219,7 +224,7 @@ type WorkerSettingsParams struct {
 
 // NewWorkerSettings is the part of the worker's settings that comes from config.
 func NewWorkerSettings(c *config.Config) WorkerSettingsParams {
-	return WorkerSettingsParams{IdleInterval: c.Duration("idle.check_interval"), WorkingWindow: c.Duration("threads.working_window"),
+	return WorkerSettingsParams{IdleInterval: c.Duration("idle.check_interval"), ThreadInterval: c.Duration("threads.check_interval"), WorkingWindow: c.Duration("threads.working_window"),
 		Checkpoint: c.Duration("checkpoint.interval"), FirstCheckpoint: c.Duration("checkpoint.first_after"), ChunkCache: c.Percent("machine.chunk_cache"), Refresh: c.Duration("gc.grace") / 2,
 		Overcommit: c.Float("machine.overcommit"), MemoryHigh: c.Percent("machine.memory_high"), MemoryCritical: c.Percent("machine.memory_critical"),
 		PeakWindow: c.Duration("machine.peak_window"), PressureStall: c.Duration("machine.pressure_stall")}
@@ -482,6 +487,35 @@ type ThreadState struct {
 	Viewed     bool      `json:"viewed,omitempty"` // a client shows it now
 	SessionID  string    `json:"session_id,omitempty"`
 }
+
+// WorkerThreadsParams reports a box's thread states when they change.
+type WorkerThreadsParams struct {
+	Box     string        `json:"box"`
+	Threads []ThreadState `json:"threads"`
+}
+
+// An Event is one change: a box (without its threads) or thread as it is now, a
+// worker, or a box, thread, or worker removed.
+type Event struct {
+	Type   string  `json:"type"`
+	Box    *Box    `json:"box,omitempty"`
+	Thread *Thread `json:"thread,omitempty"`
+	Worker *Worker `json:"worker,omitempty"`
+	// ID and N name what was removed.
+	ID string `json:"id,omitempty"`
+	N  int    `json:"n,omitempty"`
+}
+
+const (
+	EventBox           = "box"
+	EventBoxRemoved    = "box_removed"
+	EventThread        = "thread"
+	EventThreadRemoved = "thread_removed"
+	EventWorker        = "worker"
+	EventWorkerRemoved = "worker_removed"
+	// EventSynced follows the current state when a stream starts.
+	EventSynced = "synced"
+)
 
 type ThreadParams struct {
 	Box      string `json:"box"`

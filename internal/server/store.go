@@ -126,6 +126,22 @@ type store struct {
 	db *sql.DB
 	// userKey seals the user layer, so a copy of the database alone doesn't expose credentials.
 	userKey durable.Key
+	// onChange is called after every write, for events.
+	onChange func()
+}
+
+func (s *store) exec(query string, args ...any) (sql.Result, error) {
+	res, err := s.db.Exec(query, args...)
+	if err == nil {
+		s.changed()
+	}
+	return res, err
+}
+
+func (s *store) changed() {
+	if s.onChange != nil {
+		s.onChange()
+	}
 }
 
 // migrations add columns to tables from earlier versions; each may already be done.
@@ -189,13 +205,13 @@ func hashSecret(secret string) string {
 // ensureWorker records the worker on this machine, keeping its boxes if it is known.
 func (s *store) ensureWorker(id, name string) error {
 	now := time.Now().UTC()
-	_, err := s.db.Exec(`INSERT INTO workers (id, name, created, last_seen) VALUES (?, ?, ?, ?)
+	_, err := s.exec(`INSERT INTO workers (id, name, created, last_seen) VALUES (?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET name = excluded.name, gone = 0`, id, name, now, now)
 	return err
 }
 
 func (s *store) setDraining(id string, on bool) error {
-	res, err := s.db.Exec(`UPDATE workers SET draining = ? WHERE id = ?`, on, id)
+	res, err := s.exec(`UPDATE workers SET draining = ? WHERE id = ?`, on, id)
 	if err != nil {
 		return err
 	}
@@ -206,13 +222,13 @@ func (s *store) setDraining(id string, on bool) error {
 }
 
 func (s *store) setWorkerGone(id string) error {
-	_, err := s.db.Exec(`UPDATE workers SET gone = 1 WHERE id = ?`, id)
+	_, err := s.exec(`UPDATE workers SET gone = 1 WHERE id = ?`, id)
 	return err
 }
 
 // workerSeen records a worker's capacity as of its connection, and when it was last seen.
 func (s *store) workerSeen(id string, w api.Worker) error {
-	_, err := s.db.Exec(`UPDATE workers SET class = ?, version = ?, cpus = ?, mem_mib = ?, arch = ?, disk_bytes = ?, last_seen = ? WHERE id = ?`,
+	_, err := s.exec(`UPDATE workers SET class = ?, version = ?, cpus = ?, mem_mib = ?, arch = ?, disk_bytes = ?, last_seen = ? WHERE id = ?`,
 		w.Class, w.Version, w.CPUs, w.MemMiB, w.Arch, w.Disk.Total, time.Now().UTC(), id)
 	return err
 }
@@ -235,7 +251,7 @@ func (s *store) workers() ([]api.Worker, error) {
 }
 
 func (s *store) putBox(b api.Box) error {
-	_, err := s.db.Exec(`
+	_, err := s.exec(`
 		INSERT INTO boxes (id, worker_id, state, image, vcpus, mem_mib, generation, class, reach_ip, created, updated)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET worker_id = excluded.worker_id, state = excluded.state, generation = excluded.generation,
@@ -272,12 +288,12 @@ func (s *store) versionWorkers(box string) ([]string, error) {
 }
 
 func (s *store) addVersionCopy(box, worker string) error {
-	_, err := s.db.Exec(`INSERT OR IGNORE INTO version_copies (box_id, worker_id) VALUES (?, ?)`, box, worker)
+	_, err := s.exec(`INSERT OR IGNORE INTO version_copies (box_id, worker_id) VALUES (?, ?)`, box, worker)
 	return err
 }
 
 func (s *store) deleteVersionCopy(box, worker string) error {
-	_, err := s.db.Exec(`DELETE FROM version_copies WHERE box_id = ? AND worker_id = ?`, box, worker)
+	_, err := s.exec(`DELETE FROM version_copies WHERE box_id = ? AND worker_id = ?`, box, worker)
 	return err
 }
 
@@ -301,10 +317,10 @@ func (s *store) statesSince() (map[string]time.Time, error) {
 }
 
 func (s *store) deleteBox(id string) error {
-	if _, err := s.db.Exec(`DELETE FROM version_copies WHERE box_id = ?`, id); err != nil {
+	if _, err := s.exec(`DELETE FROM version_copies WHERE box_id = ?`, id); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`DELETE FROM boxes WHERE id = ?`, id)
+	_, err := s.exec(`DELETE FROM boxes WHERE id = ?`, id)
 	return err
 }
 
@@ -380,6 +396,7 @@ func (s *store) syncWorkerBoxes(workerID string, boxes []api.Box, copies []strin
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	s.changed()
 	for _, b := range boxes {
 		b.Worker = workerID
 		if err := s.putBox(b); err != nil {
@@ -390,18 +407,18 @@ func (s *store) syncWorkerBoxes(workerID string, boxes []api.Box, copies []strin
 }
 
 func (s *store) event(boxID, kind, msg string) {
-	s.db.Exec(`INSERT INTO events (ts, box_id, kind, message) VALUES (?, ?, ?, ?)`, time.Now().UTC(), boxID, kind, msg)
+	s.exec(`INSERT INTO events (ts, box_id, kind, message) VALUES (?, ?, ?, ?)`, time.Now().UTC(), boxID, kind, msg)
 }
 
 func (s *store) addThread(t api.Thread, autonomy string) error {
-	_, err := s.db.Exec(`INSERT INTO threads (box_id, n, agent, title, created, session_id, autonomy) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+	_, err := s.exec(`INSERT INTO threads (box_id, n, agent, title, created, session_id, autonomy) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		t.Box, t.N, t.Agent, t.Title, t.Created, t.SessionID, autonomy)
 	return err
 }
 
 // updateThread sets one column of a thread.
 func (s *store) updateThread(box string, n int, column string, value any) error {
-	res, err := s.db.Exec(`UPDATE threads SET `+column+` = ? WHERE box_id = ? AND n = ?`, value, box, n)
+	res, err := s.exec(`UPDATE threads SET `+column+` = ? WHERE box_id = ? AND n = ?`, value, box, n)
 	if err != nil {
 		return err
 	}
@@ -413,7 +430,7 @@ func (s *store) updateThread(box string, n int, column string, value any) error 
 
 // setUnread sets a thread's unread flag, reporting whether it changed.
 func (s *store) setUnread(box string, n int, unread bool) (bool, error) {
-	res, err := s.db.Exec(`UPDATE threads SET unread = ? WHERE box_id = ? AND n = ? AND unread != ?`, unread, box, n, unread)
+	res, err := s.exec(`UPDATE threads SET unread = ? WHERE box_id = ? AND n = ? AND unread != ?`, unread, box, n, unread)
 	if err != nil {
 		return false, err
 	}
@@ -422,7 +439,7 @@ func (s *store) setUnread(box string, n int, unread bool) (bool, error) {
 }
 
 func (s *store) deleteThread(box string, n int) error {
-	_, err := s.db.Exec(`DELETE FROM threads WHERE box_id = ? AND n = ?`, box, n)
+	_, err := s.exec(`DELETE FROM threads WHERE box_id = ? AND n = ?`, box, n)
 	return err
 }
 
@@ -486,7 +503,11 @@ func (s *store) putConfig(name string, base int64, content string) (api.ConfigDo
 	if err != nil {
 		return cur, false, err
 	}
-	return next, false, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return api.ConfigDoc{}, false, err
+	}
+	s.changed()
+	return next, false, nil
 }
 
 type boxMeta struct {
@@ -498,7 +519,7 @@ type boxMeta struct {
 }
 
 func (s *store) putMeta(box string, m boxMeta) error {
-	_, err := s.db.Exec(`INSERT INTO box_meta (box_id, project_id, kind, commit_sha, verified, secrets, version) VALUES (?, ?, ?, ?, ?, ?, ?)
+	_, err := s.exec(`INSERT INTO box_meta (box_id, project_id, kind, commit_sha, verified, secrets, version) VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(box_id) DO UPDATE SET project_id = excluded.project_id, kind = excluded.kind,
 			commit_sha = excluded.commit_sha, verified = excluded.verified, secrets = excluded.secrets, version = excluded.version`,
 		box, m.project, m.kind, m.commit, m.verified, m.secrets, m.version)
@@ -507,7 +528,7 @@ func (s *store) putMeta(box string, m boxMeta) error {
 
 // setImage records what a template box's image was built from.
 func (s *store) setImage(box, image string) error {
-	_, err := s.db.Exec(`UPDATE box_meta SET image = ? WHERE box_id = ?`, image, box)
+	_, err := s.exec(`UPDATE box_meta SET image = ? WHERE box_id = ?`, image, box)
 	return err
 }
 
@@ -536,13 +557,13 @@ func (s *store) project(id string) (api.Project, error) {
 }
 
 func (s *store) setConfirmed(id, settings string) error {
-	_, err := s.db.Exec(`UPDATE projects SET confirmed = ? WHERE id = ?`, settings, id)
+	_, err := s.exec(`UPDATE projects SET confirmed = ? WHERE id = ?`, settings, id)
 	return err
 }
 
 func (s *store) setPeaks(id string, p api.Peaks) error {
 	data, _ := json.Marshal(p)
-	_, err := s.db.Exec(`UPDATE projects SET peaks = ? WHERE id = ?`, string(data), id)
+	_, err := s.exec(`UPDATE projects SET peaks = ? WHERE id = ?`, string(data), id)
 	return err
 }
 
@@ -556,7 +577,7 @@ func (s *store) addProject(id, base string) (api.Project, error) {
 		if n > 1 {
 			slug = fmt.Sprintf("%s-%d", base, n)
 		}
-		_, err := s.db.Exec(`INSERT INTO projects (id, slug, created) VALUES (?, ?, ?)`, id, slug, time.Now().UTC())
+		_, err := s.exec(`INSERT INTO projects (id, slug, created) VALUES (?, ?, ?)`, id, slug, time.Now().UTC())
 		if err == nil {
 			return api.Project{ID: id, Slug: slug}, nil
 		}
@@ -567,7 +588,7 @@ func (s *store) addProject(id, base string) (api.Project, error) {
 }
 
 func (s *store) addTemplate(t api.Template) error {
-	_, err := s.db.Exec(`INSERT INTO templates (project_id, version, commit_sha, box_id, vcpus, mem_mib, created, secrets, image) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err := s.exec(`INSERT INTO templates (project_id, version, commit_sha, box_id, vcpus, mem_mib, created, secrets, image) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.Project, t.Version, t.Commit, t.Box, t.VCPUs, t.MemMiB, t.Created, t.Secrets, t.Image)
 	return err
 }
@@ -656,13 +677,13 @@ func (s *store) putLayerPart(part string, base int64, content []byte) (int64, bo
 }
 
 func (s *store) deleteLayerPart(part string) error {
-	_, err := s.db.Exec(`DELETE FROM user_layer WHERE part = ?`, part)
+	_, err := s.exec(`DELETE FROM user_layer WHERE part = ?`, part)
 	return err
 }
 
 func (s *store) setBoxCredentials(box string, creds []string) error {
 	data, _ := json.Marshal(creds)
-	_, err := s.db.Exec(`INSERT INTO box_credentials (box_id, credentials) VALUES (?, ?)
+	_, err := s.exec(`INSERT INTO box_credentials (box_id, credentials) VALUES (?, ?)
 		ON CONFLICT(box_id) DO UPDATE SET credentials = excluded.credentials`, box, string(data))
 	return err
 }
@@ -681,7 +702,7 @@ func (s *store) boxCredentials(box string) ([]string, error) {
 }
 
 func (s *store) setBoxPath(box, path string) error {
-	_, err := s.db.Exec(`UPDATE boxes SET path = ? WHERE id = ?`, path, box)
+	_, err := s.exec(`UPDATE boxes SET path = ? WHERE id = ?`, path, box)
 	return err
 }
 
@@ -698,14 +719,14 @@ func (s *store) branchOwner(project, branch string) (string, error) {
 
 // setBoxGit records a box's branch; a new branch isn't merged yet.
 func (s *store) setBoxGit(box, branch, base string) error {
-	_, err := s.db.Exec(`INSERT INTO box_git (box_id, branch, base) VALUES (?, ?, ?)
+	_, err := s.exec(`INSERT INTO box_git (box_id, branch, base) VALUES (?, ?, ?)
 		ON CONFLICT(box_id) DO UPDATE SET branch = excluded.branch, base = excluded.base,
 			merged = CASE WHEN box_git.branch = excluded.branch THEN box_git.merged ELSE '' END`, box, branch, base)
 	return err
 }
 
 func (s *store) setMerged(box, how string) error {
-	_, err := s.db.Exec(`UPDATE box_git SET merged = ? WHERE box_id = ?`, how, box)
+	_, err := s.exec(`UPDATE box_git SET merged = ? WHERE box_id = ?`, how, box)
 	return err
 }
 
@@ -718,7 +739,7 @@ func (s *store) projectSecrets(project string) (digest string, content []byte, e
 }
 
 func (s *store) putProjectSecrets(project, digest string, content []byte) error {
-	_, err := s.db.Exec(`INSERT INTO project_secrets (project_id, digest, content, updated) VALUES (?, ?, ?, ?)
+	_, err := s.exec(`INSERT INTO project_secrets (project_id, digest, content, updated) VALUES (?, ?, ?, ?)
 		ON CONFLICT(project_id) DO UPDATE SET digest = excluded.digest, content = excluded.content, updated = excluded.updated`,
 		project, digest, content, time.Now().UTC())
 	return err
@@ -749,16 +770,16 @@ func (s *store) versionsInUse(project string) (map[int]bool, map[string]bool, er
 }
 
 func (s *store) deleteTemplate(project string, version int) error {
-	if _, err := s.db.Exec(`DELETE FROM template_builds WHERE project_id = ? AND version = ?`, project, version); err != nil {
+	if _, err := s.exec(`DELETE FROM template_builds WHERE project_id = ? AND version = ?`, project, version); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`DELETE FROM templates WHERE project_id = ? AND version = ?`, project, version)
+	_, err := s.exec(`DELETE FROM templates WHERE project_id = ? AND version = ?`, project, version)
 	return err
 }
 
 // setTemplateParams keeps how a version was built, to build it again for another class.
 func (s *store) setTemplateParams(project string, version int, params string) error {
-	_, err := s.db.Exec(`UPDATE templates SET params = ? WHERE project_id = ? AND version = ?`, params, project, version)
+	_, err := s.exec(`UPDATE templates SET params = ? WHERE project_id = ? AND version = ?`, params, project, version)
 	return err
 }
 
@@ -790,7 +811,7 @@ func (s *store) templateBuilds(project string, version int) ([]templateBuild, er
 }
 
 func (s *store) addTemplateBuild(project string, version int, class, box string) error {
-	_, err := s.db.Exec(`INSERT OR REPLACE INTO template_builds (project_id, version, class, box_id) VALUES (?, ?, ?, ?)`, project, version, class, box)
+	_, err := s.exec(`INSERT OR REPLACE INTO template_builds (project_id, version, class, box_id) VALUES (?, ?, ?, ?)`, project, version, class, box)
 	return err
 }
 
@@ -833,5 +854,9 @@ func (s *store) deleteProject(id string) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.changed()
+	return nil
 }

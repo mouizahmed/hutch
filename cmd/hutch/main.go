@@ -50,7 +50,7 @@ func main() {
 	root.AddCommand(gitCommands()...)
 	root.AddCommand(handoffCommands()...)
 	root.AddCommand(forwardCommands()...)
-	root.AddCommand(statusCommand())
+	root.AddCommand(statusCommand(), eventsCommand())
 	root.AddCommand(setupCommands()...)
 	root.AddCommand(moveCommand(), resizeCommand(), doctorCommand())
 	root.AddCommand(configCommands(), initCommand(), templateCommands(), projectCommands(), sizesCommand(), userCommands(), loginCommand())

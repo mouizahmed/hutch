@@ -326,7 +326,7 @@ func (s *Server) boxConsole(ctx context.Context, params json.RawMessage, out *rp
 }
 
 func (s *Server) apiStreams() rpc.Streams {
-	return rpc.Streams{api.BoxPTY: s.boxPTY, api.BoxSerial: s.boxSerial, api.BoxDial: s.boxDial, api.BoxExecIn: s.boxExecIn}
+	return rpc.Streams{api.BoxPTY: s.boxPTY, api.BoxSerial: s.boxSerial, api.BoxDial: s.boxDial, api.BoxExecIn: s.boxExecIn, api.Events: s.eventStream}
 }
 
 func (s *Server) boxDial(ctx context.Context, params json.RawMessage, conn net.Conn) error {

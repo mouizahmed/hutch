@@ -608,6 +608,16 @@ func (w *Worker) GuestStatus(ctx context.Context, id string) (guestproto.Status,
 	return w.guest(b).Status(ctx, b.Watch...)
 }
 
+// GuestThreads is a running box's guest status without its watched files: what
+// its threads show.
+func (w *Worker) GuestThreads(ctx context.Context, id string) (guestproto.Status, error) {
+	b, err := w.load(id)
+	if err != nil {
+		return guestproto.Status{}, err
+	}
+	return w.guest(b).Status(ctx)
+}
+
 // Alive reports whether a running box's Firecracker or sandbox process still exists.
 func (w *Worker) Alive(b *Box) bool { return b.State == Running && b.PID > 0 && processAlive(b.PID) }
 

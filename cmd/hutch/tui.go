@@ -73,11 +73,16 @@ type tui struct {
 	here     string // the launch folder's project
 
 	listWidth, kept int
-	refresh         time.Duration
+	reconnect       time.Duration
 
-	boxes    []api.Box
-	workers  []api.Worker
-	reached  bool              // the last refresh reached the machine
+	boxes   []api.Box
+	workers []api.Worker
+	reached bool // the event stream is up
+	synced  bool // it has sent the current state
+	next    struct {
+		boxes   []api.Box
+		workers []api.Worker
+	} // the current state as it arrives, before synced
 	projects map[string]string // id → slug
 	rows     []tuiRow
 	cursor   int
@@ -104,18 +109,16 @@ type tui struct {
 	read   map[string]bool   // threads you've looked at since they last worked
 }
 
-type boxesMsg struct {
-	boxes    []api.Box
-	projects []api.Project
-	workers  []api.Worker
-	err      error
-}
 type (
-	frameMsg   struct{}
-	refreshMsg struct{}
-	paneMsg    struct{}
-	clipMsg    string
-	doneMsg    struct{ status, open string }
+	frameMsg    struct{}
+	eventMsg    api.Event
+	lostMsg     struct{ err error }
+	retryMsg    struct{}
+	sessMsg     struct{ sess *yamux.Session }
+	projectsMsg []api.Project
+	paneMsg     struct{}
+	clipMsg     string
+	doneMsg     struct{ status, open string }
 )
 
 var (
@@ -154,7 +157,7 @@ func runTUI(cmd *cobra.Command, _ []string) error {
 	}
 	cwd, _ := os.Getwd()
 	m := &tui{ctx: ctx, sess: sess, exe: exe, cwd: cwd, focused: true, w: 120, h: 40,
-		listWidth: int(cfg.Int("tui.list_width")), kept: int(cfg.Int("tui.kept_panes")), refresh: cfg.Duration("tui.refresh"),
+		listWidth: int(cfg.Int("tui.list_width")), kept: int(cfg.Int("tui.kept_panes")), reconnect: cfg.Duration("tui.reconnect"),
 		projects: map[string]string{}, shells: map[string]bool{}, panes: map[string]*pane{},
 		states: map[string]string{}, read: map[string]bool{}}
 	if repo, _ := config.FindRepo(cwd); repo != nil {
@@ -173,21 +176,36 @@ func runTUI(cmd *cobra.Command, _ []string) error {
 	return err
 }
 
-func (m *tui) Init() tea.Cmd { return tea.Batch(m.poll(), frame()) }
+func (m *tui) Init() tea.Cmd { return tea.Batch(m.watch(), m.fetchProjects(), frame()) }
 
 func frame() tea.Cmd { return tea.Tick(time.Second/8, func(time.Time) tea.Msg { return frameMsg{} }) }
 
-func (m *tui) poll() tea.Cmd {
+// watch follows the machine's events: the current state, then each change.
+func (m *tui) watch() tea.Cmd {
+	ctx, sess, prog := m.ctx, m.sess, m.prog
+	m.synced = false
+	m.next.boxes, m.next.workers = nil, nil
+	go func() {
+		err := watchEvents(ctx, sess, func(e api.Event) error {
+			prog.Send(eventMsg(e))
+			return nil
+		})
+		if err == nil {
+			err = fmt.Errorf("the machine closed the connection")
+		}
+		prog.Send(lostMsg{err})
+	}()
+	return nil
+}
+
+func (m *tui) fetchProjects() tea.Cmd {
 	ctx, sess := m.ctx, m.sess
 	return func() tea.Msg {
-		var msg boxesMsg
-		if msg.err = rpc.Call(ctx, sess, api.BoxList, struct{}{}, &msg.boxes); msg.err == nil {
-			msg.err = rpc.Call(ctx, sess, api.ProjectList, struct{}{}, &msg.projects)
+		var ps []api.Project
+		if rpc.Call(ctx, sess, api.ProjectList, struct{}{}, &ps) != nil {
+			return nil
 		}
-		if msg.err == nil {
-			msg.err = rpc.Call(ctx, sess, api.WorkerList, struct{}{}, &msg.workers)
-		}
-		return msg
+		return projectsMsg(ps)
 	}
 }
 
@@ -222,42 +240,40 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = ""
 		}
 		return m, frame()
-	case refreshMsg:
-		return m, m.poll()
 	case paneMsg:
 		m.dirty.Store(false)
 	case clipMsg:
 		return m, tea.SetClipboard(string(msg))
-	case boxesMsg:
-		next := tea.Tick(m.refresh, func(time.Time) tea.Msg { return refreshMsg{} })
-		m.reached = msg.err == nil
-		if msg.err != nil {
-			m.setStatus("can't reach the machine: " + msg.err.Error())
-			if m.sess.IsClosed() {
-				if s, err := connect(); err == nil {
-					m.sess = s
-					for k, p := range m.panes {
-						p.close()
-						delete(m.panes, k)
-					}
-					m.order = nil
-				}
-			}
-			return m, next
-		}
-		notes := m.changes(msg.boxes)
-		m.boxes, m.workers = msg.boxes, msg.workers
-		for _, p := range msg.projects {
+	case projectsMsg:
+		for _, p := range msg {
 			m.projects[p.ID] = p.Slug
 		}
 		m.build()
-		if m.open != "" {
-			if m.selectKey(m.open) {
-				m.open = ""
-			}
+	case eventMsg:
+		return m, m.event(api.Event(msg))
+	case lostMsg:
+		if m.reached || m.synced {
+			m.setStatus("lost the machine (" + msg.err.Error() + "); trying again")
 		}
-		m.sync()
-		return m, tea.Batch(next, notes)
+		m.reached, m.synced = false, false
+		return m, tea.Tick(m.reconnect, func(time.Time) tea.Msg { return retryMsg{} })
+	case retryMsg:
+		if !m.sess.IsClosed() {
+			return m, m.watch()
+		}
+		return m, func() tea.Msg {
+			s, err := connect()
+			if err != nil {
+				return lostMsg{err}
+			}
+			return sessMsg{s}
+		}
+	case sessMsg:
+		m.sess = msg.sess
+		for k := range m.panes {
+			m.drop(k)
+		}
+		return m, tea.Batch(m.watch(), m.fetchProjects())
 	case doneMsg:
 		if msg.status != "" {
 			m.setStatus(msg.status)
@@ -265,7 +281,6 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.open != "" {
 			m.open = msg.open
 		}
-		return m, m.poll()
 	case tea.PasteMsg:
 		if m.inputFor != "" {
 			var cmd tea.Cmd
@@ -297,6 +312,79 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.key(msg)
 	}
 	return m, nil
+}
+
+// event applies one change. Until the stream says it's synced, the current state
+// builds up aside, so boxes removed while disconnected disappear.
+func (m *tui) event(e api.Event) tea.Cmd {
+	var cmds []tea.Cmd
+	switch {
+	case !m.synced && e.Type != api.EventSynced:
+		applyEvent(&m.next.boxes, &m.next.workers, e)
+		return nil
+	case !m.synced:
+		m.boxes, m.workers = m.next.boxes, m.next.workers
+		m.synced, m.reached = true, true
+		m.changes(m.boxes) // a baseline: nothing rings for what happened before
+		cmds = append(cmds, m.fetchProjects())
+	default:
+		applyEvent(&m.boxes, &m.workers, e)
+		cmds = append(cmds, m.changes(m.boxes))
+		if e.Box != nil && e.Box.Project != "" && m.projects[e.Box.Project] == "" {
+			cmds = append(cmds, m.fetchProjects())
+		}
+	}
+	m.build()
+	if m.open != "" && m.selectKey(m.open) {
+		m.open = ""
+	}
+	m.sync()
+	return tea.Batch(cmds...)
+}
+
+func applyEvent(boxes *[]api.Box, workers *[]api.Worker, e api.Event) {
+	findBox := func(id string) int {
+		return slices.IndexFunc(*boxes, func(b api.Box) bool { return b.ID == id })
+	}
+	switch e.Type {
+	case api.EventBox:
+		b := *e.Box
+		if i := findBox(b.ID); i >= 0 {
+			b.Threads = (*boxes)[i].Threads
+			(*boxes)[i] = b
+		} else {
+			*boxes = append(*boxes, b)
+		}
+	case api.EventBoxRemoved:
+		if i := findBox(e.ID); i >= 0 {
+			*boxes = slices.Delete(*boxes, i, i+1)
+		}
+	case api.EventThread:
+		t := *e.Thread
+		if i := findBox(t.Box); i >= 0 {
+			ts := (*boxes)[i].Threads
+			if j := slices.IndexFunc(ts, func(x api.Thread) bool { return x.N == t.N }); j >= 0 {
+				ts[j] = t
+			} else {
+				ts = append(ts, t)
+				slices.SortFunc(ts, func(a, b api.Thread) int { return a.N - b.N })
+			}
+			(*boxes)[i].Threads = ts
+		}
+	case api.EventThreadRemoved:
+		if i := findBox(e.ID); i >= 0 {
+			(*boxes)[i].Threads = slices.DeleteFunc((*boxes)[i].Threads, func(t api.Thread) bool { return t.N == e.N })
+		}
+	case api.EventWorker:
+		w := *e.Worker
+		if i := slices.IndexFunc(*workers, func(x api.Worker) bool { return x.ID == w.ID }); i >= 0 {
+			(*workers)[i] = w
+		} else {
+			*workers = append(*workers, w)
+		}
+	case api.EventWorkerRemoved:
+		*workers = slices.DeleteFunc(*workers, func(x api.Worker) bool { return x.ID == e.ID })
+	}
 }
 
 func (m *tui) setStatus(s string) { m.status, m.statusAt = s, time.Now() }
