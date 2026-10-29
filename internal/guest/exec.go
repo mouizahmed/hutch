@@ -90,12 +90,32 @@ func execute(ctx context.Context, e guestproto.Exec, stdin io.Reader, r *respond
 	}
 	defer outR.Close()
 	defer errR.Close()
-	cmd.Stdout, cmd.Stderr, cmd.Stdin = outW, errW, stdin
+	cmd.Stdout, cmd.Stderr = outW, errW
+	// Input through a real pipe: with a plain reader, Wait would also wait for the
+	// host's input to end, which may be never.
+	var inW *os.File
+	if stdin != nil {
+		var inR *os.File
+		if inR, inW, err = os.Pipe(); err != nil {
+			return 0, err
+		}
+		defer inR.Close()
+		cmd.Stdin = inR
+	}
 	err = cmd.Start()
 	outW.Close()
 	errW.Close()
 	if err != nil {
+		if inW != nil {
+			inW.Close()
+		}
 		return 0, err
+	}
+	if inW != nil {
+		go func() {
+			io.Copy(inW, stdin)
+			inW.Close()
+		}()
 	}
 
 	var wg sync.WaitGroup
