@@ -35,6 +35,14 @@ func withServer(f func(ctx context.Context, sess *yamux.Session, args []string) 
 	}
 }
 
+// threadState is a thread's state as lists show it.
+func threadState(t api.Thread) string {
+	if t.Unread && t.State != api.ThreadWorking {
+		return t.State + ", unread"
+	}
+	return t.State
+}
+
 func listBoxes(ctx context.Context, sess *yamux.Session) ([]api.Box, error) {
 	var boxes []api.Box
 	return boxes, rpc.Call(ctx, sess, api.BoxList, struct{}{}, &boxes)
@@ -151,7 +159,7 @@ func boxCommands() []*cobra.Command {
 					if t.Pinned {
 						pin = "* "
 					}
-					fmt.Fprintf(tw, "  %d  %s%s\t%s\t%s\t\t%s\n", t.N, pin, t.Title, t.Agent, t.State, ago(t.Created))
+					fmt.Fprintf(tw, "  %d  %s%s\t%s\t%s\t\t%s\n", t.N, pin, t.Title, t.Agent, threadState(t), ago(t.Created))
 				}
 			}
 			return tw.Flush()
@@ -403,13 +411,9 @@ func statusCommand() *cobra.Command {
 			}
 			fmt.Println()
 			tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(tw, "THREAD\tAGENT\tSTATE\tTOKENS\tSESSION")
+			fmt.Fprintln(tw, "THREAD\tAGENT\tSTATE\tSESSION")
 			for _, t := range b.Threads {
-				tokens := ""
-				if t.Tokens > 0 {
-					tokens = fmt.Sprint(t.Tokens)
-				}
-				fmt.Fprintf(tw, "%d  %s\t%s\t%s\t%s\t%s\n", t.N, t.Title, t.Agent, t.State, tokens, t.SessionID)
+				fmt.Fprintf(tw, "%d  %s\t%s\t%s\t%s\n", t.N, t.Title, t.Agent, threadState(t), t.SessionID)
 			}
 			return tw.Flush()
 		}),

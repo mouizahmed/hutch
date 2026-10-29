@@ -108,7 +108,7 @@ func (s *Server) threadNew(ctx context.Context, params json.RawMessage, _ *rpc.O
 		title = p.Agent + " session from your laptop"
 	}
 	t := api.Thread{Box: p.Box, N: n, Agent: name, Title: title, Created: time.Now().UTC(), SessionID: sessionID}
-	if a := set[p.Agent]; p.Cmd == "" && a != nil && a.Transcript != "" && a.Transcript != "none" {
+	if a := set[p.Agent]; p.Cmd == "" && a != nil && a.Sessions != "" {
 		if err := s.registerThread(ctx, w, p.Box, a, t); err != nil {
 			return nil, err
 		}
@@ -120,10 +120,10 @@ func (s *Server) threadNew(ctx context.Context, params json.RawMessage, _ *rpc.O
 	return t, nil
 }
 
-// registerThread tells the guest where the thread's transcript is, so it can report
-// the agent's title, tokens, state, and session.
+// registerThread tells the guest where the agent keeps its sessions, so it can
+// report the thread's session for resuming it.
 func (s *Server) registerThread(ctx context.Context, w *workerConn, box string, a *agents.Adapter, t api.Thread) error {
-	info, _ := json.Marshal(guestproto.ThreadInfo{N: t.N, Parser: a.Transcript, Sessions: a.Sessions, SessionID: t.SessionID, Started: t.Created.Unix()})
+	info, _ := json.Marshal(guestproto.ThreadInfo{N: t.N, Sessions: a.Sessions, SessionID: t.SessionID, Started: t.Created.Unix()})
 	return rpc.Call(ctx, w.sess, api.BoxFiles, api.FilesParams{ID: box, Files: guestproto.Files{User: "root",
 		Files: []guestproto.File{{Path: fmt.Sprintf("%s/%d.json", guestproto.ThreadsDir, t.N), Mode: 0o644, Data: info}}}}, nil)
 }

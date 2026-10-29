@@ -26,25 +26,37 @@ const threadSession = "hutch"
 
 func status(watch []string) (guestproto.Status, error) {
 	st := guestproto.Status{Sessions: int(sessions.Load())}
-	parsed := threadTranscripts()
-	out, err := tmuxAsDev("list-windows", "-t", threadSession, "-F", "#{window_index} #{pane_dead} #{window_activity}")
+	ids := threadSessions()
+	viewed := map[int]bool{}
+	// Clients of the threads' session or a view grouped with it look at a window.
+	if out, err := tmuxAsDev("list-clients", "-F", "#{session_name}|#{session_group}|#{window_index}|#{"+guestproto.HiddenOption+"}"); err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+			f := strings.Split(line, "|")
+			if len(f) != 4 {
+				continue
+			}
+			st.Clients++
+			if f[3] == "" && (f[0] == threadSession || f[1] == threadSession) {
+				n, _ := strconv.Atoi(f[2])
+				viewed[n] = true
+			}
+		}
+	}
+	// The box's tmux.conf records when a window last rang the bell or was resized.
+	out, err := tmuxAsDev("list-windows", "-t", threadSession, "-F", "#{window_index}|#{pane_dead}|#{window_activity}|#{@hutch-bell}|#{@hutch-resized}")
 	if err == nil {
 		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-			f := strings.Fields(line)
-			if len(f) != 3 {
+			f := strings.Split(line, "|")
+			if len(f) != 5 {
 				continue
 			}
 			n, _ := strconv.Atoi(f[0])
 			last, _ := strconv.ParseInt(f[2], 10, 64)
-			ts := guestproto.ThreadStatus{N: n, Dead: f[1] == "1", LastOutput: last}
-			if t := parsed[n]; t != nil {
-				ts.Title, ts.Tokens, ts.Hint, ts.SessionID = t.title, t.tokens, t.hint, t.sessionID
-			}
-			st.Threads = append(st.Threads, ts)
+			bell, _ := strconv.ParseInt(f[3], 10, 64)
+			resized, _ := strconv.ParseInt(f[4], 10, 64)
+			st.Threads = append(st.Threads, guestproto.ThreadStatus{N: n, Dead: f[1] == "1", LastOutput: last,
+				Bell: bell > 0 && bell >= last, Redraw: resized > 0 && last <= resized+1, Viewed: viewed[n], SessionID: ids[n]})
 		}
-	}
-	if out, err := tmuxAsDev("list-clients", "-F", "#{client_name}"); err == nil {
-		st.Clients = len(strings.Fields(out))
 	}
 	st.Ports = listeningPorts()
 	st.Files = hashFiles(watch)

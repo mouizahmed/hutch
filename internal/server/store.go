@@ -138,6 +138,7 @@ var migrations = []string{
 	`ALTER TABLE templates ADD COLUMN secrets TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE projects ADD COLUMN peaks TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE projects ADD COLUMN confirmed TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE threads ADD COLUMN unread INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE box_meta ADD COLUMN version INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE boxes ADD COLUMN state_since TIMESTAMP`,
 	`ALTER TABLE workers ADD COLUMN cpus INTEGER NOT NULL DEFAULT 0`,
@@ -410,10 +411,14 @@ func (s *store) updateThread(box string, n int, column string, value any) error 
 	return nil
 }
 
-// setAgentTitle keeps the agent's own title for a thread, unless the user renamed it.
-func (s *store) setAgentTitle(box string, n int, title string) error {
-	_, err := s.db.Exec(`UPDATE threads SET title = ? WHERE box_id = ? AND n = ? AND renamed = 0`, title, box, n)
-	return err
+// setUnread sets a thread's unread flag, reporting whether it changed.
+func (s *store) setUnread(box string, n int, unread bool) (bool, error) {
+	res, err := s.db.Exec(`UPDATE threads SET unread = ? WHERE box_id = ? AND n = ? AND unread != ?`, unread, box, n, unread)
+	if err != nil {
+		return false, err
+	}
+	changed, err := res.RowsAffected()
+	return changed > 0, err
 }
 
 func (s *store) deleteThread(box string, n int) error {
@@ -433,7 +438,7 @@ func (s *store) thread(box string, n int) (api.Thread, string, error) {
 }
 
 func (s *store) threads() (map[string][]api.Thread, error) {
-	rows, err := s.db.Query(`SELECT box_id, n, agent, title, created, session_id, pinned, renamed FROM threads ORDER BY box_id, n`)
+	rows, err := s.db.Query(`SELECT box_id, n, agent, title, created, session_id, pinned, renamed, unread FROM threads ORDER BY box_id, n`)
 	if err != nil {
 		return nil, err
 	}
@@ -441,7 +446,7 @@ func (s *store) threads() (map[string][]api.Thread, error) {
 	byBox := map[string][]api.Thread{}
 	for rows.Next() {
 		var t api.Thread
-		if err := rows.Scan(&t.Box, &t.N, &t.Agent, &t.Title, &t.Created, &t.SessionID, &t.Pinned, &t.Renamed); err != nil {
+		if err := rows.Scan(&t.Box, &t.N, &t.Agent, &t.Title, &t.Created, &t.SessionID, &t.Pinned, &t.Renamed, &t.Unread); err != nil {
 			return nil, err
 		}
 		byBox[t.Box] = append(byBox[t.Box], t)

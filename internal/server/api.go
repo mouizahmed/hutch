@@ -79,10 +79,6 @@ func (s *Server) boxList(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (an
 			if boxes[i].State == "running" {
 				ts[j].State = st.State
 			}
-			if st.Title != "" && !ts[j].Renamed {
-				ts[j].Title = st.Title
-			}
-			ts[j].Tokens = st.Tokens
 		}
 		boxes[i].Threads = ts
 		boxes[i].PushError = s.pushErrors[boxes[i].ID]

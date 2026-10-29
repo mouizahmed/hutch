@@ -126,7 +126,7 @@ var Keys = []*Key{
 		Doc: "disk the image builder keeps for cached layers"},
 	{Path: "idle.check_interval", Kind: Duration, Default: "15s", Min: "1s", Max: "5m", Layers: machine,
 		Doc: "how often the machine checks boxes for activity"},
-	{Path: "threads.working_window", Kind: Duration, Default: "15s", Min: "1s", Max: "10m", Layers: machine,
+	{Path: "threads.working_window", Kind: Duration, Default: "5s", Min: "1s", Max: "10m", Layers: machine,
 		Doc: "a thread with output this recent counts as working"},
 
 	{Path: "checkpoint.first_after", Kind: Duration, Default: "2m", Min: "30s", Max: "24h", Layers: machine,

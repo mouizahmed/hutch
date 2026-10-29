@@ -27,6 +27,8 @@ type boxActivity struct {
 	working   bool
 	attached  bool
 	reclaimed bool
+	// Each thread's last output that wasn't a redraw.
+	output map[int]time.Time
 }
 
 // monitor checks running boxes, puts idle ones to sleep, and reports to the server
@@ -204,31 +206,29 @@ func (m *monitor) checkBox(ctx context.Context, b *worker.Box) (api.BoxReport, b
 	}
 	a.working = false
 	window := m.settings.Load().WorkingWindow
+	if a.output == nil {
+		a.output = map[int]time.Time{}
+	}
 	for _, th := range st.Threads {
 		out := time.Unix(th.LastOutput, 0)
+		if prev, ok := a.output[th.N]; th.Redraw && ok {
+			out = prev
+		}
+		a.output[th.N] = out
+		// Agents print while they work (spinners, timers) and stop when they hand
+		// back; a bell hands back at once.
 		state := api.ThreadWaiting
 		switch {
 		case th.Dead:
 			state = api.ThreadExited
-		case th.Hint == api.ThreadWorking || th.Hint == api.ThreadWaiting:
-			state = th.Hint
-		case now.Sub(out) < window:
+		case !th.Bell && !th.Redraw && now.Sub(out) < window:
 			state = api.ThreadWorking
-		}
-		if state == api.ThreadWorking {
 			a.working = true
 		}
-		// An agent waiting on a slow model call prints nothing but is busy.
-		if !th.Dead && th.Hint == api.ThreadWorking {
-			a.lastActive = now
-		}
-		// An agent that reports its own state is believed over its screen, where
-		// a waiting agent may still print tips.
-		if !th.Dead && th.Hint == "" && out.After(a.lastActive) {
+		if out.After(a.lastActive) {
 			a.lastActive = out
 		}
-		r.Threads = append(r.Threads, api.ThreadState{N: th.N, State: state, LastOutput: out,
-			Title: th.Title, Tokens: th.Tokens, SessionID: th.SessionID})
+		r.Threads = append(r.Threads, api.ThreadState{N: th.N, State: state, LastOutput: out, Viewed: th.Viewed, SessionID: th.SessionID})
 	}
 	r.LastActive = a.lastActive
 	return r, now.Sub(a.lastActive) >= policy.Timeout

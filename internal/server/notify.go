@@ -99,8 +99,8 @@ func (s *Server) watchThreads(box string, states map[int]api.ThreadState) {
 	}
 	s.mu.Unlock()
 	for _, t := range due {
-		title := t.Title
-		if stored, _, err := s.store.thread(box, t.N); err == nil && (title == "" || stored.Renamed) {
+		var title string
+		if stored, _, err := s.store.thread(box, t.N); err == nil {
 			title = stored.Title
 		}
 		if t.State == api.ThreadExited {

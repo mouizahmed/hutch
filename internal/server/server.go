@@ -318,7 +318,7 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 				}
 				s.mu.Lock()
 				prevStates := s.threadStates[br.Box.ID]
-				// A box put to sleep reports no threads; keep their last titles and tokens.
+				// A box put to sleep reports no threads; keep their last states.
 				if len(states) > 0 || br.Box.State == "running" {
 					s.threadStates[br.Box.ID] = states
 				}
@@ -326,8 +326,15 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 					if t.SessionID != "" && prevStates[n].SessionID != t.SessionID {
 						s.store.updateThread(br.Box.ID, n, "session_id", t.SessionID)
 					}
-					if t.Title != "" && prevStates[n].Title != t.Title {
-						s.store.setAgentTitle(br.Box.ID, n, t.Title)
+					// A thread that worked and stopped while nobody looked is unread, even
+					// when the turn fell between two reports; looking at it, or it
+					// working again, reads it.
+					prev, known := prevStates[n]
+					switch {
+					case t.Viewed || t.State == api.ThreadWorking:
+						s.store.setUnread(br.Box.ID, n, false)
+					case known && (prev.State == api.ThreadWorking || t.LastOutput.After(prev.LastOutput)):
+						s.store.setUnread(br.Box.ID, n, true)
 					}
 				}
 				if br.Push != nil {

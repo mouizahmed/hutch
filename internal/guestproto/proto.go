@@ -154,22 +154,29 @@ type ListenPort struct {
 	Loopback bool `json:"loopback"` // bound to 127.0.0.1 or ::1 only
 }
 
+// ThreadStatus is what a thread's terminal shows, the same for every agent.
 type ThreadStatus struct {
 	N          int   `json:"n"`
 	Dead       bool  `json:"dead"`
 	LastOutput int64 `json:"last_output"` // unix seconds
-	// From the agent's transcript, for threads with a parser.
-	Title     string `json:"title,omitempty"`
-	Tokens    int64  `json:"tokens,omitempty"`
-	Hint      string `json:"hint,omitempty"` // working or waiting
+	// Bell: it rang the bell and has printed nothing since.
+	Bell bool `json:"bell,omitempty"`
+	// Redraw: its last output came right after its window was resized, the app
+	// redrawing rather than working.
+	Redraw bool `json:"redraw,omitempty"`
+	// Viewed: a client shows it, other than a view the TUI keeps off screen.
+	Viewed    bool   `json:"viewed,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
 }
 
+// HiddenOption marks a tmux view session whose client isn't on screen, so it
+// doesn't count as looking at its window.
+const HiddenOption = "@hutch-hidden"
+
 // ThreadInfo is written by the host to ThreadsDir/<n>.json when it starts an agent
-// thread, so the guest can find and parse its transcript.
+// thread, so the guest can find its session file.
 type ThreadInfo struct {
 	N         int    `json:"n"`
-	Parser    string `json:"parser"`   // built-in transcript parser: claude, codex
 	Sessions  string `json:"sessions"` // the adapter's session file glob, under ~/
 	SessionID string `json:"session_id,omitempty"`
 	Started   int64  `json:"started"` // unix seconds

@@ -417,9 +417,10 @@ type Thread struct {
 	Title   string    `json:"title"`
 	Created time.Time `json:"created"`
 	State   string    `json:"state,omitempty"` // working, waiting, exited; from the latest report
-	Tokens  int64     `json:"tokens,omitempty"`
-	Pinned  bool      `json:"pinned,omitempty"`
-	Renamed bool      `json:"renamed,omitempty"` // Title is the user's, not the agent's
+	// Unread: it stopped working while nobody was looking at it.
+	Unread  bool `json:"unread,omitempty"`
+	Pinned  bool `json:"pinned,omitempty"`
+	Renamed bool `json:"renamed,omitempty"` // Title is the user's, not the one from its prompt
 	// SessionID is the agent's own session, for resuming it.
 	SessionID string `json:"session_id,omitempty"`
 }
@@ -478,8 +479,7 @@ type ThreadState struct {
 	N          int       `json:"n"`
 	State      string    `json:"state"`
 	LastOutput time.Time `json:"last_output"`
-	Title      string    `json:"title,omitempty"` // the agent's own title for the conversation
-	Tokens     int64     `json:"tokens,omitempty"`
+	Viewed     bool      `json:"viewed,omitempty"` // a client shows it now
 	SessionID  string    `json:"session_id,omitempty"`
 }
 
