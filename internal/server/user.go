@@ -181,6 +181,11 @@ func (s *Server) applyUserLayer(ctx context.Context, w *workerConn, box string, 
 	if err != nil {
 		return err
 	}
+	// At this point the requested grants have been resolved: nil means none,
+	// rather than the unknown history of an older or imported snapshot.
+	if creds == nil {
+		creds = []string{}
+	}
 	if err := s.store.setBoxCredentials(box, creds); err != nil {
 		return err
 	}

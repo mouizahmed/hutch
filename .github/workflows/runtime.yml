@@ -88,7 +88,7 @@ jobs:
           if [ "$HUTCH_TEST_UPGRADE" = 1 ]; then
             go test -tags runtime -count=1 -timeout 12m -v -run '^TestUpgrade$' ./internal/integration
           else
-            go test -tags runtime -count=1 -timeout 12m -v -run '^(TestRuntime|TestCheckpointRecovery)$' ./internal/integration
+            go test -tags runtime -count=1 -timeout 12m -v -run '^(TestRuntime|TestCheckpointRecovery|TestCredentialIsolation)$' ./internal/integration
           fi
       - name: Machine logs
         if: always()
