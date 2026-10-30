@@ -72,4 +72,6 @@ jobs:
         run: go test -tags runtime -count=1 -timeout 12m -v ./internal/integration
       - name: Machine logs
         if: always()
-        run: sudo journalctl -u hutchd --no-pager -n 250
+        run: |
+          sudo journalctl -u hutchd --no-pager -n 250
+          sudo journalctl -k --no-pager --since '20 minutes ago' --grep='oom|Out of memory|Killed process|runsc|gvisor' -n 100
