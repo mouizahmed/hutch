@@ -15,8 +15,27 @@ import (
 	"github.com/mouizahmed/hutch/internal/names"
 )
 
-// The task form is the popup n and N open: the agent, its model, the box (a new
-// one, or an existing one for a new thread), and a multi-line prompt.
+// The task form is the popup n and N open: what to run (an agent, a shell, or a
+// command), the agent's model, the box (a new one, or an existing one for another
+// terminal in it), and a multi-line prompt, or the command.
+
+// What the Run field offers besides the agents.
+const (
+	runShell   = "\x00shell"
+	runCommand = "\x00command"
+)
+
+func (m *tui) runChoices() []string { return append(m.adapters.Names(), runShell, runCommand) }
+
+func runLabel(s string) string {
+	switch s {
+	case runShell:
+		return "shell"
+	case runCommand:
+		return "command"
+	}
+	return s
+}
 
 const (
 	fieldAgent = iota
@@ -47,9 +66,9 @@ var (
 // openForm opens the task form, on a new box or on box.
 func (m *tui) openForm(box string) tea.Cmd {
 	f := &taskForm{field: fieldPrompt, boxes: []string{""}}
-	f.project, f.dir = m.newProject(m.selected())
+	f.project, f.dir = m.newProject()
 	for _, b := range m.boxes {
-		if b.Kind == "" {
+		if b.Kind == "" && m.inTab(b) {
 			f.boxes = append(f.boxes, b.ID)
 		}
 	}
@@ -70,7 +89,7 @@ func (m *tui) openForm(box string) tea.Cmd {
 	f.prompt = textarea.New()
 	f.prompt.ShowLineNumbers = false
 	f.prompt.Prompt = ""
-	f.prompt.Placeholder = "What should the agent do?"
+	f.prompt.Placeholder = "What should the agent do? (empty opens it to type in)"
 	f.prompt.CharLimit = 0
 	f.prompt.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter", "alt+enter", "ctrl+j"))
 	if project, ok := strings.CutPrefix(box, "template:"); ok {
@@ -78,7 +97,23 @@ func (m *tui) openForm(box string) tea.Cmd {
 	}
 	m.form = f
 	m.sizeForm()
-	return f.prompt.Focus()
+	m.setRun(m.agent)
+	return m.formFocus(fieldPrompt, 0)
+}
+
+// setRun chooses what the form runs; the prompt doubles as a command's text.
+func (m *tui) setRun(run string) {
+	m.agent = run
+	f := m.form
+	f.model.SetValue(m.models[run])
+	switch run {
+	case runShell:
+		f.prompt.Placeholder = ""
+	case runCommand:
+		f.prompt.Placeholder = "The command to run, like npm run dev"
+	default:
+		f.prompt.Placeholder = "What should the agent do? (empty opens it to type in)"
+	}
 }
 
 func (m *tui) formWidth() int { return min(80, m.w-4) }
@@ -112,8 +147,7 @@ func (m *tui) formKey(msg tea.KeyPressMsg) tea.Cmd {
 		d := map[bool]int{true: 1, false: -1}[k == "right"]
 		switch f.field {
 		case fieldAgent:
-			m.agent = m.nextAgent(d > 0)
-			f.model.SetValue(m.models[m.agent])
+			m.setRun(m.nextAgent(d > 0))
 			return nil
 		case fieldModel:
 			m.models[m.agent] = m.stepModel(d)
@@ -187,11 +221,14 @@ func (m *tui) formPaste(msg tea.PasteMsg) tea.Cmd {
 func (m *tui) formFocus(i, d int) tea.Cmd {
 	f := m.form
 	skip := func(i int) bool {
-		return i == fieldModel && !m.hasModels() || i == fieldName && f.boxes[f.box] != ""
+		return i == fieldModel && !m.hasModels() || i == fieldName && f.boxes[f.box] != "" || i == fieldPrompt && m.agent == runShell
 	}
 	i = (i + d + fieldCount) % fieldCount
 	for d != 0 && skip(i) {
 		i = (i + d + fieldCount) % fieldCount
+	}
+	if d == 0 && skip(i) {
+		i = fieldAgent
 	}
 	f.field = i
 	f.prompt.Blur()
@@ -234,23 +271,35 @@ func (m *tui) submitForm() tea.Cmd {
 	prompt := strings.TrimSpace(f.prompt.Value())
 	box := f.boxes[f.box]
 	switch {
-	case prompt == "":
-		f.err = "write what the agent should do"
-		return m.formFocus(fieldPrompt, 0)
 	case box == "" && f.dir == "":
-		f.err = "a new box needs a project: select one of its boxes first, or run hutch in its checkout"
+		f.err = "a new box needs this project's checkout here: p → Add a checkout"
 		return nil
 	case box == "" && m.checkName(f.name.Value()) != "":
 		f.err = m.checkName(f.name.Value())
 		return m.formFocus(fieldName, 0)
 	}
-	m.form = nil
-	args := []string{"--agent", m.agent}
-	if model := m.models[m.agent]; model != "" && m.hasModels() {
-		args = append(args, "--model", model)
+	var args []string
+	switch m.agent {
+	case runShell:
+		args = []string{"--cmd", "bash"}
+	case runCommand:
+		if prompt == "" {
+			f.err = "write the command to run"
+			return m.formFocus(fieldPrompt, 0)
+		}
+		args = []string{"--cmd", prompt}
+	default:
+		args = []string{"--agent", m.agent}
+		if model := m.models[m.agent]; model != "" && m.hasModels() {
+			args = append(args, "--model", model)
+		}
+		if prompt != "" {
+			args = append(args, prompt)
+		}
 	}
+	m.form = nil
 	if project, ok := strings.CutPrefix(box, "template:"); ok {
-		return m.run(f.dir, "agent on the "+m.projectName(project)+" template", "", append(append([]string{"thread", "template"}, args...), prompt)...)
+		return m.run(f.dir, runLabel(m.agent)+" on the "+m.projectName(project)+" template", "", append([]string{"terminal", "template"}, args...)...)
 	}
 	if box == "" {
 		taken := map[string]bool{}
@@ -261,15 +310,12 @@ func (m *tui) submitForm() tea.Cmd {
 		if name == "" {
 			name = names.New(taken)
 		}
-		return m.run(f.dir, "new box "+name, name+"/1", append(append([]string{"new", "--name", name}, args...), prompt)...)
+		return m.run(f.dir, "new box "+name, "", append([]string{"new", "--name", name}, args...)...)
 	}
-	next, dir := 1, m.cwd
+	dir := m.cwd
 	for _, b := range m.boxes {
 		if b.ID != box {
 			continue
-		}
-		for _, t := range b.Threads {
-			next = max(next, t.N+1)
 		}
 		if b.Project != "" && b.Project != m.here {
 			if d := projectDir(b.Project, m.boxes); d != "" {
@@ -277,7 +323,7 @@ func (m *tui) submitForm() tea.Cmd {
 			}
 		}
 	}
-	return m.run(dir, "new thread in "+box, paneKey(box, next), append(append([]string{"thread", box}, args...), prompt)...)
+	return m.run(dir, "new terminal in "+box, "", append([]string{"terminal", box}, args...)...)
 }
 
 // formView draws the task form.
@@ -285,13 +331,13 @@ func (m *tui) formView() string {
 	f := m.form
 	w := m.formWidth() - 6
 	box := f.boxes[f.box]
-	title := "New task in " + m.projectName(f.project)
+	title := "New box in " + m.projectName(f.project)
 	if project, ok := strings.CutPrefix(box, "template:"); ok {
-		title = "New agent on the " + m.projectName(project) + " template"
+		title = "New terminal on the " + m.projectName(project) + " template"
 	} else if box != "" {
-		title = "New thread in " + box
+		title = "New terminal in " + box
 	} else if f.project == "" {
-		title = "New task"
+		title = "New box"
 	}
 	row := func(field int, label, value string) string {
 		l := styleDim.Render(fmt.Sprintf("  %-7s", label))
@@ -312,10 +358,12 @@ func (m *tui) formView() string {
 		}
 		return s + styleDim.Render(truncate(" "+strings.Join(rest, "  "), max(w-lipgloss.Width(s)-10, 0)))
 	}
-	agentNames := m.adapters.Names()
-	agentRow := choice(fieldAgent, agentNames, max(slices.Index(agentNames, m.agent), 0), func(s string) string { return s })
+	runs := m.runChoices()
+	agentRow := choice(fieldAgent, runs, max(slices.Index(runs, m.agent), 0), runLabel)
 	var modelRow string
 	switch {
+	case m.agent == runShell || m.agent == runCommand:
+		modelRow = styleDim.Render("  —")
 	case !m.hasModels():
 		modelRow = styleDim.Render("  " + m.agent + " has no model setting")
 	case f.field == fieldModel:
@@ -352,7 +400,7 @@ func (m *tui) formView() string {
 	if f.field == fieldModel {
 		hint = "←→ suggestions · or type a model · enter start · esc"
 	}
-	lines := []string{styleBold.Render(title), "", row(fieldAgent, "Agent", agentRow), row(fieldModel, "Model", modelRow),
+	lines := []string{styleBold.Render(title), "", row(fieldAgent, "Run", agentRow), row(fieldModel, "Model", modelRow),
 		row(fieldBox, "Box", boxRow)}
 	if box == "" {
 		nameRow := "  " + f.name.View()
@@ -363,7 +411,12 @@ func (m *tui) formView() string {
 		}
 		lines = append(lines, row(fieldName, "Name", nameRow))
 	}
-	lines = append(lines, "", prompt)
+	if box != "" && !strings.HasPrefix(box, "template:") {
+		lines = append(lines, styleDim.Render(truncate("  Shares files and branch with "+box+"'s other terminals.", w)))
+	}
+	if m.agent != runShell {
+		lines = append(lines, "", prompt)
+	}
 	if f.err != "" {
 		lines = append(lines, styleError.Render(truncate(f.err, w)))
 	}

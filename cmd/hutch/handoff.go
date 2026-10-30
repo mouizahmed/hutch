@@ -163,7 +163,7 @@ func handoffCommands() []*cobra.Command {
 			tp.Box = b.ID
 			var t api.Thread
 			if err := rpc.Call(ctx, sess, api.ThreadNew, tp, &t); err != nil {
-				return fmt.Errorf("box %s has your work, but the thread failed: %w", b.ID, err)
+				return fmt.Errorf("box %s has your work, but its terminal failed: %w", b.ID, err)
 			}
 			verb := "started"
 			if tp.Resume != "" {
@@ -245,8 +245,9 @@ func handoffCommands() []*cobra.Command {
 				return err
 			}
 			var slept api.Box
+			asleep := fmt.Sprintf("✓ %s is asleep", id)
 			if err := rpc.Call(ctx, sess, api.BoxSleep, api.IDParams{ID: id}, &slept); err != nil {
-				fmt.Printf("warning: %s didn't sleep: %v\n", id, err)
+				asleep = fmt.Sprintf("! %s is still awake (sleep failed: %v): hutch sleep %s", id, err, id)
 			}
 
 			from := b.Path
@@ -266,7 +267,7 @@ func handoffCommands() []*cobra.Command {
 			}
 
 			subject, _ := git(repo.Root, "log", "-1", "--format=%h %s")
-			fmt.Printf("\n✓ %s at %s\n  in %s\n✓ %s is asleep\n", branch, subject, repo.Root, id)
+			fmt.Printf("\n✓ %s at %s\n  in %s\n%s\n", branch, subject, repo.Root, asleep)
 			for _, name := range agentNames {
 				argv, err := set.PickArgv(name, "ask")
 				if err != nil {

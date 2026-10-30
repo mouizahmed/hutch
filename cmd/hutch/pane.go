@@ -50,7 +50,7 @@ type pane struct {
 
 	ended  atomic.Bool
 	err    atomic.Value // string: why it ended
-	hidden atomic.Bool  // its view session is marked off screen
+	hidden atomic.Value // string: how its view session is marked (guestproto.HiddenOption)
 }
 
 func paneKey(box string, n int) string { return box + "/" + strconv.Itoa(n) }
@@ -208,15 +208,16 @@ func (p *pane) withEmu(f func(*vt.Emulator)) {
 	f(p.emu)
 }
 
-// setHidden marks the thread's view session off screen or on, so the machine
-// knows whether you see the thread (for unread).
-func (p *pane) setHidden(ctx context.Context, sess *yamux.Session, hidden bool) {
-	if p.hidden.Swap(hidden) == hidden {
+// setHidden marks the thread's view session as you see it: "" on screen,
+// guestproto.HiddenAway or HiddenOff; the machine reads it for unread, alerts,
+// and sleep.
+func (p *pane) setHidden(ctx context.Context, sess *yamux.Session, mark string) {
+	if old, _ := p.hidden.Swap(mark).(string); old == mark {
 		return
 	}
 	argv := []string{"tmux", "set-option", "-t", p.session, "-u", guestproto.HiddenOption}
-	if hidden {
-		argv = []string{"tmux", "set-option", "-t", p.session, guestproto.HiddenOption, "1"}
+	if mark != "" {
+		argv = []string{"tmux", "set-option", "-t", p.session, guestproto.HiddenOption, mark}
 	}
 	go rpc.Exec(ctx, sess, api.BoxExec, api.ExecParams{ID: p.box, Argv: argv}, io.Discard, io.Discard)
 }

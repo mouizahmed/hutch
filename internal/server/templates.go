@@ -326,7 +326,7 @@ func (s *Server) templateSnapshot(ctx context.Context, params json.RawMessage, o
 	if err != nil {
 		return nil, err
 	}
-	if err := s.store.deleteBox(id); err != nil {
+	if err := s.store.deleteBox(id, "snapshotted as "+vid); err != nil {
 		return nil, err
 	}
 	if err := s.store.putMeta(vid, boxMeta{project: proj.ID, kind: api.BoxVersion, commit: p.Commit, secrets: built.secrets}); err != nil {
@@ -565,11 +565,10 @@ func (s *Server) removeBox(ctx context.Context, id string) error {
 	if store != nil {
 		s.deletePrefix(ctx, store.Prefix)
 	}
-	s.store.event(id, api.BoxRm, "removed")
 	s.mu.Lock()
 	delete(s.threadStates, id)
 	s.mu.Unlock()
-	return s.store.deleteBox(id)
+	return s.store.deleteBox(id, "removed")
 }
 
 // samplePeaks reads the guest's memory and CPU use every two seconds until ctx ends.

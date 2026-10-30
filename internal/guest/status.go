@@ -36,6 +36,9 @@ func status(p guestproto.StatusParams) (guestproto.Status, error) {
 				continue
 			}
 			st.Clients++
+			if f[3] != guestproto.HiddenOff {
+				st.Viewers++
+			}
 			if f[3] == "" && (f[0] == threadSession || f[1] == threadSession) {
 				n, _ := strconv.Atoi(f[2])
 				viewed[n] = true

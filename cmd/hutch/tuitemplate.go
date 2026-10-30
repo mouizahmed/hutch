@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -12,8 +14,9 @@ import (
 )
 
 // A project's template in the TUI: its row (the template box while one exists),
-// a template agent (N), a shell (t), build (b), and snapshot (S). Builds stay with
-// git: b offers to commit and push .hutch/ first.
+// a terminal on it (N), build (b), snapshot (S), and setting the project up (i).
+// Builds stay with git: b brings the template box's work back, and commits and
+// pushes .hutch/ first.
 
 type templatesMsg struct {
 	project  string
@@ -56,15 +59,23 @@ func templateOf(r tuiRow) string {
 func (m *tui) templateKey(project, key string) tea.Cmd {
 	dir := m.checkout(project)
 	if dir == "" {
-		m.setStatus("Hutch doesn't know where " + m.projectName(project) + " is checked out here: run hutch once in it")
+		m.setStatus(m.projectName(project) + ": checkout needed here: p → Add a checkout")
 		return nil
 	}
 	name := m.projectName(project)
+	if key == "i" || m.projects[project] == "" || !m.hasRecipe(project) {
+		if key != "i" {
+			m.setStatus(name + " isn't set up yet: i runs hutch init, which starts a template box and writes a setup prompt")
+			return nil
+		}
+		t := m.run(dir, "set up "+name, "", "init")
+		m.tasks[len(m.tasks)-1].report = []string{"Project", "Next:", "  1."}
+		m.tasks[len(m.tasks)-1].after = m.fetchProjects()
+		return t
+	}
 	switch key {
 	case "N":
 		return m.openForm("template:" + project)
-	case "t":
-		return m.run(dir, "shell in the "+name+" template", "", "thread", "template", "--cmd", "bash")
 	case "S":
 		t := m.run(dir, "snapshot the "+name+" template", "", "template", "snapshot")
 		m.tasks[len(m.tasks)-1].report = []string{"Template v", "Built and verified"}
@@ -74,6 +85,20 @@ func (m *tui) templateKey(project, key string) tea.Cmd {
 		return m.checkTemplate(project, dir)
 	}
 	return nil
+}
+
+// hasRecipe reports whether a project has been set up: a template version, or
+// a .hutch/ in its checkout.
+func (m *tui) hasRecipe(project string) bool {
+	if len(m.templates[project]) > 0 {
+		return true
+	}
+	dir := m.checkout(project)
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, ".hutch", "Dockerfile"))
+	return err == nil
 }
 
 func (m *tui) checkout(project string) string {

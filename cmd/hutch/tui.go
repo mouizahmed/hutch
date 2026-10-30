@@ -29,11 +29,12 @@ import (
 	"github.com/mouizahmed/hutch/internal/agents"
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/config"
+	"github.com/mouizahmed/hutch/internal/guestproto"
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
-// The TUI is one program: boxes and their threads on the left, the selected
-// thread's terminal on the right, drawn through an in-process emulator. Anything
+// The TUI is one program: project tabs on top, the open project's boxes and their
+// terminals (threads, in the code) on the left, the selected one on the right, drawn through an in-process emulator. Anything
 // it doesn't do itself runs as the CLI command, in the terminal, and comes back.
 
 type rowKind int
@@ -131,6 +132,11 @@ type tui struct {
 	statusAt    time.Time
 
 	read map[string]bool // threads you've looked at since they last worked
+
+	active  string   // the open tab's project, as last chosen here
+	closed  []string // tabs closed here
+	tabHits []tabHit
+	picker  *picker // the project picker, when open
 }
 
 type (
@@ -194,6 +200,8 @@ func runTUI(cmd *cobra.Command, _ []string) error {
 	if repo, _ := config.FindRepo(cwd); repo != nil {
 		m.here = repo.ID
 	}
+	st := loadTabState()
+	m.active, m.closed = st.Active, st.Closed
 	m.shown.Store("")
 	m.prog = tea.NewProgram(m, tea.WithContext(ctx))
 	_, err = m.prog.Run()
@@ -252,13 +260,13 @@ func (m *tui) fetchProjects() tea.Cmd {
 func (m *tui) layout() (x, y, w, h int) {
 	switch {
 	case m.zoom:
-		return 0, 0, m.w, m.h - 1
+		return 0, 1, m.w, max(m.h-2, 1)
 	case m.below:
 		lh := min(len(m.rows)+2, m.h/3)
-		return 0, lh + 1, m.w, max(m.h-lh-2, 1)
+		return 0, lh + 2, m.w, max(m.h-lh-3, 1)
 	}
 	lw := min(m.listWidth, m.w/2)
-	return lw + 1, 0, max(m.w-lw-1, 1), m.h - 1
+	return lw + 1, 1, max(m.w-lw-1, 1), max(m.h-2, 1)
 }
 
 func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -287,12 +295,20 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.adapters = agents.Set(msg)
 	case projectsMsg:
 		var cmds []tea.Cmd
+		m.projects = map[string]string{}
 		for _, p := range msg {
 			m.projects[p.ID] = p.Slug
 			cmds = append(cmds, m.fetchTemplates(p.ID))
 		}
+		for id := range m.templates {
+			if m.projects[id] == "" {
+				delete(m.templates, id)
+			}
+		}
 		m.build()
 		return m, tea.Batch(cmds...)
+	case addedMsg:
+		return m, m.added(msg)
 	case templateWorkMsg:
 		return m, m.reviewTemplate(msg)
 	case templatesMsg:
@@ -342,6 +358,12 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if t.open != "" {
 					m.open = t.open
 				}
+				// What new and thread report starting: "<box>/<n> [<agent>] started …".
+				for _, l := range t.lines {
+					if f := strings.Fields(l); len(f) > 1 && strings.Contains(f[0], "/") && slices.Contains(f[1:min(len(f), 3)], "started") {
+						m.open = f[0]
+					}
+				}
 				var kept []string
 				for _, l := range t.lines {
 					for _, r := range t.report {
@@ -362,10 +384,7 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.setStatus(t.title + " failed: " + t.err)
 			}
 			m.build()
-			if m.open != "" && m.selectKey(m.open) {
-				m.open = ""
-			}
-			m.sync()
+			m.openPending()
 			return m, after
 		}
 	case doneMsg:
@@ -374,6 +393,7 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.open != "" {
 			m.open = msg.open
+			m.openPending()
 		}
 	case tea.PasteMsg:
 		if m.form != nil {
@@ -383,9 +403,14 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			p.withEmu(func(e *vt.Emulator) { e.Paste(msg.Content) })
 		}
 	case tea.MouseMsg:
+		if m.form != nil || m.confirm != "" || m.picker != nil {
+			return m, nil // a popup has the mouse too
+		}
 		return m, m.mouse(msg)
 	case tea.KeyPressMsg:
 		switch {
+		case m.picker != nil:
+			return m, m.pickerKey(msg)
 		case m.form != nil:
 			return m, m.formKey(msg)
 		case m.confirm != "":
@@ -418,6 +443,9 @@ func (m *tui) event(e api.Event) tea.Cmd {
 		applyEvent(&m.next.boxes, &m.next.workers, e)
 		return nil
 	case !m.synced:
+		if !m.reached {
+			m.rows = nil // the first list starts at its top, not on the template row drawn while it loaded
+		}
 		m.boxes, m.workers = m.next.boxes, m.next.workers
 		m.synced, m.reached = true, true
 		m.changes(m.boxes)
@@ -430,10 +458,7 @@ func (m *tui) event(e api.Event) tea.Cmd {
 		}
 	}
 	m.build()
-	if m.open != "" && m.selectKey(m.open) {
-		m.open = ""
-	}
-	m.sync()
+	m.openPending()
 	return tea.Batch(cmds...)
 }
 
@@ -495,20 +520,28 @@ func (m *tui) key(msg tea.KeyPressMsg) tea.Cmd {
 		m.move(-1)
 	case "enter":
 		return m.enter(r)
-	case "N", "t", "b", "S":
+	case "N", "b", "S", "i":
 		if p := templateOf(r); p != "" {
 			return m.templateKey(p, msg.String())
 		}
+	case "[":
+		m.stepTab(-1)
+		return nil
+	case "]":
+		m.stepTab(1)
+		return nil
+	case "p":
+		m.openPicker()
+		return nil
+	case "x":
+		m.closeTab(m.project())
+		return nil
 	}
 	switch msg.String() {
 	case "n":
 		return m.openForm("")
 	case "N":
 		return m.openForm(r.box.ID)
-	case "t":
-		if r.box.ID != "" {
-			return m.newShell(r.box.ID)
-		}
 	case "s":
 		if r.box.ID != "" {
 			return m.sleepWake(r.box)
@@ -526,10 +559,10 @@ func (m *tui) key(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		if r.box.ID != "" {
 			m.confirm = r.key()
-			what := "box " + r.box.ID + " and its threads"
+			what := "box " + r.box.ID + " and its terminals"
 			switch r.kind {
 			case rowThread:
-				what = "thread " + r.key() + " (" + r.thread.Title + ")"
+				what = "terminal " + r.key() + " (" + r.thread.Title + ")"
 			}
 			m.confirmText = "Remove " + what + "?"
 			m.confirmHint = "y removes · any other key keeps it"
@@ -544,18 +577,6 @@ func (m *tui) key(msg tea.KeyPressMsg) tea.Cmd {
 	return nil
 }
 
-// newShell starts a thread running bash in a box and shows it.
-func (m *tui) newShell(box string) tea.Cmd {
-	ctx, sess := m.ctx, m.sess
-	return func() tea.Msg {
-		var t api.Thread
-		if err := rpc.Call(ctx, sess, api.ThreadNew, api.ThreadParams{Box: box, Cmd: "bash"}, &t); err != nil {
-			return doneMsg{status: err.Error()}
-		}
-		return doneMsg{open: paneKey(box, t.N)}
-	}
-}
-
 // enter wakes a sleeping box (saying so), reconnects a dropped terminal, or types
 // into a live one.
 func (m *tui) enter(r tuiRow) tea.Cmd {
@@ -565,9 +586,9 @@ func (m *tui) enter(r tuiRow) tea.Cmd {
 	if r.box.State != "running" {
 		return m.sleepWake(r.box)
 	}
-	if r.kind == rowThread && r.thread.State == api.ThreadExited && r.thread.Agent != "" {
-		ctx, sess, target := m.ctx, m.sess, api.ThreadTarget{Box: r.box.ID, N: r.thread.N}
-		m.setStatus("starting " + r.thread.Agent + "'s picker in " + r.key() + "…")
+	if t, ok := shownThread(r); ok && t.State == api.ThreadExited && t.Agent != "" {
+		ctx, sess, target := m.ctx, m.sess, api.ThreadTarget{Box: r.box.ID, N: t.N}
+		m.setStatus("starting " + t.Agent + "'s picker in " + paneKey(r.box.ID, t.N) + "…")
 		return func() tea.Msg {
 			if err := rpc.Call(ctx, sess, api.ThreadResume, target, nil); err != nil {
 				return doneMsg{status: err.Error()}
@@ -603,32 +624,18 @@ func (m *tui) sleepWake(b api.Box) tea.Cmd {
 	}
 }
 
-// newProject is where a new task goes: the launch folder's project, else the
-// selected box's, else the only project checked out on this computer.
-func (m *tui) newProject(r tuiRow) (project, dir string) {
-	if m.here != "" {
-		return m.here, m.cwd
-	}
-	if r.box.Project != "" {
-		if d := projectDir(r.box.Project, m.boxes); d != "" {
-			return r.box.Project, d
-		}
-	}
-	var found []string
-	for id := range m.projects {
-		if projectDir(id, m.boxes) != "" {
-			found = append(found, id)
-		}
-	}
-	if len(found) == 1 {
-		return found[0], projectDir(found[0], m.boxes)
+// newProject is where a new box goes: the open tab's project, and its checkout
+// here.
+func (m *tui) newProject() (project, dir string) {
+	if p := m.project(); p != otherTab && p != "" {
+		return p, m.checkout(p)
 	}
 	return "", ""
 }
 
 // nextAgent is the agent after (or before) the current one.
 func (m *tui) nextAgent(forward bool) string {
-	names := m.adapters.Names()
+	names := m.runChoices()
 	i := slices.Index(names, m.agent)
 	if len(names) == 0 {
 		return m.agent
@@ -655,7 +662,7 @@ func (m *tui) confirmKey(msg tea.KeyPressMsg) tea.Cmd {
 		switch r.kind {
 		case rowThread:
 			m.drop(key)
-			return m.run(m.cwd, "remove "+key, "", "thread", "rm", key)
+			return m.run(m.cwd, "remove "+key, "", "terminal", "rm", key)
 		default:
 			for k, p := range m.panes {
 				if p.box == r.box.ID {
@@ -762,6 +769,9 @@ func (m *tui) mouse(msg tea.MouseMsg) tea.Cmd {
 		}
 		return nil
 	}
+	if _, click := msg.(tea.MouseClickMsg); click && mo.Y == 0 {
+		return m.clickTab(mo.X)
+	}
 	if m.zoom || inPane {
 		return nil
 	}
@@ -774,7 +784,7 @@ func (m *tui) mouse(msg tea.MouseMsg) tea.Cmd {
 		}
 	case tea.MouseClickMsg:
 		m.typing = false
-		if i := m.offset + mo.Y - 1; mo.Y > 0 && i < len(m.rows) {
+		if i := m.offset + mo.Y - 2; mo.Y > 1 && i < len(m.rows) {
 			m.cursor = i
 			m.sync()
 		}
@@ -797,6 +807,13 @@ func (m *tui) changes(boxes []api.Box) {
 // desktop notification (OSC 9).
 func (m *tui) ring(t api.Thread) tea.Cmd {
 	key := paneKey(t.Box, t.N)
+	if i := slices.IndexFunc(m.boxes, func(b api.Box) bool { return b.ID == t.Box }); i >= 0 {
+		project := m.boxes[i].Project
+		if project == "" {
+			project = otherTab
+		}
+		m.reopen(project)
+	}
 	if m.looking(key) {
 		return nil
 	}
@@ -809,76 +826,45 @@ func (m *tui) ring(t api.Thread) tea.Cmd {
 
 func (m *tui) looking(key string) bool { return m.focused && m.shown.Load().(string) == key }
 
-// build lays out the rows: each project, the launch folder's first, then its
-// boxes, most recently started first, with their threads and shell; template
-// boxes last.
+// build lays out the rows: running tasks, then the open tab's boxes, most
+// recently started first, with their threads, and its template last.
 func (m *tui) build() {
 	selected := m.selected().key()
-	type group struct {
-		id    string
-		at    time.Time
-		boxes []api.Box
-	}
-	groups := map[string]*group{}
+	project := m.project()
+	var boxes []api.Box
 	for _, b := range m.boxes {
-		if b.Kind == api.BoxVersion {
-			continue
-		}
-		g := groups[b.Project]
-		if g == nil {
-			g = &group{id: b.Project}
-			groups[b.Project] = g
-		}
-		g.boxes = append(g.boxes, b)
-		if at := boxActive(b); at.After(g.at) {
-			g.at = at
+		if b.Kind != api.BoxVersion && m.inTab(b) {
+			boxes = append(boxes, b)
 		}
 	}
-	// Projects checked out here appear, for their template, even without boxes.
-	for id := range m.projects {
-		if groups[id] == nil && m.checkout(id) != "" {
-			groups[id] = &group{id: id}
+	sort.SliceStable(boxes, func(i, j int) bool {
+		if (boxes[i].Kind == api.BoxTemplate) != (boxes[j].Kind == api.BoxTemplate) {
+			return boxes[j].Kind == api.BoxTemplate
 		}
-	}
-	var order []*group
-	for _, g := range groups {
-		order = append(order, g)
-	}
-	sort.Slice(order, func(i, j int) bool {
-		if (order[i].id == m.here) != (order[j].id == m.here) {
-			return order[i].id == m.here
-		}
-		return order[i].at.After(order[j].at)
+		return boxActive(boxes[i]).After(boxActive(boxes[j]))
 	})
 	m.rows = nil
 	for _, t := range m.tasks {
 		m.rows = append(m.rows, tuiRow{kind: rowTask, label: t.title, task: t})
 	}
-	for _, g := range order {
-		sort.SliceStable(g.boxes, func(i, j int) bool {
-			if (g.boxes[i].Kind == api.BoxTemplate) != (g.boxes[j].Kind == api.BoxTemplate) {
-				return g.boxes[j].Kind == api.BoxTemplate
-			}
-			return boxActive(g.boxes[i]).After(boxActive(g.boxes[j]))
-		})
-		templateBox := false
-		for _, b := range g.boxes {
-			label := b.ID
-			if b.Kind == api.BoxTemplate {
-				label, templateBox = m.templateLabel(b.Project), true
-			}
-			m.rows = append(m.rows, tuiRow{kind: rowBox, box: b, label: label})
-			for _, t := range b.Threads {
-				m.rows = append(m.rows, tuiRow{kind: rowThread, box: b, thread: t, label: t.Title})
-			}
+	templateBox := false
+	for _, b := range boxes {
+		label := b.ID
+		if b.Kind == api.BoxTemplate {
+			label, templateBox = m.templateLabel(b.Project), true
 		}
-		if g.id != "" && !templateBox {
-			m.rows = append(m.rows, tuiRow{kind: rowTemplate, project: g.id, label: m.templateLabel(g.id)})
+		m.rows = append(m.rows, tuiRow{kind: rowBox, box: b, label: label})
+		for _, t := range b.Threads {
+			m.rows = append(m.rows, tuiRow{kind: rowThread, box: b, thread: t, label: t.Title})
 		}
+	}
+	if project != "" && project != otherTab && !templateBox {
+		m.rows = append(m.rows, tuiRow{kind: rowTemplate, project: project, label: m.templateLabel(project)})
 	}
 	if !m.selectKey(selected) {
 		m.cursor = max(min(m.cursor, len(m.rows)-1), 0)
 	}
+	m.resize() // below the list, the pane follows the row count
 }
 
 func boxActive(b api.Box) time.Time {
@@ -919,29 +905,43 @@ func (m *tui) move(d int) {
 // target is the terminal a row shows: its thread, its shell, or for a box its
 // latest thread. A box that isn't running shows none: nothing wakes by browsing.
 func (m *tui) target(r tuiRow) (box string, n int, ok bool) {
-	if r.box.State != "running" {
+	t, ok := shownThread(r)
+	if r.box.State != "running" || !ok {
 		return "", 0, false
 	}
-	switch r.kind {
-	case rowThread:
-		return r.box.ID, r.thread.N, true
-	case rowBox:
-		if len(r.box.Threads) > 0 {
-			return r.box.ID, r.box.Threads[len(r.box.Threads)-1].N, true
-		}
+	return r.box.ID, t.N, true
+}
+
+// shownThread is the thread a row shows: its own, or a box's latest.
+func shownThread(r tuiRow) (api.Thread, bool) {
+	switch {
+	case r.kind == rowThread:
+		return r.thread, true
+	case r.kind == rowBox && len(r.box.Threads) > 0:
+		return r.box.Threads[len(r.box.Threads)-1], true
 	}
-	return "", 0, false
+	return api.Thread{}, false
+}
+
+// openPending selects what a finished command made, once it's listed.
+func (m *tui) openPending() {
+	if m.open != "" && m.selectKey(m.open) {
+		m.open = ""
+	}
+	m.sync()
 }
 
 // sync shows the selected row's terminal, connecting it if it isn't kept, and
 // drops terminals of boxes that stopped and those past tui.kept_panes.
 func (m *tui) sync() {
-	running := map[string]bool{}
+	live := map[string]bool{}
 	for _, b := range m.boxes {
-		running[b.ID] = b.State == "running"
+		for _, t := range b.Threads {
+			live[paneKey(b.ID, t.N)] = b.State == "running"
+		}
 	}
-	for k, p := range m.panes {
-		if !running[p.box] {
+	for k := range m.panes {
+		if !live[k] {
 			m.drop(k)
 		}
 	}
@@ -987,11 +987,22 @@ func (m *tui) drop(key string) {
 	m.order = slices.DeleteFunc(m.order, func(k string) bool { return k == key })
 }
 
-// markHidden tells each kept thread terminal whether it's on screen, for unread.
+// markHidden tells each kept thread terminal whether you see it: off screen, the
+// box may sleep; on screen while the terminal isn't focused, you aren't looking.
 func (m *tui) markHidden() {
 	for key, p := range m.panes {
-		p.setHidden(m.ctx, m.sess, !m.looking(key))
+		p.setHidden(m.ctx, m.sess, m.hiddenMark(key))
 	}
+}
+
+func (m *tui) hiddenMark(key string) string {
+	switch {
+	case m.shown.Load().(string) != key:
+		return guestproto.HiddenOff
+	case !m.focused:
+		return guestproto.HiddenAway
+	}
+	return ""
 }
 
 func (m *tui) shownPane() *pane { return m.panes[m.shown.Load().(string)] }
@@ -1011,14 +1022,16 @@ func (m *tui) View() tea.View {
 	case m.zoom:
 		body = screen
 	case m.below:
-		lh := py - 1
+		lh := py - 2
 		body = lipgloss.JoinVertical(lipgloss.Left, m.listView(m.w, lh), styleRule.Render(strings.Repeat("─", m.w)), screen)
 	default:
 		sep := styleRule.Render(strings.TrimSuffix(strings.Repeat("│\n", ph), "\n"))
 		body = lipgloss.JoinHorizontal(lipgloss.Top, m.listView(px-1, ph), sep, screen)
 	}
-	screen = lipgloss.JoinVertical(lipgloss.Left, body, m.footer())
+	screen = lipgloss.JoinVertical(lipgloss.Left, m.tabBar(m.w), body, m.footer())
 	switch {
+	case m.picker != nil:
+		screen = m.overlay(screen, m.pickerView())
 	case m.form != nil:
 		screen = m.overlay(screen, m.formView())
 	case m.confirm != "":
@@ -1039,12 +1052,22 @@ func (m *tui) paneView(w, h int) (string, *uv.Position) {
 	box := lipgloss.NewStyle().Width(w).Height(h).MaxWidth(w).MaxHeight(h)
 	r := m.selected()
 	p := m.shownPane()
+	exited, _ := shownThread(r)
 	switch {
 	case len(m.rows) == 0:
-		return box.Render(styleDim.Render("\n  No boxes yet. n starts a task in a new box.")), nil
-	case r.kind == rowThread && r.thread.State == api.ThreadExited && r.box.State == "running":
-		return box.Render(styleDim.Render(fmt.Sprintf("\n  %s exited. ", r.thread.Agent)) + styleBold.Render("Enter") +
-			styleDim.Render(" opens its conversation picker here; d removes the thread.")), nil
+		if m.project() == "" {
+			return box.Render(styleDim.Render("\n  No projects yet. p adds a checkout.")), nil
+		}
+		return box.Render(styleDim.Render("\n  No boxes here yet. n starts a task in a new box.")), nil
+	case exited.Agent != "" && exited.State == api.ThreadExited && r.box.State == "running":
+		// Its last screen stays, under what Enter does now.
+		hint := styleDim.Render(exited.Agent+" exited. ") + styleBold.Render("Enter") + styleDim.Render(" opens its conversation picker here; d removes the terminal.")
+		if p == nil || p.ended.Load() || h < 2 {
+			return box.Render("\n  " + hint), nil
+		}
+		s, _ := p.render()
+		lines := strings.Split(s, "\n")
+		return box.Render(strings.Join(lines[:min(len(lines), h-1)], "\n") + "\n" + truncate(hint, w)), nil
 	case r.kind == rowTemplate:
 		lines := []string{"", "  The " + m.projectName(r.project) + " template: new boxes start from its newest version.", ""}
 		for i, v := range m.templates[r.project] {
@@ -1053,8 +1076,8 @@ func (m *tui) paneView(w, h int) (string, *uv.Position) {
 			}
 			lines = append(lines, fmt.Sprintf("  v%d  %.12s  %s", v.Version, v.Commit, ago(v.Created)))
 		}
-		lines = append(lines, "", "  N  an agent on the template (edits .hutch/, e.g. \"add Playwright browsers\")",
-			"  t  a shell in a template box", "  b  build from your checkout's .hutch/ (offers to commit and push it)",
+		lines = append(lines, "", "  N  a terminal on the template: an agent (\"add Playwright browsers\"), a shell, a command",
+			"  b  build: brings the template box's work here, commits and pushes .hutch/, builds that",
 			"  S  snapshot the build as the next version")
 		return box.Render(styleDim.Render(strings.Join(lines, "\n"))), nil
 	case r.kind == rowTask:
@@ -1064,7 +1087,7 @@ func (m *tui) paneView(w, h int) (string, *uv.Position) {
 			head = styleError.Render(t.title+" failed") + styleDim.Render(" · d dismisses")
 		}
 		var lines []string
-		for _, l := range t.lines[max(len(t.lines)-(h-2), 0):] {
+		for _, l := range t.lines[max(len(t.lines)-max(h-2, 0), 0):] {
 			lines = append(lines, truncate(l, w-1))
 		}
 		return box.Render(head + "\n\n" + strings.Join(lines, "\n")), nil
@@ -1077,7 +1100,7 @@ func (m *tui) paneView(w, h int) (string, *uv.Position) {
 	case r.box.ID != "" && r.box.State != "running":
 		return box.Render(styleDim.Render(fmt.Sprintf("\n  %s is %s. Enter wakes it.", r.box.ID, r.box.State))), nil
 	case r.kind == rowBox:
-		return box.Render(styleDim.Render("\n  No threads. N starts one, t opens a shell.")), nil
+		return box.Render(styleDim.Render("\n  No terminals. N starts one: an agent, a shell, or a command.")), nil
 	}
 	return box.Render(""), nil
 }
@@ -1161,14 +1184,12 @@ func (m *tui) rowView(r tuiRow, w int) string {
 		if r.box.Changes > 0 {
 			only = append(only, "edited")
 		}
-		if state == "" {
-			state = strings.Join(only, " · ")
+		if state != "" {
+			only = append([]string{state}, only...)
 		}
+		state = strings.Join(only, " · ")
 		right := styleDim.Render(state)
 		branch := ""
-		if r.box.Project != "" {
-			branch = styleDim.Render(" · " + m.projectName(r.box.Project))
-		}
 		// A box's own hutch/<box> branch goes without saying.
 		if r.box.Branch != "" && r.box.Branch != "hutch/"+r.box.ID {
 			branch += styleWorking.Render(" ↳ " + r.box.Branch)
@@ -1177,13 +1198,16 @@ func (m *tui) rowView(r tuiRow, w int) string {
 		if r.box.State != "running" {
 			name = styleDim.Render(r.label)
 		}
-		return spread(" "+name+truncateStyled(branch, w-lipgloss.Width(r.label)-lipgloss.Width(state)-4), right, w)
+		return spread(" "+name+truncate(branch, w-lipgloss.Width(r.label)-lipgloss.Width(state)-4), right, w)
 	case rowTemplate:
 		right := "none yet: b builds it"
-		if vs := m.templates[r.project]; len(vs) > 0 {
-			right = shortAge(vs[0].Created)
+		switch {
+		case m.projects[r.project] == "" || !m.hasRecipe(r.project):
+			right = "not set up: i"
+		case len(m.templates[r.project]) > 0:
+			right = shortAge(m.templates[r.project][0].Created)
 		}
-		return spread(" "+styleDim.Render(r.label+" · "+m.projectName(r.project)), styleDim.Render(right), w)
+		return spread(" "+styleDim.Render(r.label), styleDim.Render(right), w)
 	case rowTask:
 		t := r.task
 		dot, step := styleWorking.Render(spinner[m.frame%len(spinner)]), t.step
@@ -1197,6 +1221,8 @@ func (m *tui) rowView(r tuiRow, w int) string {
 	key := r.key()
 	dot := styleDim.Render("●")
 	switch {
+	case r.box.State != "running" && t.Unread && !m.read[key]:
+		dot = styleUnread.Render("●") // asleep, with something you haven't seen
 	case r.box.State != "running":
 		dot = styleDim.Render("z")
 	case t.State == api.ThreadWorking:
@@ -1224,9 +1250,12 @@ func (m *tui) footer() string {
 	case m.typing:
 		return styleTyping.Render(" typing ") + styleDim.Render(" ctrl+] gives the keys back")
 	}
-	keys := "n new · N thread · enter type · t shell · s sleep/wake · d rm · \\ move · z zoom · q quit"
-	if templateOf(m.selected()) != "" {
-		keys = "N template agent · t shell · b build · S snapshot · n new task · q quit"
+	keys := "n new box · N new terminal · enter type · [ ] p tabs · s sleep/wake · d rm · \\ move · z zoom · q quit"
+	if p := templateOf(m.selected()); p != "" {
+		keys = "N new terminal · b build · S snapshot · n new box · [ ] p tabs · q quit"
+		if m.projects[p] == "" || !m.hasRecipe(p) {
+			keys = "i set up (hutch init) · [ ] p tabs · q quit"
+		}
 	}
 	return styleDim.Render(" " + truncate(keys, m.w-2))
 }
@@ -1252,6 +1281,9 @@ func highlight(line string, w int, bg color.Color) string {
 
 // spread puts right at the right edge of a line of width w.
 func spread(left, right string, w int) string {
+	if room := w - lipgloss.Width(right) - 1; lipgloss.Width(left) > room {
+		left = truncate(left, room)
+	}
 	gap := w - lipgloss.Width(left) - lipgloss.Width(right)
 	return left + strings.Repeat(" ", max(gap, 1)) + right
 }
@@ -1274,29 +1306,12 @@ func shortAge(t time.Time) string {
 	return fmt.Sprintf("%dw", int(d.Hours()/24/7))
 }
 
+// truncate fits s in n terminal cells, for plain and styled text alike.
 func truncate(s string, n int) string {
-	r := []rune(s)
-	if n < 1 {
-		return ""
-	}
-	if len(r) > n {
-		return string(r[:n-1]) + "…"
-	}
-	return s
-}
-
-func truncateStyled(s string, n int) string {
 	if n < 1 {
 		return ""
 	}
 	return ansi.Truncate(s, n, "…")
-}
-
-func padRight(s string, n int) string {
-	if w := lipgloss.Width(s); w < n {
-		return s + strings.Repeat(" ", n-w)
-	}
-	return s
 }
 
 // projectDir is where a project is checked out on this machine: where hutch last
@@ -1354,11 +1369,3 @@ func selfPath() (string, error) {
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
-
-func shellJoin(args ...string) string {
-	q := make([]string, len(args))
-	for i, a := range args {
-		q[i] = shellQuote(a)
-	}
-	return strings.Join(q, " ")
-}

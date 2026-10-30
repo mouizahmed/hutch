@@ -59,12 +59,17 @@ func threadAgent(t api.Thread) string {
 	return t.Agent
 }
 
-// threadState is a thread's state as lists show it.
-func threadState(t api.Thread) string {
-	if t.Unread && t.State != api.ThreadWorking {
-		return t.State + ", unread"
+// threadState is a thread's state as lists show it; a sleeping box's threads
+// have none.
+func threadState(b api.Box, t api.Thread) string {
+	state := t.State
+	if b.State != "running" {
+		state = "asleep"
 	}
-	return t.State
+	if t.Unread && state != api.ThreadWorking {
+		return state + ", unread"
+	}
+	return state
 }
 
 func listBoxes(ctx context.Context, sess *yamux.Session) ([]api.Box, error) {
@@ -140,7 +145,7 @@ func boxCommands() []*cobra.Command {
 			}
 			t, err := startThread(ctx, sess, cfg, b.ID, agent, args)
 			if err != nil {
-				return fmt.Errorf("box %s created, but the thread failed: %w", b.ID, err)
+				return fmt.Errorf("box %s created, but its terminal failed: %w", b.ID, err)
 			}
 			fmt.Printf("%s/%d %s started in %s\n", b.ID, t.N, t.Agent, time.Since(start).Round(time.Millisecond))
 			fmt.Printf("  hutch attach %s/%d\n", b.ID, t.N)
@@ -167,7 +172,7 @@ func boxCommands() []*cobra.Command {
 				return err
 			}
 			tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(tw, "BOX / THREAD\tAGENT\tSTATE\tSIZE\tCREATED")
+			fmt.Fprintln(tw, "BOX / TERMINAL\tAGENT\tSTATE\tSIZE\tCREATED")
 			for _, b := range boxes {
 				if b.Kind == api.BoxVersion {
 					continue
@@ -178,7 +183,7 @@ func boxCommands() []*cobra.Command {
 				}
 				fmt.Fprintf(tw, "%s\t\t%s\t%d vCPU, %s\t%s\n", name, b.State, b.VCPUs, mib(b.MemMiB), ago(b.Created))
 				for _, t := range b.Threads {
-					fmt.Fprintf(tw, "  %d  %s\t%s\t%s\t\t%s\n", t.N, t.Title, threadAgent(t), threadState(t), ago(t.Created))
+					fmt.Fprintf(tw, "  %d  %s\t%s\t%s\t\t%s\n", t.N, t.Title, threadAgent(t), threadState(b, t), ago(t.Created))
 				}
 			}
 			return tw.Flush()
@@ -318,7 +323,7 @@ func parseTarget(s string) (box string, n int, err error) {
 	}
 	n, err = strconv.Atoi(num)
 	if err != nil || n < 1 {
-		return "", 0, fmt.Errorf("invalid thread %q: want <box>/<number>", s)
+		return "", 0, fmt.Errorf("invalid terminal %q: want <box>/<number>", s)
 	}
 	return box, n, nil
 }
@@ -326,8 +331,9 @@ func parseTarget(s string) (box string, n int, err error) {
 func threadCommands() []*cobra.Command {
 	var agent agentFlags
 	thread := &cobra.Command{
-		Use:     `thread <box> ["<prompt>"]`,
-		Short:   "Start another thread in a box: an agent, or a command",
+		Use:     `terminal <box> ["<prompt>"]`,
+		Aliases: []string{"thread"},
+		Short:   "Start another terminal in a box: an agent, a shell (--cmd bash), or a command",
 		GroupID: "boxes",
 		Args:    cobra.RangeArgs(1, 2),
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
@@ -350,8 +356,8 @@ func threadCommands() []*cobra.Command {
 	thread.AddCommand(threadSubcommands()...)
 
 	send := &cobra.Command{
-		Use:     `send <box>/<thread> "<message>"`,
-		Short:   "Type a message into a thread",
+		Use:     `send <box>/<terminal> "<message>"`,
+		Short:   "Type a message into an agent's terminal",
 		GroupID: "boxes",
 		Args:    cobra.ExactArgs(2),
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
@@ -360,7 +366,7 @@ func threadCommands() []*cobra.Command {
 				return err
 			}
 			if n == 0 {
-				return fmt.Errorf("which thread? use %s/<number>", box)
+				return fmt.Errorf("which terminal? use %s/<number>", box)
 			}
 			return rpc.Call(ctx, sess, api.ThreadSend, api.SendParams{Box: box, N: n, Message: args[1]}, nil)
 		}),
@@ -380,16 +386,16 @@ func threadSubcommands() []*cobra.Command {
 					return err
 				}
 				if n == 0 {
-					return fmt.Errorf("which thread? use %s/<number>", box)
+					return fmt.Errorf("which terminal? use %s/<number>", box)
 				}
 				return run(ctx, sess, box, n, args[1:])
 			}),
 		}
 	}
-	rm := target("rm <box>/<thread>", "Close a thread, and what runs in it", func(ctx context.Context, sess *yamux.Session, box string, n int, _ []string) error {
+	rm := target("rm <box>/<terminal>", "Close a terminal, and what runs in it", func(ctx context.Context, sess *yamux.Session, box string, n int, _ []string) error {
 		return rpc.Call(ctx, sess, api.ThreadRm, api.ThreadTarget{Box: box, N: n}, nil)
 	})
-	rename := target(`rename <box>/<thread> "<name>"`, "Give a thread your own name, over its agent's title", func(ctx context.Context, sess *yamux.Session, box string, n int, args []string) error {
+	rename := target(`rename <box>/<terminal> "<name>"`, "Give a terminal your own name, over the title its program sets", func(ctx context.Context, sess *yamux.Session, box string, n int, args []string) error {
 		if len(args) != 1 {
 			return errors.New("give one title")
 		}
@@ -401,7 +407,7 @@ func threadSubcommands() []*cobra.Command {
 func statusCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:     "status <box>",
-		Short:   "Show a box, its branch, and its threads",
+		Short:   "Show a box, its branch, and its terminals",
 		GroupID: "boxes",
 		Args:    cobra.ExactArgs(1),
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
@@ -424,7 +430,7 @@ func statusCommand() *cobra.Command {
 			tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 			fmt.Fprintln(tw, "THREAD\tAGENT\tSTATE")
 			for _, t := range b.Threads {
-				fmt.Fprintf(tw, "%d  %s\t%s\t%s\n", t.N, t.Title, threadAgent(t), threadState(t))
+				fmt.Fprintf(tw, "%d  %s\t%s\t%s\n", t.N, t.Title, threadAgent(t), threadState(b, t))
 			}
 			return tw.Flush()
 		}),
@@ -453,7 +459,7 @@ func moveCommand() *cobra.Command {
 			case "warm":
 				fmt.Printf("Warm move from %s to %s: everything kept running, agents mid-conversation.\n", r.From, r.To)
 			default:
-				fmt.Printf("Cold move from %s to %s (another snapshot class): files kept, processes restarted; Enter on an agent's thread reopens its conversations.\n", r.From, r.To)
+				fmt.Printf("Cold move from %s to %s (another snapshot class): files kept, processes restarted; Enter on an agent's terminal reopens its conversations.\n", r.From, r.To)
 			}
 			return nil
 		},

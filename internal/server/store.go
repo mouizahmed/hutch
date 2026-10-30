@@ -305,12 +305,17 @@ func (s *store) statesSince() (map[string]time.Time, error) {
 	return out, rows.Err()
 }
 
-func (s *store) deleteBox(id string) error {
+// deleteBox forgets a box, saying why in its events; a worker's report about it
+// sent before then is ignored (removed), so it can't come back without its meta.
+func (s *store) deleteBox(id, why string) error {
 	if _, err := s.exec(`DELETE FROM version_copies WHERE box_id = ?`, id); err != nil {
 		return err
 	}
-	_, err := s.exec(`DELETE FROM boxes WHERE id = ?`, id)
-	return err
+	if _, err := s.exec(`DELETE FROM boxes WHERE id = ?`, id); err != nil {
+		return err
+	}
+	s.event(id, api.BoxRm, why)
+	return nil
 }
 
 func (s *store) box(id string) (api.Box, error) {

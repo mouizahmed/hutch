@@ -320,7 +320,7 @@ func (m *monitor) checkBox(ctx context.Context, b *worker.Box) (api.BoxReport, b
 		return r, false
 	}
 	r.Files, r.Git = st.Files, st.Git
-	a.attached = st.Clients > 0 || st.Sessions > 0
+	a.attached = st.Viewers > 0 || st.Sessions > 0
 	if a.attached {
 		a.lastActive = now
 	}

@@ -378,7 +378,7 @@ func (s *Server) buildForClass(ctx context.Context, v api.Template, w *workerCon
 		return "", err
 	}
 	built, _ := s.store.meta(buildID)
-	s.store.deleteBox(buildID)
+	s.store.deleteBox(buildID, "built as "+id)
 	if err := s.store.putMeta(id, boxMeta{project: proj.ID, kind: api.BoxVersion, commit: v.Commit, secrets: built.secrets}); err != nil {
 		return "", err
 	}

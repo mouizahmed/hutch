@@ -145,8 +145,12 @@ func handle(ctx context.Context, conn net.Conn) {
 		r.send(guestproto.Response{Type: guestproto.RespStatus, Status: &st})
 		return
 	}
-	sessions.Add(1)
-	defer sessions.Add(-1)
+	// A terminal running tmux is a tmux client, which status counts by whether
+	// it's on screen.
+	if req.Type != guestproto.TypePTY || req.PTY == nil || len(req.PTY.Argv) == 0 || req.PTY.Argv[0] != "tmux" {
+		sessions.Add(1)
+		defer sessions.Add(-1)
+	}
 	track(conn, true)
 	defer track(conn, false)
 

@@ -17,7 +17,7 @@ import (
 func eventsCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "events",
-		Short: "Print box, thread, and worker changes as JSON lines",
+		Short: "Print box, terminal, and worker changes as JSON lines",
 		Long: `Print box, thread, and worker changes as JSON lines: first everything as it is
 now, then a {"type":"synced"} line, then each change as it happens. Types:
 box, thread, worker (the whole object as it is now), and box_removed,

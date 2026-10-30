@@ -124,7 +124,8 @@ type Response struct {
 type Status struct {
 	Threads  []ThreadStatus `json:"threads"`
 	Clients  int            `json:"clients"`  // attached tmux clients, any session
-	Sessions int            `json:"sessions"` // open exec and terminal sessions
+	Viewers  int            `json:"viewers"`  // those that keep the box awake: all but the TUI's off-screen views
+	Sessions int            `json:"sessions"` // open exec and terminal sessions, but tmux clients
 	Ports    []ListenPort   `json:"ports,omitempty"`
 	// Files maps each watched path that exists to the SHA-256 of its contents.
 	Files map[string]string `json:"files,omitempty"`
@@ -186,9 +187,15 @@ const (
 // after a cold boot.
 const ThreadsPath = "/var/lib/hutch-guest/threads.json"
 
-// HiddenOption marks a tmux view session whose client isn't on screen, so it
-// doesn't count as looking at its window.
-const HiddenOption = "@hutch-hidden"
+// HiddenOption marks a tmux view session the TUI keeps: HiddenOff while it's off
+// screen, which neither looks at its window nor keeps the box awake; HiddenAway
+// while it's on screen in a terminal that isn't focused, which keeps the box
+// awake without looking.
+const (
+	HiddenOption = "@hutch-hidden"
+	HiddenOff    = "off"
+	HiddenAway   = "away"
+)
 
 // ServicesPath lists a box's services, one shell command per line, run as dev by
 // its init; a SIGHUP to PID 1 applies changes.

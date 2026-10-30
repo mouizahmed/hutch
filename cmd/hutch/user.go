@@ -444,13 +444,18 @@ func loginCommand() *cobra.Command {
 				}
 			}
 			if from != "" {
+				var failed []string
 				for _, n := range names {
 					var c api.Credentials
 					if err := rpc.Call(ctx, sess, api.UserCapture, api.CaptureParams{Box: from, Adapter: n}, &c); err != nil {
 						fmt.Fprintf(os.Stderr, "%s: %v\n", n, err)
+						failed = append(failed, n)
 						continue
 					}
 					fmt.Printf("Saved the %s login from %s.\n", n, from)
+				}
+				if len(failed) > 0 {
+					return fmt.Errorf("no login saved for %s", strings.Join(failed, ", "))
 				}
 				return nil
 			}

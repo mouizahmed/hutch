@@ -30,8 +30,8 @@ const agentSession = "hutch"
 
 func sessionCommands() []*cobra.Command {
 	attach := &cobra.Command{
-		Use:     "attach <box>[/<thread>]",
-		Short:   "Attach to a box's threads (wakes it if asleep)",
+		Use:     "attach <box>[/<terminal>]",
+		Short:   "Attach to a box's terminals (wakes it if asleep)",
 		GroupID: "boxes",
 		Args:    cobra.ExactArgs(1),
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
@@ -59,7 +59,7 @@ func sessionCommands() []*cobra.Command {
 
 	shell := &cobra.Command{
 		Use:     "shell <box>",
-		Short:   "Open a thread running bash in a box, and attach to it",
+		Short:   "Open a terminal running bash in a box, and attach to it",
 		GroupID: "boxes",
 		Args:    cobra.ExactArgs(1),
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {

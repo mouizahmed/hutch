@@ -39,33 +39,45 @@ func forwardCommands() []*cobra.Command {
 		Args:    cobra.MinimumNArgs(1),
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
 			box := args[0]
+			type pair struct{ remote, local int }
+			var pairs []pair
+			for _, a := range args[1:] {
+				r, l, ok := strings.Cut(a, ":")
+				if !ok {
+					l = r
+				}
+				remote, err1 := strconv.Atoi(r)
+				local, err2 := strconv.Atoi(l)
+				if err1 != nil || err2 != nil || remote < 1 || remote > 65535 || local < 1 || local > 65535 {
+					return fmt.Errorf("invalid port %q: want <port> or <port>:<local port>, each 1-65535", a)
+				}
+				pairs = append(pairs, pair{remote, local})
+			}
 			if err := ensureAwake(ctx, sess, box); err != nil {
 				return err
 			}
 			ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 			defer stop()
-			add := func(remote, local int) {
+			add := func(remote, local int) bool {
 				ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", local))
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "can't forward %s:%d: %v\n", box, remote, err)
-					return
+					return false
 				}
 				go func() { <-ctx.Done(); ln.Close() }()
 				fmt.Printf("localhost:%d → %s:%d\n", local, box, remote)
 				go serveForward(ctx, sess, box, remote, ln)
+				return true
 			}
-			if len(args) > 1 {
-				for _, a := range args[1:] {
-					r, l, ok := strings.Cut(a, ":")
-					if !ok {
-						l = r
+			if len(pairs) > 0 {
+				started := 0
+				for _, p := range pairs {
+					if add(p.remote, p.local) {
+						started++
 					}
-					remote, err1 := strconv.Atoi(r)
-					local, err2 := strconv.Atoi(l)
-					if err1 != nil || err2 != nil {
-						return fmt.Errorf("invalid port %q: want <port> or <port>:<local port>", a)
-					}
-					add(remote, local)
+				}
+				if started == 0 {
+					return errors.New("nothing forwarded")
 				}
 				fmt.Println("Ctrl-C to stop.")
 				<-ctx.Done()
@@ -83,9 +95,9 @@ func forwardCommands() []*cobra.Command {
 						}
 					}
 					sort.Ints(ports)
+					// A local port in use is tried again on the next pass.
 					for _, p := range ports {
-						done[p] = true
-						add(p, p)
+						done[p] = add(p, p)
 					}
 				}
 				select {
