@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -73,6 +74,33 @@ func newToken() string {
 
 func (w *Worker) bundleDir(id string) string { return filepath.Join(w.boxDir(id), "bundle") }
 func (w *Worker) mountDir(id string) string  { return filepath.Join(w.boxDir(id), "root") }
+
+func sandboxID(id string) string { return fmt.Sprintf("H%x", sha256.Sum256([]byte(id))) }
+
+func (b *Box) sandboxID() string {
+	if b.RunscID != "" {
+		return b.RunscID
+	}
+	return b.ID
+}
+
+// Legacy IDs may be prefixes of other boxes. Never pass an absent legacy name
+// to runsc: its abbreviation lookup could target a different container.
+func (w *Worker) legacySandboxExists(b *Box) (bool, error) {
+	if _, err := os.Stat(runscRoot); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	out, err := w.runsc(b.GVisor, "list", "--quiet")
+	if err != nil {
+		return false, err
+	}
+	for _, id := range strings.Fields(string(out)) {
+		if id == b.ID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 
 // runsc runs a runsc command for a box of gVisor version v, with the flags every
 // call must agree on.
@@ -203,6 +231,20 @@ func capName(i int) string { return "CAP_" + capNames[i] }
 // boot, or a restore from the checkpoint in from. It then sends hutch-guest the
 // restore message. On failure everything it created is undone.
 func (w *Worker) startSandbox(ctx context.Context, b *Box, from string, guestTimeout time.Duration) error {
+	if b.RunscID == "" {
+		// A previous daemon may have stopped partway through a legacy start.
+		// Exact existence is required before cleaning up its old OCI name.
+		exists, err := w.legacySandboxExists(b)
+		if err != nil {
+			return err
+		}
+		if exists {
+			if _, err := w.runsc(b.GVisor, "delete", "--force", b.ID); err != nil {
+				return err
+			}
+		}
+		b.RunscID = sandboxID(b.ID)
+	}
 	s, err := w.newNetwork(b.ID, b.Allow)
 	if err != nil {
 		return err
@@ -228,11 +270,11 @@ func (w *Worker) startSandbox(ctx context.Context, b *Box, from string, guestTim
 		return fail(err)
 	}
 	fmt.Fprintf(console, "\n--- hutchd: starting %s at %s ---\n", b.ID, time.Now().UTC().Format(time.RFC3339))
-	w.runsc(b.GVisor, "delete", "--force", b.ID) // left by a hutchd that stopped mid-start
-	args := []string{"create", "--bundle", w.bundleDir(b.ID), b.ID}
+	w.runsc(b.GVisor, "delete", "--force", b.sandboxID()) // left by a hutchd that stopped mid-start
+	args := []string{"create", "--bundle", w.bundleDir(b.ID), b.sandboxID()}
 	if from != "" {
 		// Pages load in the background: the box answers before all its memory is in.
-		args = []string{"restore", "--detach", "--background", "--bundle", w.bundleDir(b.ID), "--image-path", from, b.ID}
+		args = []string{"restore", "--detach", "--background", "--bundle", w.bundleDir(b.ID), "--image-path", from, b.sandboxID()}
 	}
 	cmd := exec.Command(filepath.Join(w.Root, "gvisor", b.GVisor, "runsc"), append(append([]string{}, runscFlags...), args...)...)
 	cmd.Stdout, cmd.Stderr = console, console
@@ -243,7 +285,7 @@ func (w *Worker) startSandbox(ctx context.Context, b *Box, from string, guestTim
 		return fail(fmt.Errorf("runsc %s: %v (see hutch console %s)", args[0], err, b.ID))
 	}
 	if from == "" {
-		if _, err := w.runsc(b.GVisor, "start", b.ID); err != nil {
+		if _, err := w.runsc(b.GVisor, "start", b.sandboxID()); err != nil {
 			return fail(err)
 		}
 	}
@@ -261,14 +303,15 @@ func (w *Worker) startSandbox(ctx context.Context, b *Box, from string, guestTim
 }
 
 func (w *Worker) sandboxPID(b *Box) (int, error) {
-	out, err := w.runsc(b.GVisor, "state", b.ID)
+	out, err := w.runsc(b.GVisor, "state", b.sandboxID())
 	if err != nil {
 		return 0, err
 	}
 	var st struct {
-		PID int `json:"pid"`
+		PID int    `json:"pid"`
+		ID  string `json:"id"`
 	}
-	if err := json.Unmarshal(out, &st); err != nil || st.PID == 0 {
+	if err := json.Unmarshal(out, &st); err != nil || st.PID == 0 || st.ID != b.sandboxID() {
 		return 0, fmt.Errorf("runsc state %s: no pid", b.ID)
 	}
 	return st.PID, nil
@@ -276,11 +319,19 @@ func (w *Worker) sandboxPID(b *Box) (int, error) {
 
 // killSandbox stops a box's sandbox and unmounts its disk.
 func (w *Worker) killSandbox(b *Box) {
-	w.runsc(b.GVisor, "kill", b.ID, "KILL")
+	exists := true
+	if b.RunscID == "" {
+		exists, _ = w.legacySandboxExists(b)
+	}
+	if exists {
+		w.runsc(b.GVisor, "kill", b.sandboxID(), "KILL")
+	}
 	for i := 0; i < 200 && b.PID > 0 && processAlive(b.PID); i++ {
 		time.Sleep(10 * time.Millisecond)
 	}
-	w.runsc(b.GVisor, "delete", "--force", b.ID)
+	if exists {
+		w.runsc(b.GVisor, "delete", "--force", b.sandboxID())
+	}
 	b.PID = 0
 	if err := w.unmountDisk(b.ID); err != nil {
 		time.Sleep(200 * time.Millisecond)
@@ -294,11 +345,11 @@ func (w *Worker) killSandbox(b *Box) {
 // the sandbox is left running.
 func (w *Worker) checkpointSandbox(ctx context.Context, b *Box, gen string, leaveRunning bool) error {
 	w.syncGuest(ctx, b)
-	if _, err := w.runsc(b.GVisor, "pause", b.ID); err != nil {
+	if _, err := w.runsc(b.GVisor, "pause", b.sandboxID()); err != nil {
 		return err
 	}
 	resume := func(err error) error {
-		w.runsc(b.GVisor, "resume", b.ID)
+		w.runsc(b.GVisor, "resume", b.sandboxID())
 		return err
 	}
 	if err := w.syncDisk(b.ID); err != nil {
@@ -308,7 +359,7 @@ func (w *Worker) checkpointSandbox(ctx context.Context, b *Box, gen string, leav
 	if leaveRunning {
 		args = append(args, "--leave-running")
 	}
-	if _, err := w.runsc(b.GVisor, append(args, b.ID)...); err != nil {
+	if _, err := w.runsc(b.GVisor, append(args, b.sandboxID())...); err != nil {
 		return resume(err)
 	}
 	disk := filepath.Join(w.boxDir(b.ID), "rootfs.ext4")
@@ -316,7 +367,7 @@ func (w *Worker) checkpointSandbox(ctx context.Context, b *Box, gen string, leav
 		if err := clone(disk, filepath.Join(gen, "rootfs.ext4")); err != nil {
 			return resume(err)
 		}
-		_, err := w.runsc(b.GVisor, "resume", b.ID)
+		_, err := w.runsc(b.GVisor, "resume", b.sandboxID())
 		return err
 	}
 	w.killSandbox(b)

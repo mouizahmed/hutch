@@ -74,4 +74,4 @@ jobs:
         if: always()
         run: |
           sudo journalctl -u hutchd --no-pager -n 250
-          sudo journalctl -k --no-pager --since '20 minutes ago' --grep='oom|Out of memory|Killed process|runsc|gvisor' -n 100
+          sudo journalctl -k --no-pager --since '20 minutes ago' --grep='oom|Out of memory|Killed process|runsc|gvisor' -n 100 || true

@@ -75,6 +75,10 @@ type Box struct {
 	Store *Store `json:"store,omitempty"`
 	// GVisor is the gVisor version a gVisor box runs (FCVersion is empty then).
 	GVisor string `json:"gvisor,omitempty"`
+	// RunscID is the internal OCI ID. New sandboxes use fixed-length uppercase
+	// IDs, so runsc's abbreviation lookup cannot confuse human box-name prefixes.
+	// Empty identifies older running sandboxes that still use the box name.
+	RunscID string `json:"runsc_id,omitempty"`
 	// Token is what hutchd presents to a gVisor box's hutch-guest. It lives in the
 	// box's memory, so it goes wherever the box goes: forks, the bucket, a new machine.
 	Token string `json:"token,omitempty"`

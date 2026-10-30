@@ -108,6 +108,7 @@ func (w *Worker) Rename(id, newID string, store *Store) (*Box, error) {
 		return nil, err
 	}
 	b.ID, b.Store, b.Uploaded = newID, store, 0
+	b.RunscID = "" // A renamed template needs its own OCI ID when restored.
 	if err := w.save(b); err != nil {
 		return nil, err
 	}
