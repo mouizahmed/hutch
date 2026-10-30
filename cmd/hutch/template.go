@@ -243,6 +243,7 @@ func templateCommands() *cobra.Command {
 	tmpl := &cobra.Command{Use: "template", Short: "Build and manage this project's template", GroupID: "projects"}
 
 	var buildFlags, snapFlags formFlags
+	var commit bool
 	build := &cobra.Command{
 		Use:   "build",
 		Short: "Run the committed recipe in a fresh VM and verify it",
@@ -255,7 +256,7 @@ func templateCommands() *cobra.Command {
 			if cfg, err = confirmSettings(ctx, sess, repo, cfg, buildFlags, false); err != nil {
 				return err
 			}
-			if err := takeTemplateWork(ctx, sess, repo); err != nil {
+			if err := readyRecipe(ctx, sess, repo, commit); err != nil {
 				return err
 			}
 			p, err := templateParams(repo, cfg, true)
@@ -286,7 +287,7 @@ func templateCommands() *cobra.Command {
 			if cfg, err = confirmSettings(ctx, sess, repo, cfg, snapFlags, false); err != nil {
 				return err
 			}
-			if err := takeTemplateWork(ctx, sess, repo); err != nil {
+			if err := readyRecipe(ctx, sess, repo, commit); err != nil {
 				return err
 			}
 			p, err := templateParams(repo, cfg, true)
@@ -361,6 +362,9 @@ func templateCommands() *cobra.Command {
 
 	buildFlags.register(build.Flags())
 	snapFlags.register(snapshot.Flags())
+	for _, c := range []*cobra.Command{build, snapshot} {
+		c.Flags().BoolVar(&commit, "commit", false, "commit .hutch/ changes, merge the template box's work, and push without asking")
+	}
 	tmpl.AddCommand(build, snapshot, shell, versions)
 	return tmpl
 }
@@ -456,19 +460,116 @@ func mergeTemplate(root string) error {
 	return nil
 }
 
-// takeTemplateWork merges the template box's work into this checkout before a
-// build replaces the box, after you review it; without a terminal it refuses.
-func takeTemplateWork(ctx context.Context, sess *yamux.Session, repo *config.Repo) error {
-	commits, err := templateWork(ctx, sess, repo.ID, repo.Root)
-	if err != nil || len(commits) == 0 {
+// recipe is what stands between this checkout and a build of its HEAD: .hutch/
+// changes here, the template box's work this checkout lacks, and commits not on
+// the remote.
+type recipe struct {
+	root, branch string
+	changed      []string
+	commits      []string
+	unpushed     bool
+}
+
+// readRecipe reads the checkout and brings the template box's work onto
+// hutch/template, changing nothing else.
+func readRecipe(ctx context.Context, sess *yamux.Session, project, root string) (recipe, error) {
+	r := recipe{root: root}
+	branch, err := git(root, "symbolic-ref", "--short", "-q", "HEAD")
+	if err != nil || branch == "" {
+		return r, fmt.Errorf("%s is on a detached HEAD; check out a branch to build from", root)
+	}
+	r.branch = branch
+	if r.commits, err = templateWork(ctx, sess, project, root); err != nil {
+		return r, err
+	}
+	changed, err := git(root, append([]string{"status", "--porcelain", "--"}, recipePaths...)...)
+	if err != nil {
+		return r, err
+	}
+	if changed != "" {
+		r.changed = strings.Split(changed, "\n")
+	}
+	ahead, err := git(root, "rev-list", "--count", "@{upstream}..HEAD")
+	r.unpushed = err != nil || ahead != "0"
+	return r, nil
+}
+
+func (r recipe) ready() bool { return len(r.changed) == 0 && len(r.commits) == 0 && !r.unpushed }
+
+// review says what prepare will do, ending with the question.
+func (r recipe) review() string {
+	var lines, steps []string
+	if len(r.changed) > 0 {
+		lines = append(lines, ".hutch/ has changes here:")
+		for _, l := range r.changed {
+			lines = append(lines, "  "+strings.TrimSpace(l))
+		}
+		steps = append(steps, fmt.Sprintf("commit them on %s as %q", r.branch, templateCommit))
+	}
+	if len(r.commits) > 0 {
+		if len(lines) > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, "The template box has work you don't:")
+		for _, c := range r.commits {
+			lines = append(lines, "  "+c)
+		}
+		steps = append(steps, "merge it into "+r.branch)
+	}
+	if len(lines) == 0 {
+		lines = append(lines, r.branch+" has commits not on origin.")
+	}
+	steps = append(steps, "push", "build that commit?")
+	steps[0] = strings.ToUpper(steps[0][:1]) + steps[0][1:]
+	return strings.Join(lines, "\n") + "\n\n" + strings.Join(steps, ", then ")
+}
+
+// prepare commits .hutch/ changes, merges the template box's work, and pushes. A
+// merge that conflicts is undone and stops it, so the template box keeps its work.
+func (r recipe) prepare() error {
+	if len(r.changed) > 0 {
+		if _, err := git(r.root, append([]string{"add", "--"}, recipePaths...)...); err != nil {
+			return err
+		}
+		if _, err := git(r.root, append([]string{"commit", "-q", "-m", templateCommit, "--"}, recipePaths...)...); err != nil {
+			return err
+		}
+	}
+	if len(r.commits) > 0 {
+		if err := mergeTemplate(r.root); err != nil {
+			return err
+		}
+	}
+	if _, err := git(r.root, "push", "-q", "-u", "origin", "HEAD"); err != nil {
+		return fmt.Errorf("push %s: %w", r.branch, err)
+	}
+	return nil
+}
+
+// readyRecipe gets the checkout ready to build, after you review it; yes skips
+// the question, and without a terminal it refuses.
+func readyRecipe(ctx context.Context, sess *yamux.Session, repo *config.Repo, yes bool) error {
+	r, err := readRecipe(ctx, sess, repo.ID, repo.Root)
+	if err != nil || r.ready() {
 		return err
 	}
-	fmt.Printf("The template box has work this checkout doesn't:\n  %s\n", strings.Join(commits, "\n  "))
-	if !term.IsTerminal(int(os.Stdin.Fd())) || !confirm("Merge it into your branch? (a build replaces the template box)") {
-		return fmt.Errorf("not built: the template box's work isn't in this checkout (it's on %s)", templateBranch)
+	fmt.Println(r.review())
+	if !yes {
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			return errors.New("not built: --commit does this without asking")
+		}
+		if !confirm("Go ahead?") {
+			return errors.New("not built")
+		}
 	}
-	return mergeTemplate(repo.Root)
+	return r.prepare()
 }
+
+// recipePaths is what a build commits: .hutch/, but hutch.toml may stay
+// uncommitted (it's read here, not in the VM).
+var recipePaths = []string{".hutch", ":!.hutch/hutch.toml"}
+
+const templateCommit = "Update the Hutch template"
 
 // syncSecrets uploads the files .hutch/uploads.txt lists when they differ from the
 // project's stored copy. A file missing here is fine if the server has it: rebuilds

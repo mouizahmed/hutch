@@ -428,8 +428,14 @@ func (m *tui) formView() string {
 func (m *tui) confirmView() string {
 	w := min(64, m.w-4)
 	var lines []string
+	// The question wraps; listed files and commits are cut, one per line.
 	for _, l := range strings.Split(m.confirmText, "\n") {
-		lines = append(lines, truncate(l, w-6))
+		if strings.HasPrefix(l, "  ") {
+			l = truncate(l, w-6)
+		} else {
+			l = lipgloss.Wrap(l, w-6, " ")
+		}
+		lines = append(lines, l)
 	}
 	body := styleBold.Render(strings.Join(lines, "\n")) + "\n\n" + styleDim.Render(m.confirmHint)
 	return stylePopup.Width(w).BorderForeground(lipgloss.Color("203")).Render(body)

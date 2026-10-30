@@ -151,6 +151,8 @@ type ThreadStatus struct {
 	N          int   `json:"n"`
 	Dead       bool  `json:"dead"`
 	LastOutput int64 `json:"last_output"` // unix seconds
+	// LastInput is when a client showing it was last typed in (unix seconds).
+	LastInput int64 `json:"last_input,omitempty"`
 	// Bell: it rang the bell and has printed nothing since; BellAt is when it
 	// last rang (unix seconds).
 	Bell   bool  `json:"bell,omitempty"`

@@ -28,20 +28,24 @@ const threadSession = "hutch"
 func status(p guestproto.StatusParams) (guestproto.Status, error) {
 	st := guestproto.Status{Sessions: int(sessions.Load())}
 	viewed := map[int]bool{}
+	typed := map[int]int64{}
 	// Clients of the threads' session or a view grouped with it look at a window.
-	if out, err := tmuxAsDev("list-clients", "-F", "#{session_name}|#{session_group}|#{window_index}|#{"+guestproto.HiddenOption+"}"); err == nil {
+	if out, err := tmuxAsDev("list-clients", "-F", "#{session_name}|#{session_group}|#{window_index}|#{"+guestproto.HiddenOption+"}|#{client_activity}"); err == nil {
 		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 			f := strings.Split(line, "|")
-			if len(f) != 4 {
+			if len(f) != 5 {
 				continue
 			}
 			st.Clients++
 			if f[3] != guestproto.HiddenOff {
 				st.Viewers++
 			}
-			if f[3] == "" && (f[0] == threadSession || f[1] == threadSession) {
+			if f[0] == threadSession || f[1] == threadSession {
 				n, _ := strconv.Atoi(f[2])
-				viewed[n] = true
+				viewed[n] = viewed[n] || f[3] == ""
+				// tmux sets a client's activity when it's typed in, not when it draws.
+				at, _ := strconv.ParseInt(f[4], 10, 64)
+				typed[n] = max(typed[n], at)
 			}
 		}
 	}
@@ -63,7 +67,7 @@ func status(p guestproto.StatusParams) (guestproto.Status, error) {
 			resized, _ := strconv.ParseInt(f[4], 10, 64)
 			created, _ := strconv.ParseInt(f[9], 10, 64)
 			saved.Last, _ = strconv.Atoi(f[11])
-			t := guestproto.ThreadStatus{N: n, Dead: f[1] == "1", LastOutput: last,
+			t := guestproto.ThreadStatus{N: n, Dead: f[1] == "1", LastOutput: last, LastInput: typed[n],
 				Bell: bell > 0 && bell >= last, BellAt: bell, Redraw: resized > 0 && last <= resized+1, Viewed: viewed[n],
 				Agent: f[5], Autonomy: f[6], Prompt: f[7], Name: f[8], Created: created, Title: f[10]}
 			st.Threads = append(st.Threads, t)

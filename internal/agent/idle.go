@@ -173,10 +173,10 @@ func (m *monitor) check(ctx context.Context, server *atomic.Pointer[yamux.Sessio
 
 // threadStates reads each thread's state from its terminal. Agents print while
 // they work (spinners, timers) and stop when they hand back; a bell hands back at
-// once, and a redraw after a resize isn't work.
+// once, and neither a redraw after a resize nor the echo of your typing is work.
 func (m *monitor) threadStates(a *boxActivity, st guestproto.Status, now time.Time) []api.ThreadState {
 	a.working = false
-	window := m.settings.Load().WorkingWindow
+	window, echo := m.settings.Load().WorkingWindow, m.settings.Load().EchoWindow
 	if st.Clients > a.clients {
 		a.redrawUntil = now.Add(m.settings.Load().RedrawWindow)
 	}
@@ -198,7 +198,7 @@ func (m *monitor) threadStates(a *boxActivity, st guestproto.Status, now time.Ti
 		switch {
 		case th.Dead:
 			state = api.ThreadExited
-		case !th.Bell && !th.Redraw && now.Sub(last) < window && last.After(a.since.Add(time.Second)):
+		case !th.Bell && !th.Redraw && now.Sub(last) < window && last.After(a.since.Add(time.Second)) && last.After(time.Unix(th.LastInput, 0).Add(echo)):
 			state = api.ThreadWorking
 			a.working = true
 		}

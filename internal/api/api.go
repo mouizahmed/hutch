@@ -202,6 +202,7 @@ type WorkerSettingsParams struct {
 	ThreadInterval  time.Duration `json:"thread_interval"`
 	WorkingWindow   time.Duration `json:"working_window"`
 	RedrawWindow    time.Duration `json:"redraw_window"`
+	EchoWindow      time.Duration `json:"echo_window"`
 	Checkpoint      time.Duration `json:"checkpoint"`
 	FirstCheckpoint time.Duration `json:"first_checkpoint"`
 	// ChunkCache is the share of the worker's disk downloaded chunks may use, in percent.
@@ -222,7 +223,7 @@ type WorkerSettingsParams struct {
 
 // NewWorkerSettings is the part of the worker's settings that comes from config.
 func NewWorkerSettings(c *config.Config) WorkerSettingsParams {
-	return WorkerSettingsParams{IdleInterval: c.Duration("idle.check_interval"), ThreadInterval: c.Duration("threads.check_interval"), WorkingWindow: c.Duration("threads.working_window"), RedrawWindow: c.Duration("threads.redraw_window"),
+	return WorkerSettingsParams{IdleInterval: c.Duration("idle.check_interval"), ThreadInterval: c.Duration("threads.check_interval"), WorkingWindow: c.Duration("threads.working_window"), RedrawWindow: c.Duration("threads.redraw_window"), EchoWindow: c.Duration("threads.echo_window"),
 		Checkpoint: c.Duration("checkpoint.interval"), FirstCheckpoint: c.Duration("checkpoint.first_after"), ChunkCache: c.Percent("machine.chunk_cache"), Refresh: c.Duration("gc.grace") / 2,
 		Overcommit: c.Float("machine.overcommit"), MemoryHigh: c.Percent("machine.memory_high"), MemoryCritical: c.Percent("machine.memory_critical"),
 		PeakWindow: c.Duration("machine.peak_window"), PressureStall: c.Duration("machine.pressure_stall")}

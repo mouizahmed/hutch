@@ -119,7 +119,7 @@ type tui struct {
 	form        *taskForm // the n and N popup, when open
 	confirmText string    // what the confirm popup asks, and its keys
 	confirmHint string
-	confirmDir  string                    // the checkout a "build" confirm builds from
+	confirmDir  string                    // the checkout a build or snapshot confirm uses
 	templates   map[string][]api.Template // each project's versions, newest first
 	tasks       []*task
 	taskN       int
@@ -652,8 +652,10 @@ func (m *tui) confirmKey(msg tea.KeyPressMsg) tea.Cmd {
 	if msg.String() != "y" {
 		return nil
 	}
-	if project, ok := strings.CutPrefix(key, "build "); ok {
-		return m.buildTemplate(project, m.confirmDir)
+	for _, verb := range []string{"build", "snapshot"} {
+		if project, ok := strings.CutPrefix(key, verb+" "); ok {
+			return m.templateTask(project, m.confirmDir, verb)
+		}
 	}
 	for _, r := range m.rows {
 		if r.key() != key {
