@@ -1,0 +1,75 @@
+name: runtime
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '37 7 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  files:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: images
+        with:
+          path: dist/images
+          key: runtime-images-${{ runner.arch }}-${{ hashFiles('images/kernel/**', 'images/layer/**') }}
+      - if: steps.images.outputs.cache-hit != 'true'
+        run: make images
+      - run: make build linux
+      - name: Pack machine files
+        run: |
+          mkdir -p dist/runtime
+          cp bin/hutch bin/linux-amd64/hutchd bin/linux-amd64/hutch-guest dist/runtime/
+          cp dist/images/* dist/runtime/
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: runtime-files
+          path: dist/runtime/*
+          if-no-files-found: error
+
+  boxes:
+    needs: files
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [firecracker, gvisor]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: runtime-files
+          path: dist/runtime
+      - name: Set up a disposable machine
+        env:
+          HUTCH_TEST_BACKEND: ${{ matrix.backend }}
+        run: scripts/runtime-machine.sh
+      - name: Lifecycle, recovery, and isolation
+        env:
+          HUTCH_MACHINE: hutch-ci
+          HUTCH_TEST_BACKEND: ${{ matrix.backend }}
+          HUTCH_TEST_DISPOSABLE: '1'
+        run: go test -tags runtime -count=1 -timeout 12m -v ./internal/integration
+      - name: Machine logs
+        if: always()
+        run: sudo journalctl -u hutchd --no-pager -n 250
