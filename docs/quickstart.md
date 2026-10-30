@@ -43,11 +43,14 @@ Use `SETUP_PROMPT.md` to prepare `.hutch/` with your agent. Review its setup and
 
 ```sh
 hutch template build
+hutch doctor --template
 hutch template snapshot
 hutch new "Run the tests"
 ```
 
 A build prepares the environment; snapshot publishes the version new boxes use. Existing boxes keep their own environment. The template agent's work is imported for review during a build; resolve conflicts before replacing its box.
+
+`doctor --template` takes the committed and pushed recipe through two fresh image and box builds. It bypasses Dockerfile layer caching, runs verification, compares package/tool versions and non-ignored project files, and initializes declared user-scope MCP servers. Temporary boxes and images are removed afterward. It does not replace the working template or publish a version. Add `.hutch/fingerprint.sh` for deterministic checks beyond that fingerprint, such as hashing generated files that Git ignores. The machine's Hutch default base image and explicit BuildKit cache mounts are shared; this check does not compare every byte of a disk or prove service behavior. Native-client MCP OAuth and unsupported transports are reported as unverified.
 
 ## Work and reconnect
 

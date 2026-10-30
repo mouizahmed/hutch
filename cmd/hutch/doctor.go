@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -16,7 +17,8 @@ func doctorCommand() *cobra.Command {
 }
 
 func doctorCommandFor(target string) *cobra.Command {
-	return &cobra.Command{
+	var template bool
+	c := &cobra.Command{
 		Use:     "doctor",
 		Short:   "Check this computer, the machine, its bucket, boxes, and config, with a fix for each problem",
 		GroupID: "setup",
@@ -52,6 +54,25 @@ func doctorCommandFor(target string) *cobra.Command {
 						Detail: "hutch " + version.String() + ", hutchd " + r.Version, Fix: "use the same Hutch version on both"})
 				}
 				checks = append(checks, r.Checks...)
+				if template {
+					var result api.DoctorResult
+					checkErr := func() error {
+						repo, cfg, err := project(cmd.Context(), sess)
+						if err != nil {
+							return err
+						}
+						p, err := templateParams(repo, cfg, true)
+						if err != nil {
+							return err
+						}
+						return rpc.CallOutput(cmd.Context(), sess, api.DoctorTemplate, p, &result, os.Stdout, os.Stderr)
+					}()
+					if checkErr != nil {
+						checks = append(checks, api.Check{Area: "template", Name: "check", Status: "fail", Detail: checkErr.Error(), Fix: "commit and push the recipe; run hutch init if this project is not registered; upgrade hutchd if it lacks this check"})
+					} else {
+						checks = append(checks, result.Checks...)
+					}
+				}
 			}
 			failed := false
 			area := ""
@@ -77,4 +98,6 @@ func doctorCommandFor(target string) *cobra.Command {
 			return nil
 		},
 	}
+	c.Flags().BoolVar(&template, "template", false, "build the committed project twice in temporary boxes, compare fingerprints, and check declared MCP servers")
+	return c
 }

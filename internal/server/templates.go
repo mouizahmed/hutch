@@ -94,9 +94,16 @@ func (s *Server) templateBuild(ctx context.Context, params json.RawMessage, out 
 // build runs the recipe at p.Commit in a fresh VM, the project's template box,
 // replacing any template box there was. A failed build leaves the box to inspect.
 func (s *Server) build(ctx context.Context, proj api.Project, p api.TemplateParams, id string, stdout, stderr io.Writer) (api.Box, error) {
+	return s.buildBox(ctx, proj, p, id, stdout, stderr, false)
+}
+
+func (s *Server) buildBox(ctx context.Context, proj api.Project, p api.TemplateParams, id string, stdout, stderr io.Writer, diagnostic bool) (api.Box, error) {
 	ctx, cancel := context.WithTimeout(ctx, p.BuildTimeout)
 	defer cancel()
 	if _, err := s.store.box(id); err == nil {
+		if diagnostic {
+			return api.Box{}, fmt.Errorf("diagnostic box %s already exists", id)
+		}
 		fmt.Fprintf(stdout, "Replacing the template box %s; changes made in it by hand are discarded.\n", id)
 		if err := s.removeBox(ctx, id); err != nil {
 			return api.Box{}, err
@@ -105,12 +112,20 @@ func (s *Server) build(ctx context.Context, proj api.Project, p api.TemplatePara
 	if _, old := p.Recipe["setup.sh"]; old && p.Recipe["Dockerfile"] == nil {
 		return api.Box{}, errors.New(".hutch/setup.sh is replaced by .hutch/Dockerfile: hutch init converts it")
 	}
-	b, w, err := s.bootTemplate(ctx, proj, p, id, stdout, stderr)
+	b, w, err := s.bootTemplateBuild(ctx, proj, p, id, stdout, stderr, diagnostic)
 	if err != nil {
 		return b, err
 	}
 	fail := func(err error) (api.Box, error) {
+		if diagnostic {
+			return b, err
+		}
 		return b, fmt.Errorf("%w\n  the template box is left running: hutch template shell", err)
+	}
+	if diagnostic {
+		if err := s.store.putMeta(id, boxMeta{project: proj.ID}); err != nil {
+			return fail(err)
+		}
 	}
 
 	step(stdout, "checkout %.12s", p.Commit)
@@ -161,14 +176,20 @@ func (s *Server) build(ctx context.Context, proj api.Project, p api.TemplatePara
 	stopSampling()
 	pk := <-peaks
 	pk.OfVCPUs, pk.OfMiB, pk.At = p.VCPUs, p.MemMiB, time.Now().UTC()
-	s.store.setPeaks(proj.ID, pk)
+	if !diagnostic {
+		s.store.setPeaks(proj.ID, pk)
+	}
 	fmt.Fprintf(stdout, "\nPeak use: %.1f GB memory, %.1f vCPUs (of %d vCPU, %.0f GB)\n", float64(pk.MemMiB)/1024, pk.CPUs, p.VCPUs, float64(p.MemMiB)/1024)
 
 	// Whatever verify.sh left running would be running in every box; the services
 	// (each in its own session, started by init) stay.
 	s.run(ctx, w, id, api.ExecParams{User: "root", Argv: []string{"sh", "-c", stopLeftovers}}, io.Discard, io.Discard)
 
-	if err := s.store.putMeta(id, boxMeta{project: proj.ID, kind: api.BoxTemplate, commit: p.Commit, verified: true, secrets: digest}); err != nil {
+	kind := api.BoxTemplate
+	if diagnostic {
+		kind = ""
+	}
+	if err := s.store.putMeta(id, boxMeta{project: proj.ID, kind: kind, commit: p.Commit, verified: true, secrets: digest}); err != nil {
 		return b, err
 	}
 	if verify {
@@ -186,6 +207,10 @@ for p in $(pgrep -u dev); do s=$(ps -o sid= -p $p | tr -d ' '); case "$keep" in 
 // bootTemplate cold boots the project's template box from its image (built first
 // when the recipe changed) with the repository cloned at /workspace.
 func (s *Server) bootTemplate(ctx context.Context, proj api.Project, p api.TemplateParams, id string, stdout, stderr io.Writer) (api.Box, *workerConn, error) {
+	return s.bootTemplateBuild(ctx, proj, p, id, stdout, stderr, false)
+}
+
+func (s *Server) bootTemplateBuild(ctx context.Context, proj api.Project, p api.TemplateParams, id string, stdout, stderr io.Writer, diagnostic bool) (api.Box, *workerConn, error) {
 	n := need{memMiB: p.MemMiB, vcpus: p.VCPUs}
 	if err := s.checkFits(ctx, n); err != nil {
 		return api.Box{}, nil, err
@@ -195,14 +220,21 @@ func (s *Server) bootTemplate(ctx context.Context, proj api.Project, p api.Templ
 		return api.Box{}, nil, err
 	}
 	defer release()
-	img, from, err := s.buildImage(ctx, w, proj, p, stdout)
+	imageID := ""
+	if diagnostic {
+		imageID = id
+	}
+	img, from, err := s.buildImage(ctx, w, proj, p, stdout, imageID)
 	if err != nil {
 		return api.Box{}, nil, err
 	}
 	step(stdout, "boot %s (%d vCPU, %d MiB)", id, p.VCPUs, p.MemMiB)
 	b, err := s.callForBox(ctx, w, api.BoxBoot, api.BootParams{ID: id, Image: img, VCPUs: p.VCPUs, MemMiB: p.MemMiB, DiskBytes: p.DiskBytes, Idle: p.Idle, Allow: p.Allow})
 	if err != nil {
-		return b, nil, err
+		// The worker keeps failed boots for inspection. Record their owner so
+		// console access and diagnostic cleanup can reach them as well.
+		s.store.putBox(api.Box{ID: id, Worker: w.id, State: "failed", Image: img, VCPUs: p.VCPUs, MemMiB: p.MemMiB, Created: time.Now().UTC()})
+		return b, w, err
 	}
 	if err := s.store.putMeta(id, boxMeta{project: proj.ID, kind: api.BoxTemplate}); err != nil {
 		return b, nil, err
@@ -230,7 +262,7 @@ func (s *Server) bootTemplate(ctx context.Context, proj api.Project, p api.Templ
 // buildImage builds the template's image on w: the recipe's Dockerfile, the
 // published image the project names, or neither, the default image. An image is
 // named after what it's built from, so an unchanged recipe reuses it.
-func (s *Server) buildImage(ctx context.Context, w *workerConn, proj api.Project, p api.TemplateParams, out io.Writer) (name, from string, err error) {
+func (s *Server) buildImage(ctx context.Context, w *workerConn, proj api.Project, p api.TemplateParams, out io.Writer, diagnosticID string) (name, from string, err error) {
 	cfg, err := s.settings()
 	if err != nil {
 		return "", "", err
@@ -253,6 +285,9 @@ func (s *Server) buildImage(ctx context.Context, w *workerConn, proj api.Project
 		}
 		bp.Name, bp.Files = fmt.Sprintf("%s-%x", proj.Slug, h.Sum(nil))[:len(proj.Slug)+13], p.Recipe
 		step(out, "image from .hutch/Dockerfile")
+	}
+	if diagnosticID != "" {
+		bp.Name, bp.Reuse, bp.NoCache = diagnosticID, false, true
 	}
 	ctx, cancel := context.WithTimeout(ctx, p.BuildTimeout)
 	defer cancel()

@@ -111,14 +111,16 @@ func handlers(w *worker.Worker, name string, m *monitor, u *uploader, kp *keys.P
 				return nil, err
 			}
 			info, err := images.Get(p.Name)
-			if err != nil || !p.Reuse || info.Layer != images.LayerID() {
+			if err != nil || !p.Reuse || p.NoCache || info.Layer != images.LayerID() {
 				stdout, _ := out.Writers()
 				images.CacheBytes = p.CacheBytes
 				switch {
 				case p.Ref != "":
-					info, err = images.FromRef(ctx, p.Name, p.Ref, p.Pins, stdout)
+					info, err = images.FromRef(ctx, p.Name, p.Ref, p.Pins, stdout, p.NoCache)
 				case p.Files != nil:
-					info, err = images.Build(ctx, p.Name, p.Files, p.Pins, stdout)
+					info, err = images.Build(ctx, p.Name, p.Files, p.Pins, stdout, p.NoCache)
+				case p.NoCache:
+					info, err = images.BuildDefaultDiagnostic(ctx, p.Name, stdout)
 				default:
 					info, err = images.BuildDefault(ctx, stdout)
 				}
@@ -131,6 +133,13 @@ func handlers(w *worker.Worker, name string, m *monitor, u *uploader, kp *keys.P
 				res.Sources = append(res.Sources, s.String())
 			}
 			return res, nil
+		},
+		api.ImageRemoveDiagnostic: func(_ context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+			var p api.IDParams
+			if err := rpc.Decode(params, &p); err != nil {
+				return nil, err
+			}
+			return nil, images.RemoveDiagnostic(p.ID)
 		},
 		api.WorkerHello: func(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any, error) {
 			boxes, err := w.List()

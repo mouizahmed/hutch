@@ -337,20 +337,35 @@ func Title(agent, cmd, prompt string) string {
 
 // MCPServers reads the servers under key in an MCP config file, by name.
 func MCPServers(path string, data []byte, key string) map[string]map[string]any {
+	servers, _ := ParseMCPServers(path, data, key)
+	return servers
+}
+
+// ParseMCPServers also reports malformed config rather than treating it as an
+// empty server list, for readiness checks.
+func ParseMCPServers(path string, data []byte, key string) (map[string]map[string]any, error) {
 	var doc map[string]any
 	if strings.HasSuffix(path, ".toml") {
 		if _, err := toml.Decode(string(data), &doc); err != nil {
-			return nil
+			return nil, err
 		}
-	} else if json.Unmarshal(data, &doc) != nil {
-		return nil
+	} else if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	if doc == nil {
+		return nil, fmt.Errorf("MCP config is not an object")
 	}
 	out := map[string]map[string]any{}
 	servers, _ := doc[key].(map[string]any)
+	if doc[key] != nil && servers == nil {
+		return nil, fmt.Errorf("MCP server collection is not an object")
+	}
 	for name, v := range servers {
 		if m, ok := v.(map[string]any); ok {
 			out[name] = m
+		} else {
+			return nil, fmt.Errorf("MCP server configuration is not an object")
 		}
 	}
-	return out
+	return out, nil
 }

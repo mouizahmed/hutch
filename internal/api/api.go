@@ -48,7 +48,8 @@ const (
 	UserLoginBox  = "user.login_box"
 	UserCapture   = "user.capture"
 
-	ImageBuild = "image.build" // hutchd only
+	ImageBuild            = "image.build"             // hutchd only
+	ImageRemoveDiagnostic = "image.remove_diagnostic" // hutchd only; temporary doctor images
 
 	ProjectInit      = "project.init"
 	TemplateBuild    = "template.build"
@@ -79,17 +80,18 @@ const (
 	// The keys proxy refreshed a login: its new real values, to store.
 	WorkerKeysRefreshed = "worker.keys_refreshed"
 
-	ServerInit   = "server.init"
-	ServerGC     = "server.gc"
-	BoxMove      = "box.move"
-	WorkerDrain  = "worker.drain"
-	WorkerRm     = "worker.rm"
-	Hello        = "hello"
-	NotifyTest   = "notify.test"
-	BucketGet    = "bucket.get"
-	Doctor       = "doctor"        // the server's checks
-	KeysIdentity = "keys.identity" // public box identity verification keys
-	WorkerDoctor = "worker.doctor" // hutchd only
+	ServerInit     = "server.init"
+	ServerGC       = "server.gc"
+	BoxMove        = "box.move"
+	WorkerDrain    = "worker.drain"
+	WorkerRm       = "worker.rm"
+	Hello          = "hello"
+	NotifyTest     = "notify.test"
+	BucketGet      = "bucket.get"
+	Doctor         = "doctor"          // the server's checks
+	DoctorTemplate = "doctor.template" // two diagnostic builds of a committed recipe
+	KeysIdentity   = "keys.identity"   // public box identity verification keys
+	WorkerDoctor   = "worker.doctor"   // hutchd only
 )
 
 // Check is one hutch doctor result: Status ok, warn, or fail, with a fix for the others.
@@ -605,6 +607,8 @@ type ImageBuildParams struct {
 	Pins []string `json:"pins,omitempty"`
 	// Reuse keeps an existing image of that name instead of building it again.
 	Reuse bool `json:"reuse,omitempty"`
+	// NoCache reruns Dockerfile steps; doctor uses a separate temporary image name.
+	NoCache bool `json:"no_cache,omitempty"`
 }
 
 type Image struct {

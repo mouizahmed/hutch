@@ -273,7 +273,7 @@ func buildImage(ctx context.Context, root string, args []string) error {
 			return err
 		})
 		if err == nil {
-			info, err = b.Build(ctx, args[0], files, pins, os.Stdout)
+			info, err = b.Build(ctx, args[0], files, pins, os.Stdout, false)
 		}
 	}
 	if err != nil {

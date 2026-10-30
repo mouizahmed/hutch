@@ -55,6 +55,7 @@ func (s *Server) apiMux() rpc.Mux {
 		api.Hello:            s.hello,
 		api.NotifyTest:       s.notifyTest,
 		api.Doctor:           s.doctor,
+		api.DoctorTemplate:   s.doctorTemplate,
 		api.KeysIdentity:     s.keysIdentity,
 		api.WorkerList:       s.workerList,
 	}

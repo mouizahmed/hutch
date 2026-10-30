@@ -96,6 +96,19 @@ func (b *Builder) Get(name string) (Info, error) {
 	return info, json.Unmarshal(data, &info)
 }
 
+// RemoveDiagnostic removes only images in doctor's reserved namespace.
+func (b *Builder) RemoveDiagnostic(name string) error {
+	if !strings.HasPrefix(name, "doctor-") || filepath.Base(name) != name || strings.ContainsAny(name, `/\\`) {
+		return errors.New("not a diagnostic image")
+	}
+	return os.RemoveAll(b.Dir(name))
+}
+
+// BuildDefaultDiagnostic leaves the machine's default image and OCI layout alone.
+func (b *Builder) BuildDefaultDiagnostic(ctx context.Context, name string, out io.Writer) (Info, error) {
+	return b.Build(ctx, name, map[string][]byte{"Dockerfile": defaultDockerfile}, nil, out, true)
+}
+
 // BuildDefault builds Hutch's default image, kept also as an OCI layout for project
 // images built FROM it.
 func (b *Builder) BuildDefault(ctx context.Context, out io.Writer) (Info, error) {
@@ -109,20 +122,23 @@ func (b *Builder) BuildDefault(ctx context.Context, out io.Writer) (Info, error)
 }
 
 // FromRef builds an image that is a published image plus Hutch's layer.
-func (b *Builder) FromRef(ctx context.Context, name, ref string, pins []string, out io.Writer) (Info, error) {
-	return b.Build(ctx, name, map[string][]byte{"Dockerfile": []byte("FROM " + ref + "\n")}, pins, out)
+func (b *Builder) FromRef(ctx context.Context, name, ref string, pins []string, out io.Writer, noCache bool) (Info, error) {
+	return b.Build(ctx, name, map[string][]byte{"Dockerfile": []byte("FROM " + ref + "\n")}, pins, out, noCache)
 }
 
 // Build builds the Dockerfile in files (the build context: file name → content)
 // into image name, replacing any image of that name. Base images named in pins
 // ("ref@sha256:…") are used at those digests, whatever their tags point to now.
-func (b *Builder) Build(ctx context.Context, name string, files map[string][]byte, pins []string, out io.Writer) (Info, error) {
+func (b *Builder) Build(ctx context.Context, name string, files map[string][]byte, pins []string, out io.Writer, noCache bool) (Info, error) {
 	layout := filepath.Join(b.Dir(Default), "oci")
 	digest, err := layoutDigest(layout)
 	if err != nil {
 		return Info{}, fmt.Errorf("the default image: %w (hutch machine upgrade builds it)", err)
 	}
 	args := []string{"--oci-layout", "hutch-default=" + layout, "--opt", "context:" + DefaultRef + "=oci-layout://hutch-default@" + digest}
+	if noCache {
+		args = append(args, "--no-cache", "--opt", "image-resolve-mode=pull")
+	}
 	if policy := sourcePolicy(pins); policy != nil {
 		path := filepath.Join(b.Root, "tmp", name+"-policy.json")
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
