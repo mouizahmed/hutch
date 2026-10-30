@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -92,13 +93,21 @@ func (r remote) run(script string) error {
 }
 
 // upload streams a local file to path on the machine, compressed on the way.
-func (r remote) upload(local, path string, mode os.FileMode) error {
+func (r remote) upload(local, dst string, mode os.FileMode) error {
 	f, err := os.Open(local)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
 	pr, pw := io.Pipe()
+	defer pr.Close() // Unblock the compressor if SSH exits before reading stdin.
 	go func() {
 		enc, _ := zstd.NewWriter(pw, zstd.WithEncoderLevel(zstd.SpeedFastest))
 		_, err := io.Copy(enc, f)
@@ -107,9 +116,20 @@ func (r remote) upload(local, path string, mode os.FileMode) error {
 		}
 		pw.CloseWithError(err)
 	}()
-	tmp := path + ".new"
-	c := r.cmd(fmt.Sprintf("sudo mkdir -p %s && zstd -dcq | sudo dd of=%s bs=1M conv=sparse status=none && sudo chmod %o %s && sudo mv %s %s",
-		shellQuote(filepath.Dir(path)), shellQuote(tmp), mode, shellQuote(tmp), shellQuote(tmp), shellQuote(path)))
+	// A unique file on the destination filesystem keeps interrupted and concurrent
+	// transfers separate. Verify the complete payload before atomic replacement.
+	// These are Linux machine paths, including when this CLI runs on Windows.
+	c := r.cmd(fmt.Sprintf(`sudo mkdir -p %s
+tmp=$(sudo mktemp %s)
+trap 'sudo rm -- "$tmp" 2>/dev/null || true' EXIT
+zstd -dcq | sudo dd of="$tmp" bs=1M conv=sparse status=none
+if ! printf '%%s  %%s\n' %s "$tmp" | sudo sha256sum -c --status; then
+  echo 'received file failed checksum verification' >&2; exit 1
+fi
+sudo chmod %o "$tmp"
+sudo mv -T -- "$tmp" %s`,
+		shellQuote(path.Dir(dst)), shellQuote(path.Join(path.Dir(dst), ".hutch-upload.XXXXXXXX")),
+		shellQuote(hex.EncodeToString(h.Sum(nil))), mode, shellQuote(dst)))
 	var out bytes.Buffer
 	c.Stdin, c.Stdout, c.Stderr = pr, &out, &out
 	if err := c.Run(); err != nil {
@@ -628,7 +648,7 @@ func upgradeCommand() *cobra.Command {
 			if err := install(r, p, a, storagePlan{}, true); err != nil {
 				return err
 			}
-			sess, err := connect()
+			sess, err := connectTarget(host)
 			if err != nil {
 				return err
 			}
