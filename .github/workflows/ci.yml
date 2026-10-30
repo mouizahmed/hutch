@@ -50,6 +50,27 @@ jobs:
         with:
           fail-on-severity: moderate
 
+  agent-mcp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Install tested native CLIs
+        run: |
+          npm install --global @openai/codex@0.166.0
+          curl -fsSL --retry 3 https://claude.ai/install.sh | bash -s -- 2.1.314
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Native MCP discovery and calls without model turns
+        run: |
+          codex --version
+          claude --version
+          node compat/mcp-smoke.mjs
+
   compat:
     runs-on: ubuntu-latest
     container:

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -28,5 +30,24 @@ func TestSplitSecrets(t *testing.T) {
 		if secret == nil || !secret.Merge || !strings.Contains(string(secret.Data), "hunter2") || !strings.Contains(string(secret.Data), "s3cret") {
 			t.Errorf("%s secret: %+v", agent, secret)
 		}
+	}
+}
+
+func TestScopedMCPWarning(t *testing.T) {
+	home := t.TempDir()
+	a := agents.Builtin()["claude"]
+	path := filepath.Join(home, ".claude.json")
+	if err := os.WriteFile(path, []byte(`{"mcpServers":{"global":{}},"projects":{"/private/project":{"mcpServers":{"local":{"env":{"TOKEN":"do-not-display"}}}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	warning := scopedMCPWarning(home, a)
+	if warning == "" || strings.Contains(warning, "do-not-display") || strings.Contains(warning, "/private/project") {
+		t.Fatalf("missing or unsafe warning: %q", warning)
+	}
+	if err := os.WriteFile(path, []byte(`{"mcpServers":{"global":{}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if warning := scopedMCPWarning(home, a); warning != "" {
+		t.Fatalf("user scope should transfer: %q", warning)
 	}
 }

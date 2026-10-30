@@ -178,7 +178,7 @@ func (h *boxHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	logins, _ := h.p.logins(h.box)
 	var mine []Login
 	for _, l := range logins {
-		if port == "443" && l.ForHost(host) {
+		if l.ForTarget(host, port) {
 			mine = append(mine, l)
 		}
 	}
@@ -229,6 +229,7 @@ func tunnel(conn, up net.Conn) {
 
 // intercept terminates the box's TLS for a login host and serves its requests.
 func (p *Proxy) intercept(conn net.Conn, box, host, hostport string, allow []string) {
+	_, port, _ := net.SplitHostPort(hostport)
 	tc := tls.Server(conn, &tls.Config{
 		NextProtos:     []string{"http/1.1"},
 		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return p.cert(host) },
@@ -254,7 +255,7 @@ func (p *Proxy) intercept(conn net.Conn, box, host, hostport string, allow []str
 		current, reuse := p.logins(box)
 		var logins []Login
 		for _, l := range current {
-			if l.ForHost(host) {
+			if l.ForTarget(host, port) {
 				logins = append(logins, l)
 			}
 		}
@@ -296,6 +297,9 @@ func (p *Proxy) cert(host string) (*tls.Certificate, error) {
 		NotAfter:     time.Now().Add(7 * 24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		tmpl.DNSNames, tmpl.IPAddresses = nil, []net.IP{ip}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, p.caCert, &k.PublicKey, p.ca.PrivateKey)
 	if err != nil {

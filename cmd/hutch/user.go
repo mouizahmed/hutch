@@ -72,6 +72,9 @@ func collectLayer() (collected, error) {
 	}
 	total := 0
 	for _, a := range set.Sorted() {
+		if warning := scopedMCPWarning(home, a); warning != "" {
+			c.warnings = append(c.warnings, warning)
+		}
 		for _, src := range a.Config {
 			files, err := readLocal(home, src)
 			if err != nil {
@@ -108,6 +111,31 @@ func collectLayer() (collected, error) {
 	return c, nil
 }
 
+// Claude's default local scope lives under projects[path], separately from its
+// user-scoped MCP map. Do not silently imply those uncollected servers synced.
+func scopedMCPWarning(home string, a *agents.Adapter) string {
+	if a.MCP == nil || a.MCP.Format != "claude" {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(home, strings.TrimPrefix(a.MCP.File, "~/")))
+	if err != nil {
+		return ""
+	}
+	var doc struct {
+		Projects map[string]map[string]json.RawMessage `json:"projects"`
+	}
+	if json.Unmarshal(data, &doc) != nil {
+		return ""
+	}
+	for _, project := range doc.Projects {
+		var servers map[string]json.RawMessage
+		if json.Unmarshal(project[a.MCP.Key], &servers) == nil && len(servers) > 0 {
+			return a.MCP.File + " contains project-local MCP servers that this adapter does not transfer; use user-scoped MCP configuration or a project .mcp.json in Git"
+		}
+	}
+	return ""
+}
+
 // ensureGitIdentity gives the user layer this machine's git name and email when it
 // has none, so commits in boxes work before the first hutch user sync.
 func ensureGitIdentity(ctx context.Context, sess *yamux.Session) {
@@ -142,17 +170,18 @@ func realMCPKeys(c collected, cfg *config.Config) []string {
 		if a == nil || a.MCP == nil {
 			continue
 		}
-		urls := map[string]bool{}
+		urls := map[string]string{}
 		for _, f := range c.layer.Files[adapter] {
 			if f.Path == a.MCP.File {
 				for name, server := range agents.MCPServers(f.Path, f.Data, a.MCP.Key) {
-					urls[name] = server["url"] != nil
+					urls[name], _ = server["url"].(string)
 				}
 			}
 		}
 		for _, f := range files {
 			for name, server := range agents.MCPServers(f.Path, f.Data, a.MCP.Key) {
-				if urls[name] || hosts[name].Value != nil || seen[name] || !hasKey(server, a.MCP.Secrets) {
+				configured, _ := hosts[name].Value.([]string)
+				if len(keys.MCPHosts(urls[name], configured)) > 0 || seen[name] || !hasKey(server, a.MCP.Secrets) {
 					continue
 				}
 				seen[name] = true
@@ -374,7 +403,7 @@ func userCommands() *cobra.Command {
 			}
 			if cfg, err := loadConfig(ctx, sess); err == nil {
 				for _, server := range realMCPKeys(c, cfg) {
-					fmt.Printf("  MCP server %s runs in the box, so its keys stay real there: hutch config set mcp_hosts.%s <the hosts it uses them with> makes them placeholders\n", server, server)
+					fmt.Printf("  MCP server %s has no proxyable HTTPS target, so its keys stay real in the box. For stdio servers: hutch config set mcp_hosts.%s <HTTPS hosts[:port] it uses>. Plain HTTP credentials cannot use the keys proxy.\n", server, server)
 				}
 			}
 			if !yes {

@@ -3,9 +3,7 @@ package server
 import (
 	"encoding/json"
 	"maps"
-	"net/url"
 	"slices"
-	"strings"
 
 	"github.com/mouizahmed/hutch/internal/agents"
 	"github.com/mouizahmed/hutch/internal/guestproto"
@@ -60,9 +58,13 @@ func (s *Server) syncMCP(a *agents.Adapter, files []guestproto.File) error {
 						continue
 					}
 					sec := keys.Secret{Key: k, Real: v}
-					if i := slices.IndexFunc(old[name], func(o keys.Secret) bool { return o.Real == v }); i >= 0 {
-						sec.Placeholders = old[name][i].Placeholders
-					} else {
+					if i := slices.IndexFunc(old[name], func(o keys.Secret) bool { return o.Key == k }); i >= 0 {
+						sec.Placeholders = slices.Clone(old[name][i].Placeholders)
+						if old[name][i].Real != v && keys.IsJWT(v) {
+							sec.Placeholders = append([]string{keys.Placeholder(v)}, sec.Placeholders...)
+						}
+					}
+					if len(sec.Placeholders) == 0 {
 						sec.Placeholders = []string{keys.Placeholder(v)}
 					}
 					out[name] = append(out[name], sec)
@@ -107,10 +109,7 @@ func (s *Server) mcpLogins(set agents.Set) ([]keys.Login, map[string]bool, error
 			}
 		}
 		for _, name := range slices.Sorted(maps.Keys(secrets)) {
-			hosts := slices.Clone(named[name])
-			if u, err := url.Parse(urls[name]); err == nil && u.Hostname() != "" {
-				hosts = append(hosts, strings.ToLower(u.Hostname()))
-			}
+			hosts := keys.MCPHosts(urls[name], named[name])
 			if len(hosts) == 0 {
 				for _, sec := range secrets[name] {
 					real[sec.Real] = true

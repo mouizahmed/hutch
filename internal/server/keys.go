@@ -351,7 +351,8 @@ func (s *Server) boxKeys(ctx context.Context, w *workerConn, box string) error {
 	proxy := fmt.Sprintf("http://%s:%d", keys.Gateway, keys.Port)
 	local := "localhost,127.0.0.1,::1"
 	env := strings.Join([]string{"HTTPS_PROXY=" + proxy, "https_proxy=" + proxy, "NO_PROXY=" + local, "no_proxy=" + local,
-		"NODE_EXTRA_CA_CERTS=" + keys.CAPath}, "\n") + "\n"
+		"NODE_EXTRA_CA_CERTS=" + keys.CAPath, "NODE_USE_ENV_PROXY=1",
+		"SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt", "REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt"}, "\n") + "\n"
 	script := `set -e
 mkdir -p "$(dirname "$3")" "$(dirname "$4")" /etc/ssl/certs
 if [ "$(cat "$3" 2>/dev/null)" != "$1" ]; then

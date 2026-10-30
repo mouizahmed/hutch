@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"math/big"
+	"net"
 	"regexp"
 	"strings"
 	"time"
@@ -80,7 +81,28 @@ func Norm(key string) string {
 // ForHost reports whether a login is for host: one of its hosts or a subdomain.
 func (l Login) ForHost(host string) bool {
 	for _, h := range l.Hosts {
-		if host == h || strings.HasSuffix(host, "."+h) {
+		if matchesHost(host, h) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesHost(host, allowed string) bool {
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	allowed = strings.TrimSuffix(strings.ToLower(allowed), ".")
+	return host == allowed || strings.HasSuffix(host, "."+allowed)
+}
+
+// ForTarget includes the HTTPS port in a login's boundary. Bare host declarations
+// mean 443; a nonstandard port must be explicitly declared as host:port.
+func (l Login) ForTarget(host, port string) bool {
+	for _, target := range l.Hosts {
+		allowed, wantPort, err := net.SplitHostPort(target)
+		if err != nil {
+			allowed, wantPort = target, "443"
+		}
+		if port == wantPort && matchesHost(host, allowed) {
 			return true
 		}
 	}
