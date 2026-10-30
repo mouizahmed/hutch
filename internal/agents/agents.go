@@ -334,3 +334,23 @@ func Title(agent, cmd, prompt string) string {
 	}
 	return t
 }
+
+// MCPServers reads the servers under key in an MCP config file, by name.
+func MCPServers(path string, data []byte, key string) map[string]map[string]any {
+	var doc map[string]any
+	if strings.HasSuffix(path, ".toml") {
+		if _, err := toml.Decode(string(data), &doc); err != nil {
+			return nil
+		}
+	} else if json.Unmarshal(data, &doc) != nil {
+		return nil
+	}
+	out := map[string]map[string]any{}
+	servers, _ := doc[key].(map[string]any)
+	for name, v := range servers {
+		if m, ok := v.(map[string]any); ok {
+			out[name] = m
+		}
+	}
+	return out
+}

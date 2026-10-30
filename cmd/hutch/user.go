@@ -27,6 +27,7 @@ import (
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/config"
 	"github.com/mouizahmed/hutch/internal/guestproto"
+	"github.com/mouizahmed/hutch/internal/keys"
 	"github.com/mouizahmed/hutch/internal/rpc"
 	"github.com/mouizahmed/hutch/internal/wire"
 )
@@ -86,7 +87,7 @@ func collectLayer() (collected, error) {
 						c.secrets[a.Name] = append(c.secrets[a.Name], *secret)
 					}
 				}
-				f.Data = bytes.ReplaceAll(f.Data, []byte(home+"/"), []byte(boxHome+"/"))
+				f.Data = bytes.ReplaceAll(f.Data, []byte(filepath.ToSlash(home)+"/"), []byte(boxHome+"/"))
 				// Only config files: docs and scripts mention macOS paths harmlessly.
 				for _, m := range configPaths(f) {
 					c.warnings = append(c.warnings, fmt.Sprintf("%s mentions %s, which won't exist in a box", f.Path, m))
@@ -126,6 +127,61 @@ func gitGlobal(key string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// realMCPKeys lists the MCP servers whose keys boxes get as they are: servers that
+// run in the box (no URL) without mcp_hosts naming where they use their keys.
+func realMCPKeys(c collected, cfg *config.Config) []string {
+	set, err := agents.Load(c.layer.Adapters)
+	if err != nil {
+		return nil
+	}
+	hosts := cfg.Named("mcp_hosts.*")
+	seen := map[string]bool{}
+	var out []string
+	for adapter, files := range c.secrets {
+		a := set[adapter]
+		if a == nil || a.MCP == nil {
+			continue
+		}
+		urls := map[string]bool{}
+		for _, f := range c.layer.Files[adapter] {
+			if f.Path == a.MCP.File {
+				for name, server := range agents.MCPServers(f.Path, f.Data, a.MCP.Key) {
+					urls[name] = server["url"] != nil
+				}
+			}
+		}
+		for _, f := range files {
+			for name, server := range agents.MCPServers(f.Path, f.Data, a.MCP.Key) {
+				if urls[name] || hosts[name].Value != nil || seen[name] || !hasKey(server, a.MCP.Secrets) {
+					continue
+				}
+				seen[name] = true
+				out = append(out, name)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func hasKey(server map[string]any, fields []string) bool {
+	for _, f := range fields {
+		switch v := server[f].(type) {
+		case string:
+			if keys.LooksSecret(v) {
+				return true
+			}
+		case map[string]any:
+			for _, x := range v {
+				if s, ok := x.(string); ok && keys.LooksSecret(s) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // readLocal reads one adapter source from this machine; missing paths are skipped.
 func readLocal(home string, src agents.Source) ([]guestproto.File, error) {
 	path := filepath.Join(home, strings.TrimPrefix(src.File, "~/"))
@@ -139,7 +195,7 @@ func readLocal(home string, src agents.Source) ([]guestproto.File, error) {
 				return err
 			}
 			// Claude Code marks plugins in use by running processes here.
-			if strings.Contains(p, "/.in_use/") {
+			if strings.Contains(filepath.ToSlash(p), "/.in_use/") {
 				return nil
 			}
 			data, err := os.ReadFile(p)
@@ -315,6 +371,11 @@ func userCommands() *cobra.Command {
 			}
 			for a, s := range c.secrets {
 				fmt.Printf("  MCP secrets for %s kept apart from config (%d file)\n", a, len(s))
+			}
+			if cfg, err := loadConfig(ctx, sess); err == nil {
+				for _, server := range realMCPKeys(c, cfg) {
+					fmt.Printf("  MCP server %s runs in the box, so its keys stay real there: hutch config set mcp_hosts.%s <the hosts it uses them with> makes them placeholders\n", server, server)
+				}
 			}
 			if !yes {
 				if !term.IsTerminal(int(os.Stdin.Fd())) {

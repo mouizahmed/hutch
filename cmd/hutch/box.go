@@ -124,7 +124,7 @@ func boxCommands() []*cobra.Command {
 					return fmt.Errorf("%w\n  hutch console %s", err, name)
 				}
 			} else if from == "" && repo != nil {
-				p := api.ForkParams{Project: repo.ID, Path: repo.Root, Base: cfg.String("base"), ID: name, Idle: idle, Credentials: cfg.List("credentials"),
+				p := api.ForkParams{Project: repo.ID, Path: laptopPath(repo.Root), Base: cfg.String("base"), ID: name, Idle: idle, Credentials: cfg.List("credentials"),
 					Allow: cfg.List("network.allow")}
 				if err := checkAllow(p.Allow); err != nil {
 					return err

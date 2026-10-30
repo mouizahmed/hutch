@@ -252,29 +252,53 @@ func (c *Config) plain(name string, k *Key, top Layer) Setting {
 	return s
 }
 
+// names lists the paths a key has values at: the key itself, or for a wildcard
+// key each name some layer sets, sorted.
+func (c *Config) names(k *Key) []string {
+	if !strings.Contains(k.Path, "*") {
+		return []string{k.Path}
+	}
+	var names []string
+	seen := map[string]bool{}
+	for _, d := range c.docs {
+		if d == nil {
+			continue
+		}
+		for name, v := range d.values {
+			if v.key == k && !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// Named resolves each name a wildcard key has a value at, keyed by the name's
+// last segment, like the KEY of secret_hosts.KEY.
+func (c *Config) Named(pattern string) map[string]Setting {
+	out := map[string]Setting{}
+	for _, k := range Keys {
+		if k.Path != pattern {
+			continue
+		}
+		for _, name := range c.names(k) {
+			s, err := c.Get(name)
+			p, perr := SplitPath(name)
+			if err == nil && perr == nil && s.Value != nil {
+				out[p[len(p)-1]] = s
+			}
+		}
+	}
+	return out
+}
+
 // All resolves every key that has a value, in schema order, wildcard keys included.
 func (c *Config) All() []Setting {
 	var out []Setting
 	for _, k := range Keys {
-		var names []string
-		if strings.Contains(k.Path, "*") {
-			seen := map[string]bool{}
-			for _, d := range c.docs {
-				if d == nil {
-					continue
-				}
-				for name, v := range d.values {
-					if v.key == k && !seen[name] {
-						seen[name] = true
-						names = append(names, name)
-					}
-				}
-			}
-			sort.Strings(names)
-		} else {
-			names = []string{k.Path}
-		}
-		for _, name := range names {
+		for _, name := range c.names(k) {
 			s, _ := c.Get(name)
 			if s.Raw != nil {
 				out = append(out, s)

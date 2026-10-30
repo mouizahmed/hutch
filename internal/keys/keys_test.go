@@ -40,7 +40,7 @@ func TestFind(t *testing.T) {
 // Placeholders become real values only for the logins given, including inside
 // git's Basic auth.
 func TestSwapHeaders(t *testing.T) {
-	gh := Login{Adapter: "gh", Secrets: []Secret{{Key: "oauthtoken", Real: "gho_REAL", Placeholders: []string{"gho_PH"}}}}
+	gh := Login{Name: "gh", Adapter: "gh", Secrets: []Secret{{Key: "oauthtoken", Real: "gho_REAL", Placeholders: []string{"gho_PH"}}}}
 	h := http.Header{
 		"Authorization": {"Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:gho_PH"))},
 		"X-Other":       {"token gho_PH"},
@@ -60,7 +60,7 @@ func TestSwapHeaders(t *testing.T) {
 func TestLoginsByGrantAndHost(t *testing.T) {
 	p := NewProxy()
 	p.table = Table{
-		Logins: []Login{{Adapter: "claude", Hosts: []string{"anthropic.com"}}, {Adapter: "gh", Hosts: []string{"github.com"}}},
+		Logins: []Login{{Name: "claude", Adapter: "claude", Hosts: []string{"anthropic.com"}}, {Name: "gh", Adapter: "gh", Hosts: []string{"github.com"}}},
 		Grants: map[string][]string{"a": {"gh"}, "b": {"*"}},
 	}
 	names := func(box string) string {
@@ -82,7 +82,7 @@ func TestLoginsByGrantAndHost(t *testing.T) {
 
 // A refresh's answer must carry no real token, and say how the login changed.
 func TestPlaceholdered(t *testing.T) {
-	l := Login{Adapter: "claude", Secrets: []Secret{
+	l := Login{Name: "claude", Adapter: "claude", Secrets: []Secret{
 		{Key: "accesstoken", Real: "old-access", Placeholders: []string{"ph-access"}},
 		{Key: "refreshtoken", Real: "old-refresh", Placeholders: []string{"ph-refresh"}},
 	}}
@@ -104,5 +104,24 @@ func TestBlocked(t *testing.T) {
 	}
 	if Blocked(net.ParseIP("1.1.1.1")) {
 		t.Error("1.1.1.1 blocked")
+	}
+}
+
+// MCP config mixes keys with settings; only keys may become placeholders, or the
+// server breaks.
+func TestLooksSecret(t *testing.T) {
+	for v, want := range map[string]bool{
+		"lin_api_" + strings.Repeat("x", 32): true,
+		"Bearer " + strings.Repeat("y", 40):  true,
+		"ghp_" + strings.Repeat("z", 36):     true,
+		"true":                               false,
+		"debug":                              false,
+		"/home/dev/.config/server.json":      false,
+		"https://mcp.linear.app/sse":         false,
+		"some value with spaces in it":       false,
+	} {
+		if LooksSecret(v) != want {
+			t.Errorf("LooksSecret(%q) = %v", v, !want)
+		}
 	}
 }

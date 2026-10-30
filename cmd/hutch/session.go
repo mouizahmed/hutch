@@ -8,11 +8,9 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/signal"
 	"strconv"
 	"sync"
 	"sync/atomic"
-	"syscall"
 
 	"github.com/hashicorp/yamux"
 	"github.com/spf13/cobra"
@@ -165,9 +163,9 @@ func connectTerminal(box, banner string, open func(rows, cols int) (net.Conn, er
 		return wire.Write(conn, i)
 	}
 
-	winch := make(chan os.Signal, 1)
-	signal.Notify(winch, syscall.SIGWINCH)
-	defer signal.Stop(winch)
+	prepareTerminal()
+	winch, stop := resized()
+	defer stop()
 	go func() {
 		for range winch {
 			if c, r, err := term.GetSize(out); err == nil {

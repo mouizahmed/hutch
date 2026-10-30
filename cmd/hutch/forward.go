@@ -227,10 +227,10 @@ Host *.hutch
   IdentityFile "%s"
   IdentitiesOnly yes
   StrictHostKeyChecking no
-  UserKnownHostsFile /dev/null
+  UserKnownHostsFile %s
   LogLevel ERROR
 # END hutch
-`, exe, key)
+`, exe, key, nullFile)
 }
 
 // ensureAwake wakes a sleeping box.

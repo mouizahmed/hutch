@@ -113,6 +113,11 @@ func placeholdered(files []guestproto.File, secrets []keys.Secret) []guestproto.
 	for _, sec := range secrets {
 		swaps[sec.Real] = sec.Placeholders[0]
 	}
+	return placeholderedBy(files, swaps)
+}
+
+// placeholderedBy is files with each real value in swaps replaced by its placeholder.
+func placeholderedBy(files []guestproto.File, swaps map[string]string) []guestproto.File {
 	out := make([]guestproto.File, len(files))
 	for i, f := range files {
 		f.Data = keys.Replace(slices.Clone(f.Data), swaps)
@@ -134,20 +139,31 @@ func (s *Server) proxied(ctx context.Context, w *workerConn, box string) bool {
 }
 
 // boxFiles returns the stored credential files a box granted creds gets: logins
-// as placeholders when it's proxied, MCP secrets as they are.
+// and MCP keys as placeholders when it's proxied.
 func (s *Server) boxFiles(creds []string, proxied bool) ([]guestproto.File, error) {
 	stored, err := s.credentials()
+	if err != nil {
+		return nil, err
+	}
+	set, err := s.adapters()
+	if err != nil {
+		return nil, err
+	}
+	mcpLogins, real, err := s.mcpLogins(set)
 	if err != nil {
 		return nil, err
 	}
 	var files []guestproto.File
 	for _, c := range stored {
 		a, mcp, _ := strings.Cut(c.Part, "/")
-		if !granted(creds, a) {
+		switch {
+		case !granted(creds, a):
 			continue
-		}
-		if mcp != "" || !proxied {
+		case !proxied:
 			files = append(files, c.Files...)
+			continue
+		case mcp != "":
+			files = append(files, mcpFiles(a, c.Files, mcpLogins, real)...)
 			continue
 		}
 		secrets, err := s.loginSecrets(a)
@@ -202,9 +218,25 @@ func (s *Server) keysTable() (keys.Table, error) {
 			}
 		}
 		if len(secrets) > 0 {
-			t.Logins = append(t.Logins, keys.Login{Adapter: a.Name, Hosts: a.Hosts, Secrets: secrets})
+			t.Logins = append(t.Logins, keys.Login{Name: a.Name, Adapter: a.Name, Hosts: a.Hosts, Secrets: secrets})
 		}
 	}
+	// MCP keys synced before the keys proxy get their placeholders now.
+	for _, c := range stored {
+		name, isMCP := strings.CutSuffix(c.Part, "/mcp")
+		if a := set[name]; isMCP && a != nil {
+			if have, err := s.mcpSecrets(name); err == nil && have == nil {
+				if err := s.syncMCP(a, c.Files); err != nil {
+					return t, err
+				}
+			}
+		}
+	}
+	mcp, _, err := s.mcpLogins(set)
+	if err != nil {
+		return t, err
+	}
+	t.Logins = append(t.Logins, mcp...)
 	return t, nil
 }
 
@@ -235,6 +267,9 @@ func (s *Server) pushKeys(ctx context.Context, only *workerConn) {
 
 // keysRefreshed stores a login's new real values after the proxy refreshed it.
 func (s *Server) keysRefreshed(ctx context.Context, p api.KeysRefreshedParams) error {
+	if strings.Contains(p.Adapter, "/") {
+		return fmt.Errorf("%s doesn't refresh", p.Adapter)
+	}
 	if err := s.storeRefresh(p); err != nil {
 		return err
 	}

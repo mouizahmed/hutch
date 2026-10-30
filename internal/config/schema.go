@@ -86,6 +86,8 @@ var Keys = []*Key{
 		Doc: "full: agents run without asking for permission; ask: they ask"},
 	{Path: "credentials", Kind: List, Default: []any{"*"}, Layers: userProject, Request: true,
 		Doc: "logins boxes get; * means all of them"},
+	{Path: "mcp_hosts.*", Kind: List, Layers: user,
+		Doc: "hosts an MCP server that runs in the box (by its name) uses its keys with: boxes get placeholders for them, swapped toward these hosts only"},
 	{Path: "network.allow", Kind: List, Layers: project, Request: true,
 		Doc: "private targets (host:port) boxes may reach"},
 	{Path: "network.egress", Kind: Enum, Enum: []string{"allowlist", "open"}, Default: "open", Layers: userProject, Request: true,

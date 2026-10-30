@@ -84,7 +84,7 @@ func handoffCommands() []*cobra.Command {
 				project = len(versions) > 0
 			}
 			if project {
-				p.Project, p.Path = repo.ID, repo.Root
+				p.Project, p.Path = repo.ID, laptopPath(repo.Root)
 				if err := gitDelta(repo.Root, &p); err != nil {
 					return err
 				}
@@ -104,7 +104,7 @@ func handoffCommands() []*cobra.Command {
 				if err != nil {
 					return err
 				}
-				p.Source, p.Path, p.Delta = "base", root, &api.Delta{Files: data}
+				p.Source, p.Path, p.Delta = "base", laptopPath(root), &api.Delta{Files: data}
 				fmt.Printf("Files:    %d from %s (%s; no project template, so a base box)\n", len(files), root, size(len(data)))
 			}
 			if p.Delta.Size() > maxHandoff {
@@ -114,6 +114,14 @@ func handoffCommands() []*cobra.Command {
 			set, err := serverAdapters(ctx, sess)
 			if err != nil {
 				return err
+			}
+			root := dir
+			if repo != nil {
+				root = repo.Root
+			}
+			if !movesSessions && !noSession {
+				noSession = true
+				fmt.Println("Session:  agent sessions don't move between Windows and boxes; the box starts a new one")
 			}
 			home, _ := os.UserHomeDir()
 			var found *agents.Session
@@ -129,7 +137,7 @@ func handoffCommands() []*cobra.Command {
 					found = s
 				}
 			}
-			tp := api.ThreadParams{Agent: agentName, Autonomy: cfg.String("autonomy"), Dir: dir}
+			tp := api.ThreadParams{Agent: agentName, Autonomy: cfg.String("autonomy"), Dir: boxDir(root, dir)}
 			if tp.Agent == "" {
 				tp.Agent = cfg.String("default_agent")
 			}
@@ -236,6 +244,10 @@ func handoffCommands() []*cobra.Command {
 			set, err := serverAdapters(ctx, sess)
 			if err != nil {
 				return err
+			}
+			if !movesSessions {
+				// Their paths are the box's; on Windows they stay there.
+				agentNames = nil
 			}
 			sessions, err := boxSessions(ctx, sess, id, set, agentNames)
 			if err != nil {
@@ -464,6 +476,18 @@ type sessionFile struct {
 // boxSessions copies the agents' session files out of a box, with the transcript
 // format of each: everything under each agent's sessions directory, since a box
 // works on one checkout.
+// boxDir is where dir, in the checkout at root, is in a box.
+func boxDir(root, dir string) string {
+	if laptopPath(root) != "" {
+		return dir
+	}
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return ""
+	}
+	return "/workspace/" + filepath.ToSlash(rel)
+}
+
 func boxSessions(ctx context.Context, sess *yamux.Session, box string, set agents.Set, names []string) ([]sessionFile, error) {
 	var out []sessionFile
 	for _, name := range names {

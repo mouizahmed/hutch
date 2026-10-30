@@ -61,7 +61,7 @@ func NewCA() (cert, key []byte, err error) {
 type Proxy struct {
 	// Refreshed stores a refresh's new real values and placeholders before the box
 	// hears of them; the server then pushes the new table with Set.
-	Refreshed func(ctx context.Context, adapter string, changes []Change) error
+	Refreshed func(ctx context.Context, login string, changes []Change) error
 
 	mu        sync.Mutex
 	table     Table
@@ -313,13 +313,13 @@ func swapHeaders(h http.Header, logins []Login) {
 	}
 	for k, vs := range h {
 		for i, v := range vs {
+			v = string(Replace([]byte(v), swaps))
 			if b, ok := strings.CutPrefix(v, "Basic "); ok {
 				if raw, err := base64.StdEncoding.DecodeString(b); err == nil {
-					h[k][i] = "Basic " + base64.StdEncoding.EncodeToString(Replace(raw, swaps))
-					continue
+					v = "Basic " + base64.StdEncoding.EncodeToString(Replace(raw, swaps))
 				}
 			}
-			h[k][i] = string(Replace([]byte(v), swaps))
+			h[k][i] = v
 		}
 	}
 }
@@ -355,7 +355,7 @@ func refreshRequest(r *http.Request, logins []Login) (Login, []byte, bool) {
 		return Login{}, nil, false
 	}
 	for _, l := range logins {
-		if _, ok := realOf([]Login{l})[fields["refresh_token"]]; ok {
+		if _, ok := realOf([]Login{l})[fields["refresh_token"]]; ok && l.Refreshes() {
 			return l, body, true
 		}
 	}
@@ -367,10 +367,10 @@ func refreshRequest(r *http.Request, logins []Login) (Login, []byte, bool) {
 // real login upstream, has the new values stored, and answers with placeholders.
 func (p *Proxy) refresh(w http.ResponseWriter, r *http.Request, box, hostport string, l Login, body []byte, reuse time.Duration) {
 	p.mu.Lock()
-	st := p.refreshes[l.Adapter]
+	st := p.refreshes[l.Name]
 	if st == nil {
 		st = &refreshState{}
-		p.refreshes[l.Adapter] = st
+		p.refreshes[l.Name] = st
 	}
 	p.mu.Unlock()
 	st.Lock()
@@ -378,7 +378,7 @@ func (p *Proxy) refresh(w http.ResponseWriter, r *http.Request, box, hostport st
 
 	// Another box's refresh may have changed the login while this one waited.
 	for _, x := range p.allLogins() {
-		if x.Adapter == l.Adapter {
+		if x.Name == l.Name {
 			l = x
 		}
 	}
@@ -429,13 +429,13 @@ func (p *Proxy) refresh(w http.ResponseWriter, r *http.Request, box, hostport st
 	}
 	changes := Placeholdered(m, l)
 	if len(changes) > 0 {
-		if err := p.Refreshed(r.Context(), l.Adapter, changes); err != nil {
-			log.Printf("keys proxy: store %s's refresh: %v", l.Adapter, err)
+		if err := p.Refreshed(r.Context(), l.Name, changes); err != nil {
+			log.Printf("keys proxy: store %s's refresh: %v", l.Name, err)
 			http.Error(w, "the machine couldn't store the refreshed login: "+err.Error(), http.StatusBadGateway)
 			return
 		}
 	}
-	log.Printf("keys proxy: refreshed %s's login for %s", l.Adapter, box)
+	log.Printf("keys proxy: refreshed %s's login for %s", l.Name, box)
 	data, _ = json.Marshal(m)
 	st.at, st.status, st.body, st.refresh = time.Now(), resp.StatusCode, data, current
 	for _, c := range changes {

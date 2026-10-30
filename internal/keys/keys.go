@@ -37,12 +37,18 @@ type Table struct {
 	Reuse time.Duration `json:"reuse"`
 }
 
-// Login is one adapter's login: its secrets, and the hosts they're for.
+// Login is a set of secrets and the hosts they're for: an adapter's login (Name
+// is the adapter's), or one of its MCP servers' keys (Name is
+// "<adapter>/mcp/<server>"). A box may use it if it's granted Adapter's logins.
 type Login struct {
+	Name    string   `json:"name"`
 	Adapter string   `json:"adapter"`
 	Hosts   []string `json:"hosts"`
 	Secrets []Secret `json:"secrets"`
 }
+
+// Refreshes reports whether the login is an agent's, which refreshes its tokens.
+func (l Login) Refreshes() bool { return l.Name == l.Adapter }
 
 // Secret is one value in a login's files. Every placeholder it was ever given
 // stands for its current real value; the first is the newest.
@@ -121,6 +127,19 @@ func IsJWT(s string) bool {
 	}
 	b, err := base64.RawURLEncoding.DecodeString(p[1])
 	return err == nil && json.Valid(b)
+}
+
+// LooksSecret reports whether a configured value is a key rather than a setting:
+// a token of at least 16 characters with no spaces, after an optional auth
+// scheme ("Bearer …"), and not a path or URL.
+func LooksSecret(v string) bool {
+	for _, scheme := range []string{"Bearer ", "Basic ", "Token ", "token ", "bearer "} {
+		v = strings.TrimPrefix(v, scheme)
+	}
+	if len(v) < 16 || strings.ContainsAny(v, " \t\n") || strings.ContainsAny(v[:1], "/~.") || strings.Contains(v, "://") {
+		return false
+	}
+	return true
 }
 
 // Find returns the string values under any of keys, anywhere in a JSON or TOML

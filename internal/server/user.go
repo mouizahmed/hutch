@@ -103,17 +103,33 @@ func (s *Server) userPutConfig(ctx context.Context, params json.RawMessage, _ *r
 	if err != nil {
 		return nil, err
 	}
+	set, err := agents.Load(p.Layer.Adapters)
+	if err != nil {
+		return nil, err
+	}
+	s.keysMu.Lock()
 	for name := range existing {
 		if a, ok := strings.CutSuffix(strings.TrimPrefix(name, credentialsPrefix), "/mcp"); ok && p.Secrets[a] == nil {
 			s.store.deleteLayerPart(name)
+			s.store.deleteLayerPart(keysPrefix + a + "/mcp")
 		}
 	}
 	for a, files := range p.Secrets {
 		data, _ := json.Marshal(files)
-		if _, _, err := s.store.putLayerPart(credentialsPrefix+a+"/mcp", -1, data); err != nil {
-			return nil, err
+		if _, _, err = s.store.putLayerPart(credentialsPrefix+a+"/mcp", -1, data); err != nil {
+			break
+		}
+		if set[a] != nil {
+			if err = s.syncMCP(set[a], files); err != nil {
+				break
+			}
 		}
 	}
+	s.keysMu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	s.pushKeys(ctx, nil)
 	return api.UserState{Version: v, Layer: p.Layer}, nil
 }
 

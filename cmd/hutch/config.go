@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -347,7 +346,7 @@ func editInEditor(text []byte, layer config.Layer, name string) ([]byte, error) 
 		editor = os.Getenv("EDITOR")
 	}
 	if editor == "" {
-		editor = "vi"
+		editor = defaultEditor
 	}
 	f, err := os.CreateTemp("", "hutch-*.toml")
 	if err != nil {
@@ -357,7 +356,7 @@ func editInEditor(text []byte, layer config.Layer, name string) ([]byte, error) 
 	f.Write(withVersion(text))
 	f.Close()
 	for {
-		cmd := exec.Command("sh", "-c", editor+` "$1"`, "sh", f.Name())
+		cmd := editorCommand(editor, f.Name())
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 		if err := cmd.Run(); err != nil {
 			return nil, fmt.Errorf("%s: %w", editor, err)
