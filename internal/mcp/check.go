@@ -252,6 +252,12 @@ func check(ctx context.Context, s spec) (int, error) {
 
 func replyResult(r response) (json.RawMessage, error) {
 	if len(r.Error) > 0 && string(r.Error) != "null" {
+		var failure struct {
+			Code int `json:"code"`
+		}
+		if json.Unmarshal(r.Error, &failure) == nil && failure.Code != 0 {
+			return nil, fmt.Errorf("MCP protocol error %d; check authentication and configuration with the native client", failure.Code)
+		}
 		return nil, errors.New("MCP server returned a protocol error; inspect it with the native client")
 	}
 	if len(r.Result) == 0 {

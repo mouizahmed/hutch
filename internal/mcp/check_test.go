@@ -173,6 +173,13 @@ func TestFileErrorsAndAuth(t *testing.T) {
 	}
 }
 
+func TestProtocolErrorKeepsCodeWithoutProviderPayload(t *testing.T) {
+	_, err := replyResult(response{Error: json.RawMessage(`{"code":-32001,"message":"synthetic-secret-must-not-appear","data":{"token":"synthetic-secret"}}`)})
+	if err == nil || !strings.Contains(err.Error(), "-32001") || strings.Contains(err.Error(), "synthetic-secret") {
+		t.Fatalf("missing code or leaked provider payload: %v", err)
+	}
+}
+
 func TestNoAuthRedirect(t *testing.T) {
 	called := false
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
