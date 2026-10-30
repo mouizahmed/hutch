@@ -61,8 +61,6 @@ jobs:
         include:
           - arch: amd64
             runner: ubuntu-24.04
-          - arch: arm64
-            runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -103,17 +101,18 @@ jobs:
           sha256sum *.tar.gz install.sh LICENSE version.txt > checksums.txt
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         id: attest
-        if: github.event_name == 'push'
         with:
           subject-checksums: dist/release/checksums.txt
+      - name: Include signing bundle
+        env:
+          ATTESTATION: ${{ steps.attest.outputs.bundle-path }}
+        run: cp "$ATTESTATION" dist/release/attestation.sigstore.json
       - name: Create draft release
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ needs.check.outputs.version }}
-          ATTESTATION: ${{ steps.attest.outputs.bundle-path }}
         run: |
-          cp "$ATTESTATION" dist/release/attestation.sigstore.json
           gh release create "$RELEASE_VERSION" dist/release/* \
             --draft --verify-tag --generate-notes --title "$RELEASE_VERSION"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

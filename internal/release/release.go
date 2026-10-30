@@ -21,8 +21,12 @@ import (
 const BaseURL = "https://github.com/mouizahmed/hutch/releases/download"
 
 var tag = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$`)
+var describe = regexp.MustCompile(`-[0-9]+-g[0-9a-f]+$`)
 
-func IsVersion(v string) bool { return tag.MatchString(v) }
+// IsVersion excludes git-describe development builds, which have no assets.
+func IsVersion(v string) bool {
+	return tag.MatchString(v) && !strings.HasSuffix(v, "-dirty") && !describe.MatchString(v)
+}
 
 // Client permits a different source in tests; production uses GitHub over TLS.
 type Client struct {
@@ -61,7 +65,7 @@ func (c *Client) get(ctx context.Context, url string) (io.ReadCloser, error) {
 // temporary directory. The caller removes the returned directory after upload.
 // Only the five known regular files are accepted; links and extra paths fail.
 func (c *Client) Machine(ctx context.Context, version, arch string) (dir string, err error) {
-	if !IsVersion(version) || arch != "amd64" && arch != "arm64" {
+	if !IsVersion(version) || arch != "amd64" {
 		return "", fmt.Errorf("no machine release for %q, %q", version, arch)
 	}
 	asset := "hutch-machine_" + version + "_linux_" + arch + ".tar.gz"

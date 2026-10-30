@@ -229,7 +229,7 @@ func checkMachine(p probe) error {
 		return err
 	}
 	arch := p.get("arch")
-	if err := check(fcSHA256[arch] != "", "architecture", arch, "Hutch runs on x86_64 and aarch64", true); err != nil {
+	if err := check(arch == "x86_64", "architecture", arch, "Hutch machines currently need x86_64; arm64 CLI clients can connect to an x86_64 machine", true); err != nil {
 		return err
 	}
 	if p.get("kvm") == "yes" {
@@ -309,11 +309,21 @@ func (a artifacts) close() {
 }
 
 func findArtifacts(ctx context.Context, arch, hutchd, images string) (artifacts, error) {
-	goarch := map[string]string{"x86_64": "amd64", "aarch64": "arm64"}[arch]
+	goarch := map[string]string{"x86_64": "amd64"}[arch]
 	if goarch == "" {
 		return artifacts{}, fmt.Errorf("unsupported machine architecture %q", arch)
 	}
 	explicit := hutchd != "" || images != ""
+	if !explicit && release.IsVersion(version.String()) {
+		fmt.Printf("Downloading machine files for Hutch %s (%s)...\n", version.String(), goarch)
+		dir, err := release.NewClient().Machine(ctx, version.String(), goarch)
+		if err != nil {
+			return artifacts{}, fmt.Errorf("machine release: %w", err)
+		}
+		return artifacts{hutchd: filepath.Join(dir, "hutchd"), guest: filepath.Join(dir, "hutch-guest"),
+			kernel: filepath.Join(dir, "vmlinux-"+arch), tmux: filepath.Join(dir, "tmux-"+arch),
+			terminfo: filepath.Join(dir, "terminfo.tar"), downloadDir: dir}, nil
+	}
 	exe, err := selfPath()
 	if err != nil {
 		return artifacts{}, err
@@ -332,16 +342,6 @@ func findArtifacts(ctx context.Context, arch, hutchd, images string) (artifacts,
 		tmux: filepath.Join(images, "tmux-"+arch), terminfo: filepath.Join(images, "terminfo.tar")}
 	for _, f := range []string{a.hutchd, a.guest, a.kernel, a.tmux, a.terminfo} {
 		if _, err := os.Stat(f); err != nil {
-			if !explicit && release.IsVersion(version.String()) {
-				fmt.Printf("Downloading machine files for Hutch %s (%s)...\n", version.String(), goarch)
-				dir, err := release.NewClient().Machine(ctx, version.String(), goarch)
-				if err != nil {
-					return artifacts{}, fmt.Errorf("machine release: %w", err)
-				}
-				return artifacts{hutchd: filepath.Join(dir, "hutchd"), guest: filepath.Join(dir, "hutch-guest"),
-					kernel: filepath.Join(dir, "vmlinux-"+arch), tmux: filepath.Join(dir, "tmux-"+arch),
-					terminfo: filepath.Join(dir, "terminfo.tar"), downloadDir: dir}, nil
-			}
 			return a, fmt.Errorf("%s: build it with make linux images, or pass --hutchd and --images", f)
 		}
 	}

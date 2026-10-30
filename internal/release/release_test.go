@@ -118,7 +118,7 @@ func TestVersion(t *testing.T) {
 			t.Fatal(v)
 		}
 	}
-	for _, v := range []string{"dev", "06e8587", "v0.1.0-dirty/../../x", "v0.1.0\n", "v0.1.0+build"} {
+	for _, v := range []string{"dev", "06e8587", "v0.1.0-dirty", "v0.1.0-3-g123abc", "v0.1.0-dirty/../../x", "v0.1.0\n", "v0.1.0+build"} {
 		if IsVersion(v) {
 			t.Fatal(v)
 		}

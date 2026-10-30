@@ -4,7 +4,7 @@ Hutch runs one daemon, `hutchd`, on your Linux machine. You reach it through SSH
 
 ## Prepare the machine
 
-Use a Linux machine with systemd, kernel 6.1 or newer, and x86_64 or arm64. An Ubuntu machine with `apt` is the simplest path. Eight GB of RAM is a practical starting point; leave space for your projects and their snapshots. `/dev/kvm` selects Firecracker; without it Hutch uses gVisor. Their isolation and supported workloads differ; see [security](security.md).
+Use an x86_64 Linux machine with systemd and kernel 6.1 or newer. The CLI also runs on arm64 computers, but arm64 machines are not supported yet. An Ubuntu machine with `apt` is the simplest path. Eight GB of RAM is a practical starting point; leave space for your projects and their snapshots. `/dev/kvm` selects Firecracker; without it Hutch uses gVisor. Their isolation and supported workloads differ; see [security](security.md).
 
 Make `ssh <ssh-host>` work with a key, and allow that SSH user passwordless sudo. Run on your own computer:
 
