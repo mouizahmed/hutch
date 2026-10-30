@@ -45,20 +45,10 @@ func doctor(w *worker.Worker) []api.Check {
 	add("kernel", major > 6 || (major == 6 && minor >= 1), release, "upgrade the host kernel to 6.1 or newer")
 
 	var st syscall.Statfs_t
-	syscall.Statfs(w.Root, &st)
+	statErr := syscall.Statfs(w.Root, &st)
 	reflink := false
-	if st.Type == xfsMagic {
-		a, b := filepath.Join(w.Root, ".doctor-a"), filepath.Join(w.Root, ".doctor-b")
-		os.WriteFile(a, []byte("x"), 0o600)
-		if src, err := os.Open(a); err == nil {
-			if dst, err := os.Create(b); err == nil {
-				reflink = unix.IoctlFileClone(int(dst.Fd()), int(src.Fd())) == nil
-				dst.Close()
-			}
-			src.Close()
-		}
-		os.Remove(a)
-		os.Remove(b)
+	if statErr == nil && st.Type == xfsMagic {
+		reflink = checkReflink(w.Root)
 	}
 	add("XFS with reflink", reflink, w.Root, fmt.Sprintf("put %s on XFS made with mkfs.xfs -m reflink=1", w.Root))
 
@@ -76,4 +66,29 @@ func doctor(w *worker.Worker) []api.Check {
 		add("Firecracker", len(classes) > 0, strings.Join(classes, ", "), "install a Firecracker release under "+filepath.Join(w.Root, "firecracker"))
 	}
 	return out
+}
+
+// checkReflink uses its own temporary directory, so concurrent doctors do not
+// overwrite each other's probes or follow preexisting filenames.
+func checkReflink(root string) bool {
+	dir, err := os.MkdirTemp(root, ".doctor-*")
+	if err != nil {
+		return false
+	}
+	defer os.RemoveAll(dir)
+	a := filepath.Join(dir, "source")
+	if err := os.WriteFile(a, []byte("x"), 0o600); err != nil {
+		return false
+	}
+	src, err := os.Open(a)
+	if err != nil {
+		return false
+	}
+	defer src.Close()
+	dst, err := os.OpenFile(filepath.Join(dir, "clone"), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return false
+	}
+	defer dst.Close()
+	return unix.IoctlFileClone(int(dst.Fd()), int(src.Fd())) == nil
 }

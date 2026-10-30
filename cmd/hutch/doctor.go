@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 
@@ -66,7 +65,7 @@ func doctorCommand() *cobra.Command {
 				failed = failed || c.Status == "fail"
 			}
 			if failed {
-				os.Exit(1)
+				return exitError(1)
 			}
 			return nil
 		},

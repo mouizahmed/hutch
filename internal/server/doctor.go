@@ -52,8 +52,10 @@ func (s *Server) doctor(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any
 		s.backupMu.Lock()
 		last, at := s.backedUp, s.lastBackup
 		s.backupMu.Unlock()
-		if n, err := s.store.changes(); err == nil && n != last && !at.IsZero() && time.Since(at) > cfg.Duration("backup.warn_after") {
-			warn("machine", "backup", fmt.Sprintf("changes since the last backup, %s ago", time.Since(at).Round(time.Second)), "see journalctl -u hutchd on the machine for backup errors")
+		if n, err := s.store.changes(); err != nil {
+			check("machine", "backup", err, "", "see journalctl -u hutchd on the machine")
+		} else if detail := backupWarning(n, last, at, time.Now(), cfg.Duration("backup.warn_after")); detail != "" {
+			warn("machine", "backup", detail, "see journalctl -u hutchd on the machine for backup errors")
 		} else {
 			check("machine", "backup", nil, "current", "")
 		}
@@ -114,4 +116,17 @@ func (s *Server) doctor(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any
 		check("boxes", "fit", nil, fmt.Sprintf("all %d fit the machine", len(boxes)), "")
 	}
 	return r, nil
+}
+
+func backupWarning(changes, backedUp int64, at, now time.Time, after time.Duration) string {
+	if changes == backedUp {
+		return ""
+	}
+	if at.IsZero() {
+		return "no successful backup recorded yet"
+	}
+	if now.Sub(at) > after {
+		return fmt.Sprintf("changes since the last backup, %s ago", now.Sub(at).Round(time.Second))
+	}
+	return ""
 }
