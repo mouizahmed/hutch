@@ -23,6 +23,15 @@ import (
 // per login its secrets with their placeholders ([keys]).
 const keysPrefix = "keyproxy/"
 
+func (s *Server) identitySeed() []byte {
+	seed := s.master.Derive("box-identity")
+	return seed[:]
+}
+
+func (s *Server) keysIdentity(_ context.Context, _ json.RawMessage, _ *rpc.Out) (any, error) {
+	return keys.IdentityPublic(s.identitySeed())
+}
+
 type caPart struct {
 	Cert []byte `json:"cert"`
 	Key  []byte `json:"key"`
@@ -203,6 +212,18 @@ func (s *Server) keysTable() (keys.Table, error) {
 		return keys.Table{}, err
 	}
 	t := keys.Table{Grants: grants, CACert: cert, CAKey: key, Reuse: reuse}
+	if cfg, err := s.settings(); err == nil {
+		t.IdentityHosts = cfg.List("keys.identity_hosts")
+	}
+	t.IdentitySeed = s.identitySeed()
+	t.Projects = map[string]string{}
+	boxes, err := s.store.boxes()
+	if err != nil {
+		return t, err
+	}
+	for _, b := range boxes {
+		t.Projects[b.ID] = b.Project
+	}
 	for _, a := range set.Sorted() {
 		secrets, err := s.loginSecrets(a.Name)
 		if err != nil {

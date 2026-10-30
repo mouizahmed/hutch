@@ -138,6 +138,37 @@ func granted(creds []string, a string) bool {
 	return slices.Contains(creds, "*") || slices.Contains(creds, a)
 }
 
+// forkLogins is conservative about snapshot contents: older guests, unsupported
+// MCP credentials, and processes started before capture can still hold real
+// credentials. Proxy grants cannot remove those files or memory from a clone.
+// Until snapshots record which credentials are absent, a fork cannot reduce its
+// source's login grants. Unknown provenance requires all grants or a fresh build.
+func (s *Server) forkLogins(source string, creds []string) error {
+	had, err := s.store.boxCredentials(source)
+	if err != nil {
+		return err
+	}
+	if err := inheritedLogins(had, creds); err != nil {
+		return fmt.Errorf("cannot fork %s: %w; rebuild and snapshot a template with the intended credentials, or fork with the source's grants", source, err)
+	}
+	return nil
+}
+
+func inheritedLogins(had, creds []string) error {
+	if granted(creds, "*") {
+		return nil
+	}
+	if had == nil {
+		return fmt.Errorf("its credential history is unknown")
+	}
+	for _, a := range had {
+		if !granted(creds, a) {
+			return fmt.Errorf("its snapshot may contain real credentials for %s that this box is not granted", a)
+		}
+	}
+	return nil
+}
+
 // applyUserLayer writes the user layer into a running box: its keys proxy, config,
 // the granted logins (as placeholders), then each agent's first-run seeds, then git
 // identity and gh's git credential helper.

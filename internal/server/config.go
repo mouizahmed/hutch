@@ -53,6 +53,7 @@ func (s *Server) configPut(ctx context.Context, params json.RawMessage, _ *rpc.O
 		for _, w := range workers {
 			s.sendWorkerSettings(ctx, w)
 		}
+		s.pushKeys(ctx, nil)
 	}
 	return api.ConfigPutResult{Doc: doc, Conflict: conflict}, nil
 }

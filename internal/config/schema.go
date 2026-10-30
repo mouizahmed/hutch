@@ -91,9 +91,9 @@ var Keys = []*Key{
 	{Path: "network.allow", Kind: List, Layers: project, Request: true,
 		Doc: "private targets (host:port) boxes may reach"},
 	{Path: "network.egress", Kind: Enum, Enum: []string{"allowlist", "open"}, Default: "open", Layers: userProject, Request: true,
-		Doc: "open: any public address; allowlist: only network.domains"},
+		Doc: "open: any public address; allowlist is reserved and refused until enforcement is implemented"},
 	{Path: "network.domains", Kind: List, Layers: project,
-		Doc: "domains boxes may reach when network.egress is allowlist"},
+		Doc: "reserved for domain-restricted egress; not enforced in this version"},
 
 	{Path: "template.build_timeout", Kind: Duration, Default: "1h", Min: "1m", Max: "24h", Layers: project,
 		Doc: "a template build that runs longer fails"},
@@ -132,6 +132,8 @@ var Keys = []*Key{
 		Doc: "connections waiting for boxes to wake, at most, on a machine"},
 	{Path: "keys.refresh_reuse", Kind: Duration, Default: "1m", Min: "0s", Max: "1h", Layers: machine,
 		Doc: "a box's login refresh this soon after another box's is answered with that one, not refreshed again"},
+	{Path: "keys.identity_hosts", Kind: List, Layers: user,
+		Doc: "exact HTTPS hosts that receive X-Hutch-Identity, a signed five-minute JWT naming the calling box and project"},
 	{Path: "threads.echo_window", Kind: Duration, Default: "1s", Min: "0s", Max: "1m", Layers: machine,
 		Doc: "output this soon after you type in a thread is your typing echoed, not the thread working"},
 	{Path: "threads.working_window", Kind: Duration, Default: "5s", Min: "1s", Max: "10m", Layers: machine,
@@ -219,6 +221,9 @@ func (k *Key) Parse(raw any) (any, error) {
 	v, err := k.parse(raw)
 	if err != nil {
 		return nil, err
+	}
+	if (k.Path == "network.egress" || strings.HasSuffix(k.Path, ".network.egress")) && v == "allowlist" {
+		return nil, fmt.Errorf("domain-restricted egress is not implemented; refusing allowlist mode rather than starting with open egress")
 	}
 	if k.Min != "" && k.compare(v, k.Min) < 0 {
 		return nil, fmt.Errorf("below the minimum %s", k.Min)

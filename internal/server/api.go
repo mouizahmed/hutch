@@ -55,6 +55,7 @@ func (s *Server) apiMux() rpc.Mux {
 		api.Hello:            s.hello,
 		api.NotifyTest:       s.notifyTest,
 		api.Doctor:           s.doctor,
+		api.KeysIdentity:     s.keysIdentity,
 		api.WorkerList:       s.workerList,
 	}
 }
@@ -164,6 +165,9 @@ func (s *Server) boxFork(ctx context.Context, params json.RawMessage, out *rpc.O
 	}
 	src, err := s.store.box(p.Source)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.forkLogins(src.ID, p.Credentials); err != nil {
 		return nil, err
 	}
 	w, err := s.worker(src.Worker)

@@ -88,6 +88,7 @@ const (
 	NotifyTest   = "notify.test"
 	BucketGet    = "bucket.get"
 	Doctor       = "doctor"        // the server's checks
+	KeysIdentity = "keys.identity" // public box identity verification keys
 	WorkerDoctor = "worker.doctor" // hutchd only
 )
 

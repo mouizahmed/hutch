@@ -35,6 +35,10 @@ type Table struct {
 	CAKey  []byte              `json:"ca_key"`
 	// Reuse: a refresh this soon after the last one is answered from it.
 	Reuse time.Duration `json:"reuse"`
+	// Identity is opt-in by exact host; the seed stays on the machine.
+	IdentitySeed  []byte            `json:"identity_seed,omitempty"`
+	IdentityHosts []string          `json:"identity_hosts,omitempty"`
+	Projects      map[string]string `json:"projects,omitempty"` // box → project
 }
 
 // Login is a set of secrets and the hosts they're for: an adapter's login (Name

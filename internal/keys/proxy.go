@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
@@ -96,6 +97,9 @@ func NewProxy() *Proxy {
 
 // Set replaces the table.
 func (p *Proxy) Set(t Table) error {
+	if len(t.IdentitySeed) != 0 && len(t.IdentitySeed) != ed25519.SeedSize {
+		return fmt.Errorf("keys proxy: invalid identity seed")
+	}
 	ca, err := tls.X509KeyPair(t.CACert, t.CAKey)
 	if err != nil {
 		return fmt.Errorf("keys proxy CA: %w", err)
@@ -171,7 +175,7 @@ func (h *boxHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	host = strings.ToLower(host)
-	logins, reuse := h.p.logins(h.box)
+	logins, _ := h.p.logins(h.box)
 	var mine []Login
 	for _, l := range logins {
 		if port == "443" && l.ForHost(host) {
@@ -179,7 +183,7 @@ func (h *boxHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var up net.Conn
-	if len(mine) == 0 {
+	if len(mine) == 0 && !(port == "443" && h.p.identifies(h.box, host)) {
 		if up, err = dialer(h.allow)(r.Context(), "tcp", r.Host); err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -198,7 +202,7 @@ func (h *boxHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		tunnel(in, up)
 		return
 	}
-	h.p.intercept(in, h.box, host, r.Host, mine, reuse)
+	h.p.intercept(in, h.box, host, r.Host, h.allow)
 }
 
 // buffered keeps what the server read past the CONNECT request.
@@ -224,7 +228,7 @@ func tunnel(conn, up net.Conn) {
 }
 
 // intercept terminates the box's TLS for a login host and serves its requests.
-func (p *Proxy) intercept(conn net.Conn, box, host, hostport string, logins []Login, reuse time.Duration) {
+func (p *Proxy) intercept(conn net.Conn, box, host, hostport string, allow []string) {
 	tc := tls.Server(conn, &tls.Config{
 		NextProtos:     []string{"http/1.1"},
 		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return p.cert(host) },
@@ -234,17 +238,32 @@ func (p *Proxy) intercept(conn net.Conn, box, host, hostport string, logins []Lo
 		conn.Close()
 		return
 	}
+	transport := p.transport.Clone()
+	transport.DialContext = dialer(allow)
+	defer transport.CloseIdleConnections()
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.Out.URL.Scheme, r.Out.URL.Host, r.Out.Host = "https", hostport, r.In.Host
 		},
-		Transport:     p.transport,
+		Transport:     transport,
 		FlushInterval: -1,
 		ErrorLog:      log.New(io.Discard, "", 0),
 	}
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A keep-alive connection must see rotations and revoked grants too.
+		current, reuse := p.logins(box)
+		var logins []Login
+		for _, l := range current {
+			if l.ForHost(host) {
+				logins = append(logins, l)
+			}
+		}
+		if err := p.addIdentity(r.Header, box, host, time.Now()); err != nil {
+			http.Error(w, "could not sign the box's identity", http.StatusBadGateway)
+			return
+		}
 		if l, body, ok := refreshRequest(r, logins); ok {
-			p.refresh(w, r, box, hostport, l, body, reuse)
+			p.refresh(w, r, box, hostport, l, body, reuse, transport)
 			return
 		}
 		swapHeaders(r.Header, logins)
@@ -365,7 +384,7 @@ func refreshRequest(r *http.Request, logins []Login) (Login, []byte, bool) {
 // refresh handles a box's token refresh for login l, one at a time per login:
 // within reuse of the last one it answers from that; otherwise it refreshes the
 // real login upstream, has the new values stored, and answers with placeholders.
-func (p *Proxy) refresh(w http.ResponseWriter, r *http.Request, box, hostport string, l Login, body []byte, reuse time.Duration) {
+func (p *Proxy) refresh(w http.ResponseWriter, r *http.Request, box, hostport string, l Login, body []byte, reuse time.Duration, transport *http.Transport) {
 	p.mu.Lock()
 	st := p.refreshes[l.Name]
 	if st == nil {
@@ -407,7 +426,7 @@ func (p *Proxy) refresh(w http.ResponseWriter, r *http.Request, box, hostport st
 	out.Header.Del("Accept-Encoding")
 	out.Header.Del("Content-Length")
 	swapHeaders(out.Header, []Login{l})
-	resp, err := p.transport.RoundTrip(out)
+	resp, err := transport.RoundTrip(out)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -519,7 +538,7 @@ func dialer(allow []string) func(ctx context.Context, network, addr string) (net
 			if err != nil {
 				return err
 			}
-			if ip := net.ParseIP(host); ip == nil || Blocked(ip) && !permitted[address] {
+			if ip := net.ParseIP(host); ip == nil || NeverAllowed(ip) || Blocked(ip) && !permitted[address] {
 				return fmt.Errorf("%s is not reachable from a box", address)
 			}
 			return nil
@@ -540,13 +559,25 @@ var private = func() []*net.IPNet {
 // Blocked reports whether ip is the machine's own, private, or otherwise not for
 // a box to reach.
 func Blocked(ip net.IP) bool {
-	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+	if NeverAllowed(ip) {
 		return true
 	}
 	for _, n := range private {
 		if n.Contains(ip) {
 			return true
 		}
+	}
+	return false
+}
+
+// NeverAllowed cannot be overridden by network.allow: the machine itself,
+// metadata, loopback, and the networks used to reach other boxes.
+func NeverAllowed(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil && v4[0] == 10 && (v4[1] == 11 || v4[1] == 12) {
+		return true
 	}
 	addrs, _ := net.InterfaceAddrs()
 	for _, a := range addrs {

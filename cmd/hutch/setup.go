@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/bucket"
+	"github.com/mouizahmed/hutch/internal/keys"
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
@@ -132,7 +134,24 @@ func setupCommands() []*cobra.Command {
 			return nil
 		},
 	}
-	machineCmd.AddCommand(bucketCmd, gc, upgradeCommand(), restoreCommand(), addComputerCommand(), joinCommand())
+	identity := &cobra.Command{
+		Use: "identity", Short: "Print the machine's issuer and public keys for verifying box identities", Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			sess, err := connect()
+			if err != nil {
+				return err
+			}
+			defer sess.Close()
+			var public keys.PublicIdentity
+			if err := rpc.Call(cmd.Context(), sess, api.KeysIdentity, struct{}{}, &public); err != nil {
+				return err
+			}
+			enc := json.NewEncoder(cmd.OutOrStdout())
+			enc.SetIndent("", "  ")
+			return enc.Encode(public)
+		},
+	}
+	machineCmd.AddCommand(bucketCmd, gc, upgradeCommand(), restoreCommand(), addComputerCommand(), joinCommand(), identity)
 	return []*cobra.Command{setupCommand(), machineCmd}
 }
 

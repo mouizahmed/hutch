@@ -107,6 +107,21 @@ func TestBlocked(t *testing.T) {
 	}
 }
 
+func TestProxyCannotAllowMachineOrMetadata(t *testing.T) {
+	for _, address := range []string{"127.0.0.1:443", "169.254.169.254:80", "10.11.0.1:443", "10.12.0.1:443", "[::1]:443"} {
+		conn, err := dialer([]string{address})(t.Context(), "tcp", address)
+		if conn != nil {
+			conn.Close()
+		}
+		if err == nil || !strings.Contains(err.Error(), "not reachable from a box") {
+			t.Errorf("%s was not rejected by policy: %v", address, err)
+		}
+	}
+	if NeverAllowed(net.ParseIP("10.1.2.3")) {
+		t.Fatal("ordinary private targets may be explicitly granted")
+	}
+}
+
 // MCP config mixes keys with settings; only keys may become placeholders, or the
 // server breaks.
 func TestLooksSecret(t *testing.T) {

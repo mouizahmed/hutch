@@ -24,6 +24,8 @@ func TestParseRejects(t *testing.T) {
 		{Project, "idle_timeout = \"10s\"", "below the minimum 1m"},
 		{Project, "size = { cpu = \"4\" }", "size.cpu: want a whole number"},
 		{User, "version = 2", "version 2 is not supported"},
+		{Project, "network.egress = \"allowlist\"", "domain-restricted egress is not implemented"},
+		{User, "[grants.\"github.com/me/app\"]\nnetwork.egress = \"allowlist\"", "domain-restricted egress is not implemented"},
 	} {
 		_, err := Parse(tc.layer, "f", []byte(tc.text))
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
