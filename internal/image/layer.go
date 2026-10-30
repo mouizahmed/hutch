@@ -305,10 +305,20 @@ func normalizeImageLinks(root *os.Root) error {
 		if err != nil {
 			return err
 		}
+		fi, err := root.Lstat(name)
+		if err != nil {
+			return err
+		}
 		if err := root.Remove(name); err != nil {
 			return err
 		}
-		return root.Symlink(rel, name)
+		if err := root.Symlink(rel, name); err != nil {
+			return err
+		}
+		if owner, ok := statOwner(fi); ok {
+			return root.Lchown(name, owner[0], owner[1])
+		}
+		return nil
 	})
 }
 
