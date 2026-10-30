@@ -14,6 +14,10 @@ import (
 // doctorUser checks captured configuration without waking boxes, starting an
 // agent, or contacting a provider. Its output never includes credential values.
 func (s *Server) doctorUser(defaultAgent string) []api.Check {
+	// Login capture and token refresh update files and placeholders together.
+	// Do not diagnose a mismatch while that update is still in progress.
+	s.keysMu.Lock()
+	defer s.keysMu.Unlock()
 	var checks []api.Check
 	add := func(name, status, detail, fix string) {
 		checks = append(checks, api.Check{Area: "user", Name: name, Status: status, Detail: detail, Fix: fix})
