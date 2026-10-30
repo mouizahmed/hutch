@@ -102,6 +102,16 @@ try:
   os.fsync(f.fileno())
  print('Filesystem exhausted; available bytes:',os.statvfs(root).f_bavail*fs.f_frsize)
  r=subprocess.run(['/usr/local/bin/hutchd','box','checkpoint',name],capture_output=True,text=True,timeout=50)
+ print('Checkpoint return:',r.returncode,'stdout:',r.stdout,'stderr:',r.stderr)
+ if r.returncode==0:
+  current=json.loads(meta.read_text())
+  gen=root/'boxes'/name/'snapshots'/str(current['generation'])
+  print('Unexpected success:',json.dumps(current),flush=True)
+  for path in [root,root/'jail'/'firecracker'/name/'root'/'snapshot',*gen.iterdir()]:
+   st=path.stat()
+   print('Path:',path,'device:',st.st_dev,'size:',st.st_size,'blocks:',st.st_blocks,flush=True)
+  os.sync()
+  print('Available after sync:',os.statvfs(root).f_bavail*fs.f_frsize,flush=True)
  assert r.returncode!=0, 'checkpoint unexpectedly fit on the full filesystem'
  after=json.loads(meta.read_text())['generation']
  assert before==after, ('failed checkpoint replaced the persisted generation',before,after)
