@@ -259,7 +259,14 @@ func (s *Server) boxRm(ctx context.Context, params json.RawMessage, _ *rpc.Out) 
 	return nil, s.removeBox(ctx, p.ID)
 }
 
-// awake returns the worker of a box, waking the box first if it is asleep.
+type wakeCall struct {
+	done chan struct{}
+	w    *workerConn
+	err  error
+}
+
+// awake returns the worker of a box, waking the box first if it is asleep. Callers
+// that find it waking wait for that wake, which goes on if they stop waiting.
 func (s *Server) awake(ctx context.Context, id string) (*workerConn, error) {
 	b, err := s.store.box(id)
 	if err != nil {
@@ -268,6 +275,33 @@ func (s *Server) awake(ctx context.Context, id string) (*workerConn, error) {
 	if err := notVersion(b); err != nil {
 		return nil, err
 	}
+	if b.State != "asleep" && b.State != "archived" {
+		return s.wake(ctx, b)
+	}
+	s.mu.Lock()
+	c := s.wakes[id]
+	if c == nil {
+		c = &wakeCall{done: make(chan struct{})}
+		s.wakes[id] = c
+		go func() {
+			c.w, c.err = s.wake(context.WithoutCancel(ctx), b)
+			s.mu.Lock()
+			delete(s.wakes, id)
+			s.mu.Unlock()
+			close(c.done)
+		}()
+	}
+	s.mu.Unlock()
+	select {
+	case <-c.done:
+		return c.w, c.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (s *Server) wake(ctx context.Context, b api.Box) (*workerConn, error) {
+	id := b.ID
 	if b.State == "asleep" || b.State == "archived" {
 		release, err := s.admitWake(ctx, id)
 		if err != nil {
@@ -319,10 +353,43 @@ func (s *Server) apiStreams() rpc.Streams {
 	return rpc.Streams{api.BoxPTY: s.boxPTY, api.BoxSerial: s.boxSerial, api.BoxDial: s.boxDial, api.BoxExecIn: s.boxExecIn, api.Events: s.eventStream}
 }
 
+// boxDial connects to a port in a box, waking it if it sleeps: the connection
+// waits up to ports.wake_wait, with at most ports.parked_max waiting on the machine.
 func (s *Server) boxDial(ctx context.Context, params json.RawMessage, conn net.Conn) error {
 	var p api.DialParams
 	if err := rpc.Decode(params, &p); err != nil {
 		return err
+	}
+	b, err := s.store.box(p.ID)
+	if err != nil {
+		return err
+	}
+	if b.State != "running" {
+		c, err := s.settings()
+		if err != nil {
+			return err
+		}
+		max := c.Int("ports.parked_max")
+		s.mu.Lock()
+		full := int64(s.parked) >= max
+		if !full {
+			s.parked++
+		}
+		s.mu.Unlock()
+		if full {
+			return fmt.Errorf("%s is asleep and %d connections are already waiting for boxes to wake (ports.parked_max)", p.ID, max)
+		}
+		defer func() {
+			s.mu.Lock()
+			s.parked--
+			s.mu.Unlock()
+		}()
+		wctx, cancel := context.WithTimeout(ctx, c.Duration("ports.wake_wait"))
+		_, err = s.awake(wctx, p.ID)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("wake %s for port %d: %w", p.ID, p.Port, err)
+		}
 	}
 	w, err := s.workerFor(p.ID)
 	if err != nil {

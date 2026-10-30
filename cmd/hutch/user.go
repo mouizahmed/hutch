@@ -557,10 +557,17 @@ func serveForward(ctx context.Context, sess *yamux.Session, box string, port int
 			defer c.Close()
 			conn, err := rpc.OpenStream(ctx, sess, api.BoxDial, api.DialParams{ID: box, Port: port})
 			if err != nil {
+				if ctx.Err() == nil {
+					fmt.Fprintf(os.Stderr, "%s:%d: %v\n", box, port, err)
+				}
 				return
 			}
 			var r guestproto.Response
 			if err := wire.Read(conn, &r); err != nil || r.Type != guestproto.RespOK {
+				if err == nil {
+					err = errors.New(r.Error)
+				}
+				fmt.Fprintf(os.Stderr, "%s:%d: %v\n", box, port, err)
 				conn.Close()
 				return
 			}

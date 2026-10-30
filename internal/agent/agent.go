@@ -58,7 +58,7 @@ func Run(ctx context.Context, w *worker.Worker, name string, conn net.Conn) erro
 	go m.run(ctx, &server)
 	go m.watchPressure(ctx)
 	go u.run(ctx)
-	return rpc.Serve(ctx, sess, handlers(w, name, m, u, kp, &image.Builder{Root: w.Root}), streamHandlers(w))
+	return rpc.Serve(ctx, sess, handlers(w, name, m, u, kp, &image.Builder{Root: w.Root}), streamHandlers(w, m))
 }
 
 func toAPI(w *worker.Worker, b *worker.Box) api.Box {
@@ -272,7 +272,7 @@ func hostMemMiB() int {
 	return kb / 1024
 }
 
-func streamHandlers(w *worker.Worker) rpc.Streams {
+func streamHandlers(w *worker.Worker, m *monitor) rpc.Streams {
 	return rpc.Streams{
 		// The terminal stream passes straight through to hutch-guest, which speaks
 		// the PTY frames with the CLI end to end.
@@ -331,6 +331,8 @@ func streamHandlers(w *worker.Worker) rpc.Streams {
 				g.Close()
 				return err
 			}
+			m.dial(p.ID, 1)
+			defer m.dial(p.ID, -1)
 			rpc.Splice(conn, g)
 			return nil
 		},

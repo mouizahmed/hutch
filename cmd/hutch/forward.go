@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,8 +54,16 @@ func forwardCommands() []*cobra.Command {
 				}
 				pairs = append(pairs, pair{remote, local})
 			}
-			if err := ensureAwake(ctx, sess, box); err != nil {
+			// Named ports wake the box on their first connection; finding the ports it
+			// listens on needs it awake now.
+			if len(pairs) == 0 {
+				if err := ensureAwake(ctx, sess, box); err != nil {
+					return err
+				}
+			} else if boxes, err := listBoxes(ctx, sess); err != nil {
 				return err
+			} else if !slices.ContainsFunc(boxes, func(b api.Box) bool { return b.ID == box }) {
+				return fmt.Errorf("no box %q", box)
 			}
 			ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 			defer stop()
@@ -79,7 +88,7 @@ func forwardCommands() []*cobra.Command {
 				if started == 0 {
 					return errors.New("nothing forwarded")
 				}
-				fmt.Println("Ctrl-C to stop.")
+				fmt.Printf("A connection wakes %s if it sleeps; it stays awake while connections are open. Ctrl-C to stop.\n", box)
 				<-ctx.Done()
 				return nil
 			}

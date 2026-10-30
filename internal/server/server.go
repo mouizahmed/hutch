@@ -48,6 +48,10 @@ type Server struct {
 	// the boxes being placed or woken; guarded by mu.
 	pending  map[string]int
 	starting int
+	// wakes holds each box's wake in progress, which every caller waits on; parked
+	// counts forwarded connections waiting for one. Guarded by mu.
+	wakes  map[string]*wakeCall
+	parked int
 	// peaks holds each awake box's peak memory use as last reported, and relieving
 	// the workers a box is being moved off for memory; guarded by mu.
 	peaks     map[string]int
@@ -94,7 +98,7 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, store: st, master: master, workers: map[string]*workerConn{}, pending: map[string]int{}, peaks: map[string]int{}, relieving: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{},
+	s := &Server{cfg: cfg, store: st, master: master, workers: map[string]*workerConn{}, pending: map[string]int{}, wakes: map[string]*wakeCall{}, peaks: map[string]int{}, relieving: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{},
 		gitStates: map[string]guestproto.GitStatus{}, events: newHub()}
 	st.onChange = s.changed
 	go s.publish()

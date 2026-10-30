@@ -6,6 +6,7 @@ import (
 	"context"
 	"log"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -51,11 +52,34 @@ type monitor struct {
 	defaults worker.Idle                              // for boxes created without a policy
 	kicks    chan struct{}
 	seen     map[string]*boxActivity
+
+	// dials counts each box's open forwarded connections; dialed is when its last
+	// one opened or closed. A box serving them is in use.
+	dialMu sync.Mutex
+	dials  map[string]int
+	dialed map[string]time.Time
+}
+
+// dial records a forwarded connection to box opening (+1) or closing (-1).
+func (m *monitor) dial(box string, delta int) {
+	m.dialMu.Lock()
+	defer m.dialMu.Unlock()
+	m.dials[box] += delta
+	if m.dials[box] <= 0 {
+		delete(m.dials, box)
+	}
+	m.dialed[box] = time.Now()
+}
+
+func (m *monitor) dialing(box string) (int, time.Time) {
+	m.dialMu.Lock()
+	defer m.dialMu.Unlock()
+	return m.dials[box], m.dialed[box]
 }
 
 func newMonitor(w *worker.Worker, u *uploader) *monitor {
 	d := config.New()
-	m := &monitor{w: w, uploads: u, kicks: make(chan struct{}, 1), seen: map[string]*boxActivity{},
+	m := &monitor{w: w, uploads: u, kicks: make(chan struct{}, 1), seen: map[string]*boxActivity{}, dials: map[string]int{}, dialed: map[string]time.Time{},
 		defaults: worker.Idle{Timeout: d.Duration("idle_timeout"), CPUThreshold: d.Percent("idle.cpu_threshold")}}
 	// Defaults until the server sends its settings, which may never come if the
 	// server can't resolve its config.
@@ -320,9 +344,13 @@ func (m *monitor) checkBox(ctx context.Context, b *worker.Box) (api.BoxReport, b
 		return r, false
 	}
 	r.Git = st.Git
-	a.attached = st.Viewers > 0 || st.Sessions > 0
+	open, dialed := m.dialing(b.ID)
+	a.attached = st.Viewers > 0 || st.Sessions > 0 || open > 0
 	if a.attached {
 		a.lastActive = now
+	}
+	if dialed.After(a.lastActive) {
+		a.lastActive = dialed
 	}
 	r.Threads = m.threadStates(a, st, now)
 	a.reported = r.Threads
