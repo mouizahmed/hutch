@@ -5,10 +5,12 @@ package integration
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -24,14 +26,22 @@ func remotePython(t *testing.T, script string, args ...string) string {
 	for _, arg := range args {
 		argv = append(argv, quoteRemote(arg))
 	}
-	return remote(t, argv...)
+	out := remote(t, argv...)
+	if out != "" {
+		t.Log(out)
+	}
+	return out
 }
 
 func TestCheckpointRecovery(t *testing.T) {
 	disposableRuntime(t)
 	id := fmt.Sprintf("checkpoint-%d", time.Now().Unix())
 	cleanupRuntimeBox(t, id)
-	mustCall(t, api.BoxBoot, api.BootParams{ID: id, Image: "base", VCPUs: 1, MemMiB: 1024}, nil)
+	var box api.Box
+	mustCall(t, api.BoxBoot, api.BootParams{ID: id, Image: "base", VCPUs: 1, MemMiB: 1024}, &box)
+	if box.ReachIP == "" {
+		t.Fatal("checkpoint fixture needs a worker-local box address")
+	}
 	counterService(t, id)
 	if port(t, id) != "1" {
 		t.Fatal("counter did not start")
@@ -74,56 +84,62 @@ print('Paused with an uncommitted partial snapshot; persisted generation',box['g
 		t.Fatal("counter did not dirty memory after the checkpoint")
 	}
 
-	remotePython(t, `import errno,json,os,pathlib,subprocess,sys
+	output := remotePython(t, `import errno,json,os,pathlib,socket,subprocess,sys
 name=sys.argv[1]
 root=pathlib.Path('/var/lib/hutch')
 meta=root/'boxes'/name/'box.json'
-before=json.loads(meta.read_text())['generation']
 filler=root/('.checkpoint-fill-'+name)
-with open(filler,'xb'): pass
+counter=4
 try:
- fs=os.statvfs(root)
- amount=fs.f_bavail*fs.f_frsize-(4<<20)
- assert amount>0
- subprocess.run(['fallocate','-l',str(amount),str(filler)],check=True)
- # statvfs free space and XFS allocation reservations do not by themselves
- # prove ENOSPC. Exhaust the remaining allocatable extents as root too.
- with open(filler,'r+b',buffering=0) as f:
-  offset=amount
-  step=16<<20
-  while step>=4096:
-   try:
-    os.posix_fallocate(f.fileno(),offset,step)
-    offset+=step
-   except OSError as e:
-    if e.errno!=errno.ENOSPC: raise
-    step//=2
-  f.flush()
-  os.fsync(f.fileno())
- print('Filesystem exhausted; available bytes:',os.statvfs(root).f_bavail*fs.f_frsize)
- r=subprocess.run(['/usr/local/bin/hutchd','box','checkpoint',name],capture_output=True,text=True,timeout=50)
- print('Checkpoint return:',r.returncode,'stdout:',r.stdout,'stderr:',r.stderr)
- if r.returncode==0:
-  current=json.loads(meta.read_text())
-  gen=root/'boxes'/name/'snapshots'/str(current['generation'])
-  print('Unexpected success:',json.dumps(current),flush=True)
-  for path in [root,root/'jail'/'firecracker'/name/'root'/'snapshot',*gen.iterdir()]:
-   st=path.stat()
-   print('Path:',path,'device:',st.st_dev,'size:',st.st_size,'blocks:',st.st_blocks,flush=True)
-  os.sync()
-  print('Available after sync:',os.statvfs(root).f_bavail*fs.f_frsize,flush=True)
- assert r.returncode!=0, 'checkpoint unexpectedly fit on the full filesystem'
- after=json.loads(meta.read_text())['generation']
- assert before==after, ('failed checkpoint replaced the persisted generation',before,after)
- print('Full-disk checkpoint failed; prior generation preserved:',before)
+ with open(filler,'xb',buffering=0) as f:
+  offset=0
+  for attempt in range(4):
+   if attempt:
+    with socket.create_connection((sys.argv[2],19555),timeout=5) as sock:
+     sock.sendall(b'ping')
+     observed=int(sock.recv(16))
+     assert observed==counter+1, 'counter lost memory during space pressure'
+     counter=observed
+   os.sync()
+   step=16<<20
+   while step>=4096:
+    try:
+     os.posix_fallocate(f.fileno(),offset,step)
+     offset+=step
+    except OSError as e:
+     if e.errno!=errno.ENOSPC: raise
+     step//=2
+   os.fsync(f.fileno())
+   fs=os.statvfs(root)
+   print('Attempt:',attempt+1,'available bytes:',fs.f_bavail*fs.f_frsize,flush=True)
+   before=json.loads(meta.read_text())['generation']
+   r=subprocess.run(['/usr/local/bin/hutchd','box','checkpoint',name],capture_output=True,text=True,timeout=40)
+   after=json.loads(meta.read_text())['generation']
+   if r.returncode!=0:
+    assert 'no space left' in r.stderr.lower(), ('checkpoint failed for another reason',r.stderr)
+    assert before==after, ('failed checkpoint replaced the persisted generation',before,after)
+    print('Full-disk checkpoint refused; prior generation preserved:',before,flush=True)
+    break
+   assert after==before+1, 'successful checkpoint did not publish a generation'
+   # XFS may reclaim space during allocation and checkpoint compaction frees
+   # old extents. Consume that space and dirty memory again before retrying.
+   os.sync()
+   print('Checkpoint fit after reclaim; available bytes:',os.statvfs(root).f_bavail*fs.f_frsize,flush=True)
+  else:
+   raise AssertionError('could not force a full-disk checkpoint failure')
 finally:
- filler.unlink(missing_ok=True)`, id)
-	if port(t, id) != "5" {
+ filler.unlink(missing_ok=True)
+print(json.dumps({'counter':counter}))`, id, box.ReachIP)
+	var result struct{ Counter int }
+	if err := json.Unmarshal([]byte(output[strings.LastIndex(output, "\n")+1:]), &result); err != nil || result.Counter < 4 || result.Counter > 7 {
+		t.Fatalf("invalid checkpoint pressure result: %v", err)
+	}
+	if port(t, id) != strconv.Itoa(result.Counter+1) {
 		t.Fatal("failed full-disk checkpoint left the box paused or lost memory")
 	}
 	remote(t, "hutchd", "box", "checkpoint", id)
 	mustCall(t, api.BoxSleep, api.IDParams{ID: id}, nil)
-	if port(t, id) != "6" {
+	if port(t, id) != strconv.Itoa(result.Counter+2) {
 		t.Fatal("checkpoint retry did not preserve process memory")
 	}
 	t.Log("full-disk checkpoint failure resumed the box, retained the prior snapshot, and recovered after space was freed")
