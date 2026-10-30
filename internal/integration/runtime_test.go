@@ -51,10 +51,10 @@ func inBox(t *testing.T, id, script string, args ...string) string {
 	}
 	defer sess.Close()
 	var out, errout bytes.Buffer
-	argv := append([]string{"sh", "-c", script, "sh"}, args...)
+	argv := append([]string{"sh", "-c", "set -eu\n" + script, "sh"}, args...)
 	code, err := rpc.Exec(ctx, sess, api.BoxExec, api.ExecParams{ID: id, Argv: argv}, &out, &errout)
 	if err != nil || code != 0 {
-		t.Fatalf("exec %s: code=%d err=%v stderr=%s", id, code, err, errout.String())
+		t.Fatalf("exec %s: code=%d err=%v stdout=%s stderr=%s", id, code, err, out.String(), errout.String())
 	}
 	return strings.TrimSpace(out.String())
 }
@@ -117,6 +117,14 @@ func TestRuntime(t *testing.T) {
 	child := parent + "-child"
 	for _, id := range []string{parent, child} {
 		t.Cleanup(func() {
+			if t.Failed() {
+				for _, path := range []string{"/var/lib/hutch/boxes/" + id + "/console.log", "/sys/fs/cgroup/hutch/" + id + "/memory.events"} {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					out, _ := exec.CommandContext(ctx, "ssh", os.Getenv("HUTCH_MACHINE"), "sudo", "tail", "-n", "60", path).CombinedOutput()
+					cancel()
+					t.Logf("%s: %s", path, out)
+				}
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			if err := call(ctx, api.BoxRm, api.IDParams{ID: id}, nil); err != nil {
@@ -160,8 +168,8 @@ i=0; until ss -ltn | grep -q ':19555'; do i=$((i+1)); test "$i" -lt 100 || exit 
 	inBox(t, child, `test ! -e "$1"
 node -e 'const net=require("net"); (async()=>{for(const target of process.argv.slice(1)){const [host,port]=target.split(":");await new Promise((resolve,reject)=>{const s=net.connect({host,port:Number(port)});s.setTimeout(1200);s.on("error",()=>resolve());s.on("timeout",()=>{s.destroy();resolve()});s.on("connect",()=>{s.destroy();reject(Error("reachable: "+target))})})}})().catch(e=>{console.error(e.message);process.exit(12)})' 169.254.169.254:80 169.254.0.21:22 10.0.0.1:22 "$2" "$3"
 test -n "$HTTPS_PROXY"
-status=$(curl --proxy "$HTTPS_PROXY" -sS --connect-timeout 1 --max-time 2 -o /tmp/proxy-denied -w '%{http_connect}' https://127.0.0.1:22 2>/dev/null || true)
-test "$status" = 502`, sentinel, net.JoinHostPort(original.ReachIP, "19555"), net.JoinHostPort(hostIP, "22"))
+status=$(curl --proxy "$HTTPS_PROXY" --noproxy '' -sS --connect-timeout 1 --max-time 2 -o /tmp/proxy-denied -w '%{http_connect}' https://127.0.0.1:22 2>/dev/null || true)
+test "$status" = 502 || { echo "expected proxy refusal, got $status" >&2; exit 1; }`, sentinel, net.JoinHostPort(original.ReachIP, "19555"), net.JoinHostPort(hostIP, "22"))
 	t.Log("host files, metadata, gateway SSH, private network, lateral access, and proxy loopback refused")
 
 	remote(t, "systemctl", "kill", "--kill-who=main", "--signal=KILL", "hutchd")
