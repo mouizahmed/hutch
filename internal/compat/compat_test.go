@@ -183,7 +183,7 @@ func checkGuest(t *testing.T, c *guestproto.Client, ref string) {
 	}
 
 	// Requests added after a guest was built must fail cleanly, never hang.
-	if _, err := c.Status(ctx); err != nil && !strings.Contains(err.Error(), "unsupported request type") {
+	if _, err := c.Status(ctx, guestproto.StatusParams{}); err != nil && !strings.Contains(err.Error(), "unsupported request type") {
 		t.Fatalf("status: %v", err)
 	}
 }
