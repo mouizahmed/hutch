@@ -143,14 +143,29 @@ func WrapBytes(aad string, plain []byte, passphrase string) Recovery {
 }
 
 func (r Recovery) UnwrapBytes(aad, passphrase string) ([]byte, error) {
-	if r.KDF != "argon2id" {
-		return nil, fmt.Errorf("unknown key derivation %q", r.KDF)
+	if err := r.validate(); err != nil {
+		return nil, err
 	}
 	plain, err := r.kek(passphrase).Open(aad, r.Sealed)
 	if err != nil {
 		return nil, errors.New("wrong recovery passphrase")
 	}
 	return plain, nil
+}
+
+// The recovery header is unauthenticated until the derived key opens Sealed.
+// Reject invalid Argon2 inputs and bound their cost before deriving that key.
+// Current and historical Hutch files use time=3, memory=256 MiB, threads=4.
+func (r Recovery) validate() error {
+	if r.KDF != "argon2id" {
+		return fmt.Errorf("unknown key derivation %q", r.KDF)
+	}
+	if r.Time < 1 || r.Time > 10 || r.Threads < 1 || r.Threads > 16 ||
+		r.Memory < 8*uint32(r.Threads) || r.Memory > 1<<20 ||
+		len(r.Salt) < 8 || len(r.Salt) > 64 {
+		return errors.New("invalid recovery key derivation parameters")
+	}
+	return nil
 }
 
 func (r Recovery) kek(passphrase string) Key {
