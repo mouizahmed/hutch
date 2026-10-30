@@ -70,6 +70,9 @@ print('Paused with an uncommitted partial snapshot; persisted generation',box['g
 	}
 	remote(t, "hutchd", "box", "checkpoint", id)
 	t.Log("daemon restart resumed a paused box; subsequent checkpoint replaced the incomplete generation")
+	if port(t, id) != "4" {
+		t.Fatal("counter did not dirty memory after the checkpoint")
+	}
 
 	remotePython(t, `import json,os,pathlib,subprocess,sys
 name=sys.argv[1]
@@ -90,12 +93,12 @@ try:
  print('Full-disk checkpoint failed; prior generation preserved:',before)
 finally:
  filler.unlink(missing_ok=True)`, id)
-	if port(t, id) != "4" {
+	if port(t, id) != "5" {
 		t.Fatal("failed full-disk checkpoint left the box paused or lost memory")
 	}
 	remote(t, "hutchd", "box", "checkpoint", id)
 	mustCall(t, api.BoxSleep, api.IDParams{ID: id}, nil)
-	if port(t, id) != "5" {
+	if port(t, id) != "6" {
 		t.Fatal("checkpoint retry did not preserve process memory")
 	}
 	t.Log("full-disk checkpoint failure resumed the box, retained the prior snapshot, and recovered after space was freed")
@@ -133,7 +136,7 @@ func TestUpgrade(t *testing.T) {
 		t.Fatal("counter did not start")
 	}
 	pid := remote(t, "systemctl", "show", "--property=MainPID", "--value", "hutchd")
-	boxPID := inBox(t, id, "pgrep -x node")
+	boxPID := inBox(t, id, "cat /tmp/counter.pid")
 	candidate := "/var/lib/hutch/.upgrade-candidate-" + id
 	remotePython(t, `import pathlib,shutil,sys
 shutil.copyfile(sys.argv[1],sys.argv[2])
@@ -193,7 +196,7 @@ os.replace(tmp,'/usr/local/bin/hutchd')`, filepath.Join(files, "hutchd"))
 	if after.Version != want || remote(t, "systemctl", "show", "--property=MainPID", "--value", "hutchd") == pid {
 		t.Fatal("retry did not start the new daemon")
 	}
-	if port(t, id) != "3" || inBox(t, id, "pgrep -x node") != boxPID {
+	if port(t, id) != "3" || inBox(t, id, "cat /tmp/counter.pid") != boxPID {
 		t.Fatal("successful upgrade lost the live box's process state")
 	}
 	t.Logf("actual previous daemon %s upgraded to %s; retry detected the interrupted install and retained the live process", before.Version, after.Version)

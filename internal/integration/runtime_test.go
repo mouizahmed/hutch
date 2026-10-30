@@ -118,7 +118,7 @@ func disposableRuntime(t *testing.T) {
 
 func counterService(t *testing.T, id string) {
 	t.Helper()
-	inBox(t, id, `nohup node -e 'let n=0;require("net").createServer(s=>s.on("data",()=>s.write(String(++n)))).listen(19555,"0.0.0.0")' >/tmp/counter.log 2>&1 </dev/null &
+	inBox(t, id, `nohup node -e 'let n=0;const mem=Buffer.alloc(32*1024*1024);require("fs").writeFileSync("/tmp/counter.pid",String(process.pid));require("net").createServer(s=>{s.on("error",()=>{});s.on("data",()=>{mem.fill(++n);s.write(String(n))})}).listen(19555,"0.0.0.0")' >/tmp/counter.log 2>&1 </dev/null &
 i=0; until ss -ltn | grep -q ':19555'; do i=$((i+1)); test "$i" -lt 100 || exit 1; sleep 0.1; done`)
 }
 
