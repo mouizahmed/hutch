@@ -43,8 +43,26 @@ func TestRootedImagePaths(t *testing.T) {
 	if err := root.Symlink("/usr/bin", "bin"); err != nil {
 		t.Fatal(err)
 	}
+	if os.Geteuid() == 0 {
+		if err := root.Lchown("bin", 1000, 1000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := root.Lstat("bin")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := normalizeImageLinks(root); err != nil {
 		t.Fatal(err)
+	}
+	after, err := root.Lstat("bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOwner, _ := statOwner(before)
+	gotOwner, _ := statOwner(after)
+	if gotOwner != wantOwner {
+		t.Fatalf("guest link owner changed: %v -> %v", wantOwner, gotOwner)
 	}
 	if err := writeFile(root, "bin/tool", []byte("in image"), 0o755); err != nil {
 		t.Fatal(err)
