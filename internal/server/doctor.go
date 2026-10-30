@@ -44,6 +44,7 @@ func (s *Server) doctor(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any
 	if err != nil {
 		return r, nil
 	}
+	r.Checks = append(r.Checks, s.doctorUser(cfg.String("default_agent"))...)
 
 	if v := s.vault.Load(); v == nil {
 		warn("machine", "bucket", "none: losing the machine loses its boxes", "hutch machine bucket")

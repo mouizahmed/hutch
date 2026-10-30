@@ -53,6 +53,8 @@ The proxy can replace supported token values in HTTPS headers toward configured 
 
 The MCP server's HTTP client must honor `HTTPS_PROXY` and the machine CA. Hutch enables Node 24's environment proxy support and sets the system CA bundle for common Python clients. Older Node versions and libraries that ignore proxy settings need a proxy-aware client or wrapper. Claude's default project-local servers in `~/.claude.json` are outside the built-in adapter's transferred user scope; use user-scoped MCP configuration or a project `.mcp.json` in Git.
 
+`hutch doctor` checks the configured default adapter, captured login fields and their proxy placeholders, and MCP token targets without waking boxes or contacting providers. It warns about missing logins, unsupported token targets, and unverified MCP runtime/authentication. Stored credentials passing this check does not establish that a provider session is still valid. Use `hutch doctor --template` for fresh builds and MCP transport checks, and the native client to verify its authentication.
+
 ## Box identity
 
 ```sh
