@@ -20,7 +20,7 @@ The machine's proxy CA is trusted inside boxes. Traffic for credential hosts and
 
 Important exceptions:
 
-- Native login flows initially expose real credentials in their login box until capture replaces them. The login box is part of the trusted authentication flow.
+- Native login flows expose real credentials in their temporary login box, which is removed after capture. That box is part of the trusted authentication flow. Capture refuses known placeholders so `hutch login --from` cannot replace a working host login with them; use `hutch login <agent>` to authenticate again.
 - Old guest protocols and templates may retain real credentials. Rebuild templates and replace affected boxes; upgrading the daemon alone does not scrub old snapshots.
 - MCP key substitution depends on declared secret fields, recognized token values, known destination hosts, and HTTPS header use. Unsupported credentials remain real in boxes.
 - Project secret uploads, such as development `.env` files, remain real in boxes and their snapshots.

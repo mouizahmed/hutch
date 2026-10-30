@@ -20,6 +20,7 @@ import (
 	"github.com/mouizahmed/hutch/internal/agents"
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/guestproto"
+	"github.com/mouizahmed/hutch/internal/keys"
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
@@ -394,8 +395,16 @@ func (s *Server) userCapture(ctx context.Context, params json.RawMessage, _ *rpc
 	if len(files) == 0 {
 		return nil, fmt.Errorf("%s left no credentials in the box; did the login finish?", p.Adapter)
 	}
-	data, _ := json.Marshal(files)
 	s.keysMu.Lock()
+	known, err := s.loginSecrets(a.Name)
+	if err == nil {
+		err = checkCapturedLogin(a, files, known)
+	}
+	if err != nil {
+		s.keysMu.Unlock()
+		return nil, err
+	}
+	data, _ := json.Marshal(files)
 	v, _, err := s.store.putLayerPart(credentialsPrefix+p.Adapter, -1, data)
 	if err == nil {
 		err = s.syncSecrets(a, files)
@@ -409,6 +418,32 @@ func (s *Server) userCapture(ctx context.Context, params json.RawMessage, _ *rpc
 	// it was captured from too, which had the real values.
 	s.pushLogin(ctx, a.Name)
 	return api.Credentials{Part: p.Adapter, Version: v, Updated: time.Now().UTC()}, nil
+}
+
+// A normal managed box already holds placeholders. Saving those as real tokens
+// would replace the working host login for every box. Metadata alone likewise
+// does not establish that an adapter left a usable login in its declared files.
+func checkCapturedLogin(a *agents.Adapter, files []guestproto.File, known []keys.Secret) error {
+	found := false
+	for _, source := range a.Credentials {
+		for _, f := range files {
+			if f.Path != source.File {
+				continue
+			}
+			for value := range keys.Find(f.Path, f.Data, source.Secrets) {
+				found = true
+				for _, secret := range known {
+					if slices.Contains(secret.Placeholders, value) {
+						return fmt.Errorf("%s's files already use a managed login; run hutch login %s to log in again instead of capturing its placeholders", a.Name, a.Name)
+					}
+				}
+			}
+		}
+	}
+	if !found {
+		return fmt.Errorf("%s left no token fields in its declared credential files; did the login finish?", a.Name)
+	}
+	return nil
 }
 
 // readSources reads adapter sources from a box; missing files are skipped.
