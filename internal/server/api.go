@@ -166,6 +166,9 @@ func (s *Server) boxFork(ctx context.Context, params json.RawMessage, out *rpc.O
 	if err != nil {
 		return nil, err
 	}
+	if err := s.forkLogins(src.ID, p.Credentials, "fork it with the same credentials setting"); err != nil {
+		return nil, err
+	}
 	w, err := s.worker(src.Worker)
 	if err != nil {
 		return nil, err

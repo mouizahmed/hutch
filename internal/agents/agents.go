@@ -77,10 +77,13 @@ func (s *Source) UnmarshalTOML(v any) error {
 // Dir reports whether the source is a whole directory.
 func (s Source) Dir() bool { return strings.HasSuffix(s.File, "/") }
 
+// MCP is where an agent keeps its MCP servers. Secrets are the fields of a
+// server that hold keys; sync moves them into the credentials part.
 type MCP struct {
-	File   string `toml:"file"`
-	Key    string `toml:"key"`
-	Format string `toml:"format"`
+	File    string   `toml:"file"`
+	Key     string   `toml:"key"`
+	Format  string   `toml:"format"`
+	Secrets []string `toml:"secrets"`
 }
 
 // Seed is merged into a box's file after the user layer, to get past first-run prompts.
@@ -138,6 +141,9 @@ func Parse(source string, data []byte) (*Adapter, error) {
 	}
 	if len(a.Models) > 0 && a.Model == "" {
 		return nil, fmt.Errorf("%s: models needs model, the arguments that choose one", source)
+	}
+	if a.MCP != nil && len(a.MCP.Secrets) == 0 {
+		return nil, fmt.Errorf("%s: mcp needs secrets, the server fields that hold keys, like [\"env\"]", source)
 	}
 	for mode := range a.Autonomy {
 		if mode != "full" && mode != "ask" {

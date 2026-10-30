@@ -11,7 +11,7 @@ login       = "codex login"
 sessions    = "~/.codex/sessions/**/*.jsonl"
 credentials = ["~/.codex/auth.json"]
 config      = ["~/.codex/config.toml", "~/.codex/AGENTS.md"]
-mcp         = { file = "~/.codex/config.toml", key = "mcp_servers", format = "codex" }
+mcp         = { file = "~/.codex/config.toml", key = "mcp_servers", format = "codex", secrets = ["env", "http_headers"] }
 transcript  = "codex"
 
 [[seed]]

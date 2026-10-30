@@ -23,7 +23,7 @@ config = [
   "~/.claude/plugins/cache/",
   { file = "~/.claude.json", keys = ["mcpServers"] },
 ]
-mcp        = { file = "~/.claude.json", key = "mcpServers", format = "claude" }
+mcp        = { file = "~/.claude.json", key = "mcpServers", format = "claude", secrets = ["env", "headers"] }
 transcript = "claude"
 
 # First-run prompts a box would otherwise stop at, and the bell Hutch alerts on.

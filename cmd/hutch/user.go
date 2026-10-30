@@ -79,7 +79,7 @@ func collectLayer() (collected, error) {
 			for _, f := range files {
 				if a.MCP != nil && a.MCP.File == src.File {
 					var secret *guestproto.File
-					if f, secret, err = splitSecrets(f, a.MCP.Key); err != nil {
+					if f, secret, err = splitSecrets(f, a.MCP.Key, a.MCP.Secrets); err != nil {
 						return c, fmt.Errorf("%s: %w", src.File, err)
 					}
 					if secret != nil {
@@ -171,9 +171,9 @@ func readLocal(home string, src agents.Source) ([]guestproto.File, error) {
 	return []guestproto.File{f}, nil
 }
 
-// splitSecrets moves the env blocks of MCP servers under key out of a config file,
-// into a separate file merged into the same path from the credentials part.
-func splitSecrets(f guestproto.File, key string) (guestproto.File, *guestproto.File, error) {
+// splitSecrets moves the secret fields of MCP servers under key out of a config
+// file, into a separate file merged into the same path from the credentials part.
+func splitSecrets(f guestproto.File, key string, fields []string) (guestproto.File, *guestproto.File, error) {
 	var doc map[string]any
 	toml_ := strings.HasSuffix(f.Path, ".toml")
 	var err error
@@ -188,9 +188,19 @@ func splitSecrets(f guestproto.File, key string) (guestproto.File, *guestproto.F
 	servers, _ := doc[key].(map[string]any)
 	envs := map[string]any{}
 	for name, s := range servers {
-		if sm, ok := s.(map[string]any); ok && sm["env"] != nil {
-			envs[name] = map[string]any{"env": sm["env"]}
-			delete(sm, "env")
+		sm, ok := s.(map[string]any)
+		if !ok {
+			continue
+		}
+		secret := map[string]any{}
+		for _, k := range fields {
+			if sm[k] != nil {
+				secret[k] = sm[k]
+				delete(sm, k)
+			}
+		}
+		if len(secret) > 0 {
+			envs[name] = secret
 		}
 	}
 	if len(envs) == 0 {

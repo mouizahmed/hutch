@@ -18,10 +18,11 @@ func eventsCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "events",
 		Short: "Print box, terminal, and worker changes as JSON lines",
-		Long: `Print box, thread, and worker changes as JSON lines: first everything as it is
-now, then a {"type":"synced"} line, then each change as it happens. Types:
-box, thread, worker (the whole object as it is now), and box_removed,
-thread_removed, worker_removed (with id, and n for a thread).`,
+		Long: `Print box, terminal, and worker changes as JSON lines: first everything as it
+is now, then a {"type":"synced"} line, then each change as it happens. Types:
+box, thread, worker (the whole object as it is now), box_removed,
+thread_removed, worker_removed (with id, and n for a thread), and alert (a
+terminal whose agent rang the bell or exited while nobody was looking).`,
 		GroupID: "boxes",
 		Args:    cobra.NoArgs,
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, _ []string) error {

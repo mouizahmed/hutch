@@ -122,6 +122,25 @@ func granted(creds []string, a string) bool {
 	return slices.Contains(creds, "*") || slices.Contains(creds, a)
 }
 
+// forkLogins refuses a fork of source given fewer logins than source was: the
+// fork keeps source's files and memory, whatever it's given itself.
+func (s *Server) forkLogins(source string, creds []string, fix string) error {
+	had, err := s.store.boxCredentials(source)
+	if err != nil {
+		return err
+	}
+	var extra []string
+	for _, a := range had {
+		if !granted(creds, a) {
+			extra = append(extra, strings.ReplaceAll(a, "*", "all of them"))
+		}
+	}
+	if len(extra) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s has logins this box isn't given (%s), and a box made from it keeps them: %s", source, strings.Join(extra, ", "), fix)
+}
+
 // applyUserLayer writes the user layer into a running box: config, the granted
 // credentials, then each agent's first-run seeds, then git identity and gh's git
 // credential helper.
