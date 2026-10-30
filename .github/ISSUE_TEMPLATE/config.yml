@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability privately
+    url: https://github.com/mouizahmed/hutch/security/advisories/new
+    about: Use private vulnerability reporting rather than a public issue.

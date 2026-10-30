@@ -1,0 +1,25 @@
+name: Bug report
+description: Report incorrect behavior or a workflow that fails
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Versions and environment
+      description: Hutch CLI/daemon versions, laptop OS, machine OS/architecture, backend, and agent versions.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Remove credentials, recovery passphrases, private URLs, and sensitive project content.
