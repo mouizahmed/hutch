@@ -90,7 +90,9 @@ func port(t *testing.T, id string) string {
 
 func remote(t *testing.T, args ...string) string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	// Cleanup runs after testing has canceled t.Context(). It still needs to
+	// remove its own fixtures and repair a deliberately interrupted install.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	argv := append([]string{"-o", "BatchMode=yes", os.Getenv("HUTCH_MACHINE"), "sudo", "-n"}, args...)
 	out, err := exec.CommandContext(ctx, "ssh", argv...).CombinedOutput()

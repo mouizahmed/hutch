@@ -74,7 +74,7 @@ print('Paused with an uncommitted partial snapshot; persisted generation',box['g
 		t.Fatal("counter did not dirty memory after the checkpoint")
 	}
 
-	remotePython(t, `import json,os,pathlib,subprocess,sys
+	remotePython(t, `import errno,json,os,pathlib,subprocess,sys
 name=sys.argv[1]
 root=pathlib.Path('/var/lib/hutch')
 meta=root/'boxes'/name/'box.json'
@@ -86,6 +86,21 @@ try:
  amount=fs.f_bavail*fs.f_frsize-(4<<20)
  assert amount>0
  subprocess.run(['fallocate','-l',str(amount),str(filler)],check=True)
+ # statvfs free space and XFS allocation reservations do not by themselves
+ # prove ENOSPC. Exhaust the remaining allocatable extents as root too.
+ with open(filler,'r+b',buffering=0) as f:
+  offset=amount
+  step=16<<20
+  while step>=4096:
+   try:
+    os.posix_fallocate(f.fileno(),offset,step)
+    offset+=step
+   except OSError as e:
+    if e.errno!=errno.ENOSPC: raise
+    step//=2
+  f.flush()
+  os.fsync(f.fileno())
+ print('Filesystem exhausted; available bytes:',os.statvfs(root).f_bavail*fs.f_frsize)
  r=subprocess.run(['/usr/local/bin/hutchd','box','checkpoint',name],capture_output=True,text=True,timeout=50)
  assert r.returncode!=0, 'checkpoint unexpectedly fit on the full filesystem'
  after=json.loads(meta.read_text())['generation']
