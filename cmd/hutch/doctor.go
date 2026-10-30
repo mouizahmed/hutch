@@ -12,6 +12,10 @@ import (
 )
 
 func doctorCommand() *cobra.Command {
+	return doctorCommandFor("")
+}
+
+func doctorCommandFor(target string) *cobra.Command {
 	return &cobra.Command{
 		Use:     "doctor",
 		Short:   "Check this computer, the machine, its bucket, boxes, and config, with a fix for each problem",
@@ -32,8 +36,11 @@ func doctorCommand() *cobra.Command {
 				_, err := config.ReadFile(config.Project, repo.ConfigPath())
 				local("project config", err, repo.ConfigPath(), "fix "+repo.ConfigPath()+" (hutch config edit --project)")
 			}
-			sess, err := connect()
-			local("machine", err, machineTarget(), "check that ssh to it works and hutchd runs there (machine in your user config, or $HUTCH_MACHINE)")
+			if target == "" {
+				target = machineTarget()
+			}
+			sess, err := connectTarget(target)
+			local("machine", err, target, "check that ssh to it works and hutchd runs there (machine in your user config, or $HUTCH_MACHINE)")
 			var r api.DoctorResult
 			if err == nil {
 				defer sess.Close()

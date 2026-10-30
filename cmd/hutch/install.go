@@ -546,7 +546,7 @@ hutch doctor. Run it again to update hutchd; boxes and state are kept.`,
 				return err
 			}
 			fmt.Printf("  ✓ machine = %q in %s\n", host, config.UserPath())
-			sess, err := connect()
+			sess, err := connectTarget(host)
 			if err != nil {
 				return err
 			}
@@ -557,7 +557,7 @@ hutch doctor. Run it again to update hutchd; boxes and state are kept.`,
 					return err
 				}
 			}
-			d := doctorCommand()
+			d := doctorCommandFor(host)
 			d.SetContext(cmd.Context())
 			return d.RunE(d, nil)
 		},
@@ -698,7 +698,7 @@ first time you use them. Then the new machine is your machine.`,
 				return err
 			}
 			fmt.Printf("  ✓ machine = %q; boxes restore from the bucket when you use them\n", host)
-			d := doctorCommand()
+			d := doctorCommandFor(host)
 			d.SetContext(cmd.Context())
 			return d.RunE(d, nil)
 		},

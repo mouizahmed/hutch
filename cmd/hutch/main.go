@@ -89,7 +89,10 @@ func machineTarget() string {
 }
 
 func dial() (*yamux.Session, error) {
-	target := machineTarget()
+	return dialTarget(machineTarget())
+}
+
+func dialTarget(target string) (*yamux.Session, error) {
 	sess, err := client.Dial(target, client.Socket)
 	if err != nil {
 		if target == "" {
@@ -121,10 +124,16 @@ func checkVersion(ctx context.Context, sess *yamux.Session) error {
 
 // connect opens a session to the machine and syncs the user config with it.
 func connect() (*yamux.Session, error) {
+	return connectTarget(machineTarget())
+}
+
+// Setup and restore must keep using their explicit host, even when a daemon
+// already runs locally or this process predates its hutch group membership.
+func connectTarget(target string) (*yamux.Session, error) {
 	if _, err := config.ReadFile(config.User, config.UserPath()); err != nil {
 		return nil, fmt.Errorf("%w\n  fix it with: hutch config edit", err)
 	}
-	sess, err := dial()
+	sess, err := dialTarget(target)
 	if err != nil {
 		return nil, err
 	}
@@ -134,10 +143,10 @@ func connect() (*yamux.Session, error) {
 		sess.Close()
 		return nil, err
 	}
-	if err := syncUserConfig(ctx, sess, machineTarget(), ""); err != nil {
+	if err := syncUserConfig(ctx, sess, target, ""); err != nil {
 		sess.Close()
 		if msg := client.SSHError(); msg != "" && strings.Contains(err.Error(), "EOF") {
-			return nil, fmt.Errorf("%s: %s", machineTarget(), msg)
+			return nil, fmt.Errorf("%s: %s", target, msg)
 		}
 		return nil, err
 	}
