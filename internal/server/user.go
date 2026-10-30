@@ -122,28 +122,9 @@ func granted(creds []string, a string) bool {
 	return slices.Contains(creds, "*") || slices.Contains(creds, a)
 }
 
-// forkLogins refuses a fork of source given fewer logins than source was: the
-// fork keeps source's files and memory, whatever it's given itself.
-func (s *Server) forkLogins(source string, creds []string, fix string) error {
-	had, err := s.store.boxCredentials(source)
-	if err != nil {
-		return err
-	}
-	var extra []string
-	for _, a := range had {
-		if !granted(creds, a) {
-			extra = append(extra, strings.ReplaceAll(a, "*", "all of them"))
-		}
-	}
-	if len(extra) == 0 {
-		return nil
-	}
-	return fmt.Errorf("%s has logins this box isn't given (%s), and a box made from it keeps them: %s", source, strings.Join(extra, ", "), fix)
-}
-
-// applyUserLayer writes the user layer into a running box: config, the granted
-// credentials, then each agent's first-run seeds, then git identity and gh's git
-// credential helper.
+// applyUserLayer writes the user layer into a running box: its keys proxy, config,
+// the granted logins (as placeholders), then each agent's first-run seeds, then git
+// identity and gh's git credential helper.
 func (s *Server) applyUserLayer(ctx context.Context, w *workerConn, box string, creds []string) error {
 	l, _, err := s.userLayer()
 	if err != nil {
@@ -153,31 +134,30 @@ func (s *Server) applyUserLayer(ctx context.Context, w *workerConn, box string, 
 	if err != nil {
 		return err
 	}
-	stored, err := s.credentials()
-	if err != nil {
-		return err
-	}
 	if err := s.store.setBoxCredentials(box, creds); err != nil {
 		return err
 	}
+	s.pushKeys(ctx, nil)
+	proxied := s.proxied(ctx, w, box)
+	if proxied {
+		if err := s.boxKeys(ctx, w, box); err != nil {
+			return fmt.Errorf("point %s at its keys proxy: %w", box, err)
+		}
+	}
 	var files []guestproto.File
-	var watch []string
 	for _, a := range set.Sorted() {
 		files = append(files, l.Files[a.Name]...)
-		if granted(creds, a.Name) {
-			for _, src := range a.Credentials {
-				watch = append(watch, src.File)
-			}
-		}
 	}
-	hasGH := false
-	for _, c := range stored {
-		a, _, _ := strings.Cut(c.Part, "/")
-		if granted(creds, a) {
-			files = append(files, c.Files...)
-			hasGH = hasGH || c.Part == "gh"
-		}
+	logins, err := s.boxFiles(creds, proxied)
+	if err != nil {
+		return err
 	}
+	files = append(files, logins...)
+	ghLogin, err := s.loginSecrets("gh")
+	if err != nil {
+		return err
+	}
+	hasGH := granted(creds, "gh") && len(ghLogin) > 0
 	dirs := []string{workspace}
 	if b, err := s.store.box(box); err == nil && b.Path != "" {
 		dirs = append(dirs, b.Path)
@@ -192,19 +172,14 @@ func (s *Server) applyUserLayer(ctx context.Context, w *workerConn, box string, 
 		}
 	}
 	// Guest frames are limited to 4 MB, and file data travels base64-encoded (a third
-	// larger), so batches stay under 2 MB of data. The last call also starts watching
-	// credentials.
-	for first := true; first || len(files) > 0; first = false {
+	// larger), so batches stay under 2 MB of data.
+	for len(files) > 0 {
 		n, size := 0, 0
 		for n < len(files) && (n == 0 || size+len(files[n].Data) < 2<<20) {
 			size += len(files[n].Data)
 			n++
 		}
-		p := api.FilesParams{ID: box, Files: guestproto.Files{Files: files[:n]}}
-		if n == len(files) {
-			p.Watch = watch
-		}
-		err := rpc.Call(ctx, w.sess, api.BoxFiles, p, nil)
+		err := rpc.Call(ctx, w.sess, api.BoxFiles, api.FilesParams{ID: box, Files: guestproto.Files{Files: files[:n]}}, nil)
 		if err != nil && strings.Contains(err.Error(), "unsupported request type") {
 			// A box from before the user layer keeps what it has.
 			return nil
@@ -368,10 +343,19 @@ func (s *Server) userCapture(ctx context.Context, params json.RawMessage, _ *rpc
 		return nil, fmt.Errorf("%s left no credentials in the box; did the login finish?", p.Adapter)
 	}
 	data, _ := json.Marshal(files)
+	s.keysMu.Lock()
 	v, _, err := s.store.putLayerPart(credentialsPrefix+p.Adapter, -1, data)
+	if err == nil {
+		err = s.syncSecrets(a, files)
+	}
+	s.keysMu.Unlock()
 	if err != nil {
 		return nil, err
 	}
+	s.pushKeys(ctx, nil)
+	// Every running box with the login gets the new one, as placeholders: the box
+	// it was captured from too, which had the real values.
+	s.pushLogin(ctx, a.Name)
 	return api.Credentials{Part: p.Adapter, Version: v, Updated: time.Now().UTC()}, nil
 }
 
@@ -403,93 +387,15 @@ func (s *Server) readSources(ctx context.Context, w *workerConn, box string, sou
 	return files, nil
 }
 
-// watchReport notices a box's credential files changing, which happens when an
-// agent refreshes its login, and copies the new login to the user layer and every
-// other running box: logins rotate refresh tokens, so the old copies stop working.
-func (s *Server) watchReport(br api.BoxReport) {
-	if len(br.Files) == 0 {
-		return
-	}
-	id := br.Box.ID
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	known := s.fileHashes[id]
-	if known == nil || s.syncing[id] {
-		if known == nil {
-			s.fileHashes[id] = br.Files
-		}
-		return
-	}
-	var changed []string
-	for p, h := range br.Files {
-		if known[p] != h {
-			changed = append(changed, p)
-		}
-	}
-	if len(changed) == 0 {
-		return
-	}
-	s.syncing[id] = true
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		defer cancel()
-		if err := s.syncBack(ctx, id, changed); err != nil {
-			log.Printf("credentials from %s: %v", id, err)
-		}
-		s.mu.Lock()
-		s.fileHashes[id] = br.Files
-		delete(s.syncing, id)
-		s.mu.Unlock()
-	}()
-}
-
-func (s *Server) syncBack(ctx context.Context, box string, changed []string) error {
-	w, err := s.workerFor(box)
-	if err != nil {
-		return err
-	}
-	creds, err := s.store.boxCredentials(box)
-	if err != nil {
-		return err
-	}
-	set, err := s.adapters()
-	if err != nil {
-		return err
-	}
-	for _, a := range set.Sorted() {
-		if !granted(creds, a.Name) || !slices.ContainsFunc(a.Credentials, func(src agents.Source) bool { return slices.Contains(changed, src.File) }) {
-			continue
-		}
-		files, err := s.readSources(ctx, w, box, a.Credentials)
-		if err != nil || len(files) == 0 {
-			return err
-		}
-		part := credentialsPrefix + a.Name
-		cur, err := s.store.layerPart(part)
-		if err != nil {
-			return err
-		}
-		data, _ := json.Marshal(files)
-		if bytes.Equal(cur.content, data) {
-			continue
-		}
-		if _, _, err := s.store.putLayerPart(part, -1, data); err != nil {
-			return err
-		}
-		log.Printf("credentials: %s login refreshed in %s; updating the other running boxes", a.Name, box)
-		s.pushCredentials(ctx, a.Name, box, files)
-	}
-	return nil
-}
-
-func (s *Server) pushCredentials(ctx context.Context, adapter, from string, files []guestproto.File) {
+// pushLogin writes adapter's login into every running box granted it.
+func (s *Server) pushLogin(ctx context.Context, adapter string) {
 	boxes, err := s.store.boxes()
 	if err != nil {
 		log.Printf("credentials: %v", err)
 		return
 	}
 	for _, b := range boxes {
-		if b.ID == from || b.State != "running" {
+		if b.State != "running" {
 			continue
 		}
 		creds, err := s.store.boxCredentials(b.ID)
@@ -500,30 +406,31 @@ func (s *Server) pushCredentials(ctx context.Context, adapter, from string, file
 		if err != nil {
 			continue
 		}
+		files, err := s.boxFiles([]string{adapter}, s.proxied(ctx, w, b.ID))
+		if err != nil || len(files) == 0 {
+			continue
+		}
 		if err := rpc.Call(ctx, w.sess, api.BoxFiles, api.FilesParams{ID: b.ID, Files: guestproto.Files{Files: files}}, nil); err != nil {
 			log.Printf("credentials: push %s to %s: %v", adapter, b.ID, err)
 		}
 	}
 }
 
-// refreshCredentials writes the newest granted logins into a box that just woke:
-// its snapshot may hold logins another box has since refreshed.
+// refreshCredentials points a box that just woke at its keys proxy and writes its
+// granted logins: a snapshot from before either may lack them, or hold real values.
 func (s *Server) refreshCredentials(ctx context.Context, w *workerConn, box string) {
 	creds, err := s.store.boxCredentials(box)
 	if err != nil || len(creds) == 0 {
 		return
 	}
-	stored, err := s.credentials()
-	if err != nil {
-		return
-	}
-	var files []guestproto.File
-	for _, c := range stored {
-		if a, _, _ := strings.Cut(c.Part, "/"); granted(creds, a) {
-			files = append(files, c.Files...)
+	proxied := s.proxied(ctx, w, box)
+	if proxied {
+		if err := s.boxKeys(ctx, w, box); err != nil {
+			log.Printf("keys: %s after wake: %v", box, err)
 		}
 	}
-	if len(files) == 0 {
+	files, err := s.boxFiles(creds, proxied)
+	if err != nil || len(files) == 0 {
 		return
 	}
 	if err := rpc.Call(ctx, w.sess, api.BoxFiles, api.FilesParams{ID: box, Files: guestproto.Files{Files: files}}, nil); err != nil {

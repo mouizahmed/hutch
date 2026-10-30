@@ -2,9 +2,10 @@ package guestproto
 
 import "time"
 
-// Version 2 added input to exec (Exec.Stdin).
+// Version 2 added input to exec (Exec.Stdin); 3 gives every process the
+// machine's environment (EnvPath), which points it at the keys proxy.
 const (
-	Version = 2
+	Version = 3
 	Port    = 1024
 )
 
@@ -39,11 +40,9 @@ type Request struct {
 	Status  *StatusParams `json:"status,omitempty"`
 }
 
-// StatusParams asks for hashes of files the host watches for changes (credentials
-// an agent refreshes), and for the workspace's git status. Older guests ignore it.
+// StatusParams asks for the workspace's git status. Older guests ignore it.
 type StatusParams struct {
-	Watch []string `json:"watch,omitempty"`
-	Git   bool     `json:"git,omitempty"`
+	Git bool `json:"git,omitempty"`
 }
 
 // Files writes files atomically, owned by User (default dev).
@@ -127,9 +126,7 @@ type Status struct {
 	Viewers  int            `json:"viewers"`  // those that keep the box awake: all but the TUI's off-screen views
 	Sessions int            `json:"sessions"` // open exec and terminal sessions, but tmux clients
 	Ports    []ListenPort   `json:"ports,omitempty"`
-	// Files maps each watched path that exists to the SHA-256 of its contents.
-	Files map[string]string `json:"files,omitempty"`
-	Git   *GitStatus        `json:"git,omitempty"`
+	Git      *GitStatus     `json:"git,omitempty"`
 }
 
 // GitStatus is /workspace's repository as it is now: the branch checked out (empty
@@ -202,6 +199,10 @@ const (
 // ServicesPath lists a box's services, one shell command per line, run as dev by
 // its init; a SIGHUP to PID 1 applies changes.
 const ServicesPath = "/etc/hutch/services"
+
+// EnvPath holds KEY=VALUE lines every process in the box gets: the machine's keys
+// proxy and its CA. hutchd writes it.
+const EnvPath = "/etc/hutch/env"
 
 // InitStatusPath is where a box's init keeps what it runs: a list of ServiceStatus.
 const InitStatusPath = "/run/hutch/init.json"

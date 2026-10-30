@@ -39,7 +39,7 @@ func runPTY(conn net.Conn, p guestproto.PTY) error {
 		cmd.Dir = u.HomeDir
 	}
 	cmd.Env = append([]string{userPath(u.HomeDir), "HOME=" + u.HomeDir, "USER=" + u.Username, "LOGNAME=" + u.Username,
-		"SHELL=/bin/bash", "TERM=" + term, "LANG=C.UTF-8"}, p.Env...)
+		"SHELL=/bin/bash", "TERM=" + term, "LANG=C.UTF-8"}, append(machineEnv(), p.Env...)...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: credential(u)}
 
 	tty, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(p.Rows), Cols: uint16(p.Cols)})

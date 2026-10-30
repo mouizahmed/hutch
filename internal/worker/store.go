@@ -66,7 +66,7 @@ func (w *Worker) Upload(ctx context.Context, id string, s *durable.Store, k dura
 	}
 	m := &durable.Manifest{Created: time.Now().UTC(), Files: map[string]*durable.File{},
 		Box: &durable.BoxInfo{Image: b.Image, VCPUs: b.VCPUs, MemMiB: b.MemMiB, FCVersion: b.FCVersion, GVisor: b.GVisor, GuestToken: b.Token, Class: b.Class,
-			IdleTimeout: b.Idle.Timeout, CPUThreshold: b.Idle.CPUThreshold, Allow: b.Allow, Watch: b.Watch}}
+			IdleTimeout: b.Idle.Timeout, CPUThreshold: b.Idle.CPUThreshold, Allow: b.Allow}}
 	for _, name := range snapshotFiles {
 		f, err := os.Open(filepath.Join(work, name))
 		if errors.Is(err, os.ErrNotExist) {
@@ -244,7 +244,7 @@ func (w *Worker) Restore(ctx context.Context, id string, store *Store, gen int, 
 	ok = true
 	b := &Box{ID: id, Image: m.Box.Image, VCPUs: m.Box.VCPUs, MemMiB: m.Box.MemMiB, FCVersion: m.Box.FCVersion, GVisor: m.Box.GVisor, Token: m.Box.GuestToken, Class: m.Box.Class,
 		State: Asleep, Generation: gen, Uploaded: gen, Created: time.Now().UTC(), Store: store,
-		Idle: Idle{Timeout: m.Box.IdleTimeout, CPUThreshold: m.Box.CPUThreshold}, Allow: m.Box.Allow, Watch: m.Box.Watch}
+		Idle: Idle{Timeout: m.Box.IdleTimeout, CPUThreshold: m.Box.CPUThreshold}, Allow: m.Box.Allow}
 	if !warm {
 		b.State = Archived
 	}
@@ -368,7 +368,7 @@ func (w *Worker) RollBack(id string) (*Box, error) {
 	}
 	w.stop(b)
 	if b.Slot != 0 {
-		slot(b.Slot).teardown()
+		w.teardown(slot(b.Slot))
 	}
 	b.Slot, b.BaseMem = 0, ""
 	gen := w.genDir(id, b.Generation)

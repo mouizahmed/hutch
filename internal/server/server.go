@@ -57,14 +57,13 @@ type Server struct {
 	requests, ownRequests [2]int64
 	bucketBytes           atomic.Int64
 
+	// keysMu orders changes to the keys proxy's state and the pushes of its table.
+	keysMu sync.Mutex
+
 	mu      sync.Mutex
 	workers map[string]*workerConn
 	// threadStates holds the latest reported state of each thread, by box and number.
 	threadStates map[string]map[int]api.ThreadState
-	// fileHashes holds the last reported hashes of each box's watched credential
-	// files; syncing marks boxes whose changed credentials are being read.
-	fileHashes map[string]map[string]string
-	syncing    map[string]bool
 	// gitStates holds each box's latest git status.
 	gitStates map[string]guestproto.GitStatus
 	events    *hub
@@ -96,7 +95,7 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{cfg: cfg, store: st, master: master, workers: map[string]*workerConn{}, pending: map[string]int{}, peaks: map[string]int{}, relieving: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{},
-		fileHashes: map[string]map[string]string{}, syncing: map[string]bool{}, gitStates: map[string]guestproto.GitStatus{}, events: newHub()}
+		gitStates: map[string]guestproto.GitStatus{}, events: newHub()}
 	st.onChange = s.changed
 	go s.publish()
 	s.changed()
@@ -225,6 +224,7 @@ func (s *Server) AttachWorker(ctx context.Context, id, name string, conn net.Con
 	}
 	s.workers[id] = w
 	s.mu.Unlock()
+	s.pushKeys(ctx, w)
 	s.changed()
 	log.Printf("worker %s (%s) connected: %s, %d boxes", id, info.Name, info.Class, len(info.Boxes))
 	go s.pruneAll(ctx)
@@ -265,6 +265,13 @@ func (s *Server) worker(id string) (*workerConn, error) {
 // workerMux serves calls a worker makes to the server.
 func (s *Server) workerMux(workerID string) rpc.Mux {
 	return rpc.Mux{
+		api.WorkerKeysRefreshed: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+			var p api.KeysRefreshedParams
+			if err := rpc.Decode(params, &p); err != nil {
+				return nil, err
+			}
+			return nil, s.keysRefreshed(ctx, p)
+		},
 		api.WorkerReport: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
 			var r api.Report
 			if err := rpc.Decode(params, &r); err != nil {
@@ -330,7 +337,6 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 				for _, t := range alerts {
 					s.alert(t)
 				}
-				s.watchReport(br)
 			}
 			s.changed()
 			return nil, nil

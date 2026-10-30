@@ -316,7 +316,7 @@ func shutdown() {
 
 func baseEnv(uid int) []string {
 	home := homeOf(uid)
-	return []string{userPath(home), "HOME=" + home, "TERM=linux", "LANG=C.UTF-8"}
+	return append([]string{userPath(home), "HOME=" + home, "TERM=linux", "LANG=C.UTF-8"}, machineEnv()...)
 }
 
 func homeOf(uid int) string {

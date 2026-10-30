@@ -23,6 +23,7 @@ import (
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/guestproto"
 	"github.com/mouizahmed/hutch/internal/image"
+	"github.com/mouizahmed/hutch/internal/keys"
 	"github.com/mouizahmed/hutch/internal/rpc"
 	"github.com/mouizahmed/hutch/internal/version"
 	"github.com/mouizahmed/hutch/internal/wire"
@@ -34,6 +35,8 @@ import (
 func Run(ctx context.Context, w *worker.Worker, name string, conn net.Conn) error {
 	// A host out-of-memory kill of hutchd would leave boxes unmanaged; kill VMs first.
 	os.WriteFile("/proc/self/oom_score_adj", []byte("-900"), 0)
+	kp := keys.NewProxy()
+	w.Keys = kp
 	w.Recover(ctx)
 	u := newUploader(w)
 	m := newMonitor(w, u)
@@ -48,10 +51,14 @@ func Run(ctx context.Context, w *worker.Worker, name string, conn net.Conn) erro
 	context.AfterFunc(ctx, func() { sess.Close() })
 	var server atomic.Pointer[yamux.Session]
 	server.Store(sess)
+	kp.Refreshed = func(ctx context.Context, adapter string, changes []keys.Change) error {
+		return rpc.Call(ctx, server.Load(), api.WorkerKeysRefreshed, api.KeysRefreshedParams{Adapter: adapter, Changes: changes}, nil)
+	}
+	w.OpenKeys()
 	go m.run(ctx, &server)
 	go m.watchPressure(ctx)
 	go u.run(ctx)
-	return rpc.Serve(ctx, sess, handlers(w, name, m, u, &image.Builder{Root: w.Root}), streamHandlers(w))
+	return rpc.Serve(ctx, sess, handlers(w, name, m, u, kp, &image.Builder{Root: w.Root}), streamHandlers(w))
 }
 
 func toAPI(w *worker.Worker, b *worker.Box) api.Box {
@@ -70,7 +77,7 @@ func toStore(s *api.Store) *worker.Store {
 	return &worker.Store{Project: s.Project, Prefix: s.Prefix}
 }
 
-func handlers(w *worker.Worker, name string, m *monitor, u *uploader, images *image.Builder) rpc.Mux {
+func handlers(w *worker.Worker, name string, m *monitor, u *uploader, kp *keys.Proxy, images *image.Builder) rpc.Mux {
 	box := func(f func(context.Context, json.RawMessage) (*worker.Box, error)) rpc.Handler {
 		return func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
 			b, err := f(ctx, params)
@@ -161,6 +168,13 @@ func handlers(w *worker.Worker, name string, m *monitor, u *uploader, images *im
 			m.kick()
 			return nil, nil
 		},
+		api.WorkerKeys: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+			var t keys.Table
+			if err := rpc.Decode(params, &t); err != nil {
+				return nil, err
+			}
+			return nil, kp.Set(t)
+		},
 		api.WorkerDoctor: func(context.Context, json.RawMessage, *rpc.Out) (any, error) { return doctor(w), nil },
 		api.BoxRename: box(func(ctx context.Context, params json.RawMessage) (*worker.Box, error) {
 			var p api.RenameParams
@@ -193,7 +207,14 @@ func handlers(w *worker.Worker, name string, m *monitor, u *uploader, images *im
 			if err := rpc.Decode(params, &p); err != nil {
 				return nil, err
 			}
-			return nil, w.WriteFiles(ctx, p.ID, p.Files, p.Watch)
+			return nil, w.WriteFiles(ctx, p.ID, p.Files)
+		},
+		api.BoxGuestVersion: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+			var p api.IDParams
+			if err := rpc.Decode(params, &p); err != nil {
+				return nil, err
+			}
+			return w.GuestVersion(ctx, p.ID)
 		},
 		api.BoxStatus: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
 			var p api.IDParams

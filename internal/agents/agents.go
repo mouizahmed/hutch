@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"embed"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"path"
 	"sort"
@@ -32,17 +31,22 @@ type Adapter struct {
 	Login       string   `toml:"login"`
 	Sessions    string   `toml:"sessions"`
 	Credentials []Source `toml:"credentials"`
-	Config      []Source `toml:"config"`
-	MCP         *MCP     `toml:"mcp"`
-	Transcript  string   `toml:"transcript"`
-	Seed        []Seed   `toml:"seed"`
+	// Hosts are where its logins are used (and their subdomains): the only hosts the
+	// keys proxy swaps their placeholders for real values toward.
+	Hosts      []string `toml:"hosts"`
+	Config     []Source `toml:"config"`
+	MCP        *MCP     `toml:"mcp"`
+	Transcript string   `toml:"transcript"`
+	Seed       []Seed   `toml:"seed"`
 }
 
 // Source is a file or directory under ~, or with Keys only those top-level keys of
-// a JSON file.
+// a JSON file. In credentials, Secrets names the keys whose values are secrets,
+// anywhere in the file; boxes get placeholders for them.
 type Source struct {
-	File string   `toml:"file"`
-	Keys []string `toml:"keys"`
+	File    string   `toml:"file"`
+	Keys    []string `toml:"keys"`
+	Secrets []string `toml:"secrets"`
 }
 
 func (s *Source) UnmarshalTOML(v any) error {
@@ -52,21 +56,23 @@ func (s *Source) UnmarshalTOML(v any) error {
 	case map[string]any:
 		f, _ := v["file"].(string)
 		s.File = f
-		keys, _ := v["keys"].([]any)
-		for _, k := range keys {
-			ks, ok := k.(string)
-			if !ok {
-				return errors.New("keys must be strings")
+		for name, list := range map[string]*[]string{"keys": &s.Keys, "secrets": &s.Secrets} {
+			items, _ := v[name].([]any)
+			for _, k := range items {
+				ks, ok := k.(string)
+				if !ok {
+					return fmt.Errorf("%s must be strings", name)
+				}
+				*list = append(*list, ks)
 			}
-			s.Keys = append(s.Keys, ks)
 		}
 		for k := range v {
-			if k != "file" && k != "keys" {
+			if k != "file" && k != "keys" && k != "secrets" {
 				return fmt.Errorf("unknown key %q", k)
 			}
 		}
 	default:
-		return fmt.Errorf("want a path or { file, keys }, got %v", v)
+		return fmt.Errorf("want a path or { file, keys, secrets }, got %v", v)
 	}
 	if !strings.HasPrefix(s.File, "~/") {
 		return fmt.Errorf("%q: paths must start with ~/", s.File)
@@ -141,6 +147,16 @@ func Parse(source string, data []byte) (*Adapter, error) {
 	}
 	if len(a.Models) > 0 && a.Model == "" {
 		return nil, fmt.Errorf("%s: models needs model, the arguments that choose one", source)
+	}
+	if len(a.Credentials) > 0 {
+		secrets := false
+		for _, c := range a.Credentials {
+			secrets = secrets || len(c.Secrets) > 0
+		}
+		// Without them, a login's real values would go into boxes as they are.
+		if !secrets || len(a.Hosts) == 0 {
+			return nil, fmt.Errorf("%s: credentials need secrets (the keys holding tokens, like { file = \"~/.x/auth.json\", secrets = [\"access_token\"] }) and hosts (where they're used)", source)
+		}
 	}
 	if a.MCP != nil && len(a.MCP.Secrets) == 0 {
 		return nil, fmt.Errorf("%s: mcp needs secrets, the server fields that hold keys, like [\"env\"]", source)

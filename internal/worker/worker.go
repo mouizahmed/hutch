@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -33,6 +34,11 @@ type Worker struct {
 	// GVisor is the gVisor version boxes run in on a machine without /dev/kvm; it is
 	// empty where boxes are Firecracker VMs. The backend follows the host.
 	GVisor string
+	// Keys serves each running box's HTTPS_PROXY in its network; nil serves none.
+	Keys interface {
+		Open(box, ns string, allow []string) error
+		Close(ns string)
+	}
 	vendor string
 }
 
@@ -63,8 +69,6 @@ type Box struct {
 	// boot); the next diff snapshot is applied on top of a copy of it.
 	BaseMem string `json:"base_mem,omitempty"`
 	Idle    Idle   `json:"idle"`
-	// Watch lists files whose hashes guest status reports: credentials agents refresh.
-	Watch []string `json:"watch,omitempty"`
 	// Allow lists private targets (host:port) the box may reach despite the blocked ranges.
 	Allow []string `json:"allow,omitempty"`
 	// Store says where the box's snapshots go in the bucket; nil for boxes never stored.
@@ -246,7 +250,7 @@ func (w *Worker) List() ([]*Box, error) {
 
 // newNetwork picks a free slot and creates its netns under the lock, so concurrent
 // starts can't pick the same slot.
-func (w *Worker) newNetwork(allow []string) (slot, error) {
+func (w *Worker) newNetwork(id string, allow []string) (slot, error) {
 	unlock, err := w.lock("")
 	if err != nil {
 		return 0, err
@@ -267,10 +271,42 @@ func (w *Worker) newNetwork(allow []string) (slot, error) {
 			if _, err := os.Stat(slot(s).netnsPath()); err == nil {
 				continue
 			}
-			return slot(s), slot(s).setup(slot(s).uid(), allow, w.GVisor != "")
+			if err := slot(s).setup(slot(s).uid(), allow, w.GVisor != ""); err != nil {
+				return 0, err
+			}
+			if w.Keys != nil {
+				if err := w.Keys.Open(id, slot(s).netnsPath(), allow); err != nil {
+					slot(s).teardown()
+					return 0, err
+				}
+			}
+			return slot(s), nil
 		}
 	}
 	return 0, errors.New("no free network slots")
+}
+
+// teardown removes a slot's network and the box's proxy in it.
+func (w *Worker) teardown(s slot) {
+	if w.Keys != nil {
+		w.Keys.Close(s.netnsPath())
+	}
+	s.teardown()
+}
+
+// OpenKeys serves the proxy of every box running now, as after hutchd restarts.
+func (w *Worker) OpenKeys() {
+	boxes, err := w.List()
+	if err != nil || w.Keys == nil {
+		return
+	}
+	for _, b := range boxes {
+		if b.State == Running && b.Slot != 0 && w.Alive(b) {
+			if err := w.Keys.Open(b.ID, slot(b.Slot).netnsPath(), b.Allow); err != nil {
+				log.Print(err)
+			}
+		}
+	}
 }
 
 // uid is the unprivileged user a box's Firecracker runs as.

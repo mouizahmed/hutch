@@ -9,9 +9,10 @@ models      = ["fable", "opus", "sonnet", "haiku"]
 login       = "claude auth login"
 sessions    = "~/.claude/projects/**/*.jsonl"
 credentials = [
-  "~/.claude/.credentials.json",
+  { file = "~/.claude/.credentials.json", secrets = ["accessToken", "refreshToken"] },
   { file = "~/.claude.json", keys = ["oauthAccount", "userID"] },
 ]
+hosts       = ["anthropic.com", "claude.com", "claude.ai"]
 config = [
   "~/.claude/CLAUDE.md",
   "~/.claude/settings.json",

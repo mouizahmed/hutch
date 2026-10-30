@@ -40,6 +40,22 @@ func userPath(home string) string {
 	return "PATH=" + home + "/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 }
 
+// machineEnv is what the machine asks every process in the box to have, from
+// guestproto.EnvPath: its keys proxy and the CA it signs with.
+func machineEnv() []string {
+	b, err := os.ReadFile(guestproto.EnvPath)
+	if err != nil {
+		return nil
+	}
+	var env []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if strings.Contains(l, "=") {
+			env = append(env, l)
+		}
+	}
+	return env
+}
+
 // lookPath resolves a command against the user's PATH, not hutch-guest's own.
 func lookPath(name, home string) string {
 	if strings.Contains(name, "/") {
@@ -69,7 +85,7 @@ func execute(ctx context.Context, e guestproto.Exec, stdin io.Reader, r *respond
 	if cmd.Dir == "" {
 		cmd.Dir = u.HomeDir
 	}
-	cmd.Env = append([]string{userPath(u.HomeDir), "HOME=" + u.HomeDir, "USER=" + u.Username, "LOGNAME=" + u.Username}, e.Env...)
+	cmd.Env = append(append([]string{userPath(u.HomeDir), "HOME=" + u.HomeDir, "USER=" + u.Username, "LOGNAME=" + u.Username}, machineEnv()...), e.Env...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Credential: credential(u),
 		Setpgid:    true,

@@ -9,7 +9,8 @@ model       = "--model {model}"
 models      = ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-luna"]
 login       = "codex login"
 sessions    = "~/.codex/sessions/**/*.jsonl"
-credentials = ["~/.codex/auth.json"]
+credentials = [{ file = "~/.codex/auth.json", secrets = ["access_token", "refresh_token", "id_token", "OPENAI_API_KEY"] }]
+hosts       = ["chatgpt.com", "openai.com"]
 config      = ["~/.codex/config.toml", "~/.codex/AGENTS.md"]
 mcp         = { file = "~/.codex/config.toml", key = "mcp_servers", format = "codex", secrets = ["env", "http_headers"] }
 transcript  = "codex"

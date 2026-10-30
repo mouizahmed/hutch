@@ -662,6 +662,28 @@ func (s *store) boxCredentials(box string) ([]string, error) {
 	return creds, json.Unmarshal([]byte(data), &creds)
 }
 
+// allBoxCredentials returns every box's credential grants.
+func (s *store) allBoxCredentials() (map[string][]string, error) {
+	rows, err := s.db.Query(`SELECT box_id, credentials FROM box_credentials`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]string{}
+	for rows.Next() {
+		var box, data string
+		if err := rows.Scan(&box, &data); err != nil {
+			return nil, err
+		}
+		var creds []string
+		if err := json.Unmarshal([]byte(data), &creds); err != nil {
+			return nil, err
+		}
+		out[box] = creds
+	}
+	return out, rows.Err()
+}
+
 func (s *store) setBoxPath(box, path string) error {
 	_, err := s.exec(`UPDATE boxes SET path = ? WHERE id = ?`, path, box)
 	return err

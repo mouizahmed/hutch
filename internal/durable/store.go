@@ -68,7 +68,6 @@ type BoxInfo struct {
 	IdleTimeout  time.Duration `json:"idle_timeout,omitempty"`
 	CPUThreshold float64       `json:"cpu_threshold,omitempty"`
 	Allow        []string      `json:"allow,omitempty"`
-	Watch        []string      `json:"watch,omitempty"`
 }
 
 // File is one file's size and chunk ids; "" is a chunk of zeros, never stored.

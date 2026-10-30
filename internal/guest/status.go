@@ -5,8 +5,6 @@ package guest
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -78,7 +76,6 @@ func status(p guestproto.StatusParams) (guestproto.Status, error) {
 		saveThreads(saved)
 	}
 	st.Ports = listeningPorts()
-	st.Files = hashFiles(p.Watch)
 	if p.Git {
 		st.Git = gitStatus()
 	}
@@ -104,31 +101,6 @@ git rev-list --count HEAD --not --remotes 2>/dev/null || echo 0`)
 	g.Changes, _ = strconv.Atoi(strings.TrimSpace(f[1]))
 	g.Unpushed, _ = strconv.Atoi(strings.TrimSpace(f[2]))
 	return g
-}
-
-// hashFiles hashes the watched files that exist; "~/" means dev's home.
-func hashFiles(paths []string) map[string]string {
-	if len(paths) == 0 {
-		return nil
-	}
-	home := "/home/dev"
-	if u, err := user.Lookup("dev"); err == nil {
-		home = u.HomeDir
-	}
-	out := map[string]string{}
-	for _, p := range paths {
-		full := p
-		if rest, ok := strings.CutPrefix(p, "~/"); ok {
-			full = home + "/" + rest
-		}
-		data, err := os.ReadFile(full)
-		if err != nil {
-			continue
-		}
-		sum := sha256.Sum256(data)
-		out[p] = hex.EncodeToString(sum[:])
-	}
-	return out
 }
 
 // listeningPorts reads TCP sockets in LISTEN state from /proc/net/tcp{,6}.
@@ -179,7 +151,7 @@ func asDev(ctx context.Context, dir, name string, args ...string) (string, error
 	}
 	cmd := exec.CommandContext(ctx, lookPath(name, u.HomeDir), args...)
 	cmd.Dir = dir
-	cmd.Env = []string{userPath(u.HomeDir), "HOME=" + u.HomeDir, "USER=dev"}
+	cmd.Env = append([]string{userPath(u.HomeDir), "HOME=" + u.HomeDir, "USER=dev"}, machineEnv()...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: credential(u)}
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb

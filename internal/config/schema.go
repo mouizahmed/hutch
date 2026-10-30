@@ -124,6 +124,8 @@ var Keys = []*Key{
 		Doc: "how often the machine checks boxes for activity"},
 	{Path: "threads.check_interval", Kind: Duration, Default: "1s", Min: "250ms", Max: "1m", Layers: machine,
 		Doc: "how often the machine reads awake boxes' thread states, between fuller checks"},
+	{Path: "keys.refresh_reuse", Kind: Duration, Default: "1m", Min: "0s", Max: "1h", Layers: machine,
+		Doc: "a box's login refresh this soon after another box's is answered with that one, not refreshed again"},
 	{Path: "threads.echo_window", Kind: Duration, Default: "1s", Min: "0s", Max: "1m", Layers: machine,
 		Doc: "output this soon after you type in a thread is your typing echoed, not the thread working"},
 	{Path: "threads.working_window", Kind: Duration, Default: "5s", Min: "1s", Max: "10m", Layers: machine,

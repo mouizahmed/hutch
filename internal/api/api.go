@@ -12,6 +12,7 @@ import (
 	"github.com/mouizahmed/hutch/internal/bucket"
 	"github.com/mouizahmed/hutch/internal/config"
 	"github.com/mouizahmed/hutch/internal/guestproto"
+	"github.com/mouizahmed/hutch/internal/keys"
 )
 
 // Methods the server serves to the CLI. The box.* methods are also served by
@@ -28,14 +29,16 @@ const (
 	BoxPTY     = "box.pty"
 	BoxConsole = "box.console"
 	BoxSerial  = "box.serial"
-	BoxRename  = "box.rename"  // hutchd only
-	BoxFiles   = "box.files"   // hutchd only
-	BoxRestore = "box.restore" // hutchd only
-	BoxResize  = "box.resize"
-	BoxPlan    = "box.plan"
-	BoxArchive = "box.archive" // hutchd only
-	BoxStatus  = "box.status"
-	BoxDial    = "box.dial"
+	BoxRename  = "box.rename" // hutchd only
+	BoxFiles   = "box.files"  // hutchd only
+	// BoxGuestVersion is the protocol version a running box's hutch-guest speaks.
+	BoxGuestVersion = "box.guest_version" // hutchd only
+	BoxRestore      = "box.restore"       // hutchd only
+	BoxResize       = "box.resize"
+	BoxPlan         = "box.plan"
+	BoxArchive      = "box.archive" // hutchd only
+	BoxStatus       = "box.status"
+	BoxDial         = "box.dial"
 	// Events is a stream of Event: the current boxes, threads, and workers, then
 	// each change.
 	Events = "events"
@@ -72,6 +75,9 @@ const (
 	WorkerSettings = "worker.settings"
 	WorkerReport   = "worker.report"
 	WorkerThreads  = "worker.threads" // a box's threads changed state, between reports
+	WorkerKeys     = "worker.keys"    // the keys proxy's table, to the worker
+	// The keys proxy refreshed a login: its new real values, to store.
+	WorkerKeysRefreshed = "worker.keys_refreshed"
 
 	ServerInit   = "server.init"
 	ServerGC     = "server.gc"
@@ -193,6 +199,11 @@ type ConfigPutParams struct {
 type ConfigPutResult struct {
 	Doc      ConfigDoc `json:"doc"`
 	Conflict bool      `json:"conflict,omitempty"`
+}
+
+type KeysRefreshedParams struct {
+	Adapter string        `json:"adapter"`
+	Changes []keys.Change `json:"changes"`
 }
 
 // WorkerSettingsParams carries the server-layer keys hutchd uses, and the bucket
@@ -397,7 +408,6 @@ type CaptureParams struct {
 type FilesParams struct {
 	ID    string           `json:"id"`
 	Files guestproto.Files `json:"files"`
-	Watch []string         `json:"watch,omitempty"` // report hashes of these files from now on
 }
 
 // DialParams opens a stream to a port on a box's loopback: after a guestproto "ok"
@@ -469,7 +479,6 @@ type BoxReport struct {
 	Box        Box                   `json:"box"`
 	Threads    []ThreadState         `json:"threads,omitempty"`
 	LastActive time.Time             `json:"last_active"`
-	Files      map[string]string     `json:"files,omitempty"` // hashes of watched files
 	Git        *guestproto.GitStatus `json:"git,omitempty"`
 	// MemMiB is the host memory the box's VM holds now; PeakMiB its highest
 	// over the peak window.

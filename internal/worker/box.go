@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -257,14 +256,14 @@ func (w *Worker) Wake(ctx context.Context, id string) (*Box, error) {
 // start sets up the network and jail, runs boot (cold boot or restore), then sends
 // hutch-guest the restore message. On failure everything it created is undone.
 func (w *Worker) start(ctx context.Context, b *Box, links map[string]string, boot func(*vm) error, guestTimeout time.Duration) error {
-	s, err := w.newNetwork(b.Allow)
+	s, err := w.newNetwork(b.ID, b.Allow)
 	if err != nil {
 		return err
 	}
 	b.Slot = int(s)
 	fail := func(err error) error {
 		w.killFirecracker(b)
-		s.teardown()
+		w.teardown(s)
 		b.Slot = 0
 		return err
 	}
@@ -332,7 +331,7 @@ func (w *Worker) Sleep(ctx context.Context, id string) (*Box, error) {
 		return nil, err
 	}
 	w.stop(b)
-	slot(b.Slot).teardown()
+	w.teardown(slot(b.Slot))
 	b.State, b.Slot, b.BaseMem = Asleep, 0, ""
 	if err := w.save(b); err != nil {
 		return nil, err
@@ -489,7 +488,7 @@ func (w *Worker) Remove(id string) error {
 	}
 	w.stop(b)
 	if b.Slot != 0 {
-		slot(b.Slot).teardown()
+		w.teardown(slot(b.Slot))
 	}
 	if err := os.RemoveAll(w.boxDir(id)); err != nil {
 		return err
@@ -512,7 +511,7 @@ func (w *Worker) Exec(ctx context.Context, id string, e guestproto.Exec, stdout,
 
 // WriteFiles writes files into a running box and adds watch to the files its
 // status reports hashes of.
-func (w *Worker) WriteFiles(ctx context.Context, id string, f guestproto.Files, watch []string) error {
+func (w *Worker) WriteFiles(ctx context.Context, id string, f guestproto.Files) error {
 	b, err := w.load(id)
 	if err != nil {
 		return err
@@ -520,28 +519,10 @@ func (w *Worker) WriteFiles(ctx context.Context, id string, f guestproto.Files, 
 	if b.State != Running {
 		return fmt.Errorf("box %q is %s", id, b.State)
 	}
-	if len(f.Files) > 0 {
-		if err := w.guest(b).Files(ctx, f); err != nil {
-			return err
-		}
-	}
-	if len(watch) == 0 {
+	if len(f.Files) == 0 {
 		return nil
 	}
-	unlock, err := w.lock(id)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	if b, err = w.load(id); err != nil {
-		return err
-	}
-	for _, p := range watch {
-		if !slices.Contains(b.Watch, p) {
-			b.Watch = append(b.Watch, p)
-		}
-	}
-	return w.save(b)
+	return w.guest(b).Files(ctx, f)
 }
 
 // DialPort opens a byte stream to a TCP port on a running box's loopback.
@@ -605,7 +586,7 @@ func (w *Worker) GuestStatus(ctx context.Context, id string) (guestproto.Status,
 	if err != nil {
 		return guestproto.Status{}, err
 	}
-	return w.guest(b).Status(ctx, guestproto.StatusParams{Watch: b.Watch, Git: true})
+	return w.guest(b).Status(ctx, guestproto.StatusParams{Git: true})
 }
 
 // GuestThreads is a running box's guest status without its watched files: what

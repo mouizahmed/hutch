@@ -203,14 +203,14 @@ func capName(i int) string { return "CAP_" + capNames[i] }
 // boot, or a restore from the checkpoint in from. It then sends hutch-guest the
 // restore message. On failure everything it created is undone.
 func (w *Worker) startSandbox(ctx context.Context, b *Box, from string, guestTimeout time.Duration) error {
-	s, err := w.newNetwork(b.Allow)
+	s, err := w.newNetwork(b.ID, b.Allow)
 	if err != nil {
 		return err
 	}
 	b.Slot = int(s)
 	fail := func(err error) error {
 		w.killSandbox(b)
-		s.teardown()
+		w.teardown(s)
 		b.Slot = 0
 		return err
 	}
