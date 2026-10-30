@@ -37,6 +37,16 @@ jobs:
           mkdir -p dist/runtime
           cp bin/hutch bin/linux-amd64/hutchd bin/linux-amd64/hutch-guest dist/runtime/
           cp dist/images/* dist/runtime/
+      - name: Build a previous daemon for upgrade recovery
+        run: |
+          previous_ref=375eb5dd625f53879edd83facc0280ccf5ce5705
+          git fetch --depth=1 origin "$previous_ref"
+          previous_source=$(mktemp -d)
+          trap 'rm -r -- "$previous_source"' EXIT
+          git archive "$previous_ref" | tar -xf - -C "$previous_source"
+          CGO_ENABLED=0 go -C "$previous_source" build -trimpath \
+            -ldflags '-s -w -X github.com/mouizahmed/hutch/internal/version.Version=375eb5d' \
+            -o "$GITHUB_WORKSPACE/dist/runtime/hutchd-previous" ./cmd/hutchd
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: runtime-files
@@ -49,6 +59,8 @@ jobs:
       fail-fast: false
       matrix:
         backend: [firecracker, gvisor]
+        exercise: [lifecycle, upgrade]
+    name: ${{ matrix.backend }} / ${{ matrix.exercise }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -63,13 +75,21 @@ jobs:
       - name: Set up a disposable machine
         env:
           HUTCH_TEST_BACKEND: ${{ matrix.backend }}
+          HUTCH_TEST_PREVIOUS: ${{ matrix.exercise == 'upgrade' && '1' || '' }}
         run: scripts/runtime-machine.sh
       - name: Lifecycle, recovery, and isolation
         env:
           HUTCH_MACHINE: hutch-ci
           HUTCH_TEST_BACKEND: ${{ matrix.backend }}
           HUTCH_TEST_DISPOSABLE: '1'
-        run: go test -tags runtime -count=1 -timeout 12m -v ./internal/integration
+          HUTCH_TEST_UPGRADE: ${{ matrix.exercise == 'upgrade' && '1' || '' }}
+          HUTCH_TEST_FILES: ${{ github.workspace }}/dist/runtime
+        run: |
+          if [ "$HUTCH_TEST_UPGRADE" = 1 ]; then
+            go test -tags runtime -count=1 -timeout 12m -v -run '^TestUpgrade$' ./internal/integration
+          else
+            go test -tags runtime -count=1 -timeout 12m -v -run '^(TestRuntime|TestCheckpointRecovery)$' ./internal/integration
+          fi
       - name: Machine logs
         if: always()
         run: |

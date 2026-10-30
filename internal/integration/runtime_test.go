@@ -100,7 +100,8 @@ func remote(t *testing.T, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func TestRuntime(t *testing.T) {
+func disposableRuntime(t *testing.T) {
+	t.Helper()
 	if os.Getenv("HUTCH_TEST_DISPOSABLE") != "1" {
 		t.Skip("requires an explicitly disposable machine")
 	}
@@ -113,30 +114,62 @@ func TestRuntime(t *testing.T) {
 	if len(workers) != 1 || !strings.Contains(workers[0].Class, map[string]string{"firecracker": "/fc-", "gvisor": "/gvisor-"}[backend]) {
 		t.Fatalf("expected actual %s backend, got %+v", backend, workers)
 	}
+}
+
+func counterService(t *testing.T, id string) {
+	t.Helper()
+	inBox(t, id, `nohup node -e 'let n=0;require("net").createServer(s=>s.on("data",()=>s.write(String(++n)))).listen(19555,"0.0.0.0")' >/tmp/counter.log 2>&1 </dev/null &
+i=0; until ss -ltn | grep -q ':19555'; do i=$((i+1)); test "$i" -lt 100 || exit 1; sleep 0.1; done`)
+}
+
+func daemonReady(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+		var workers []api.Worker
+		err := call(ctx, api.WorkerList, struct{}{}, &workers)
+		cancel()
+		if err == nil && len(workers) == 1 && workers[0].Online {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("daemon did not recover after being killed")
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+func cleanupRuntimeBox(t *testing.T, id string) {
+	t.Helper()
+	t.Cleanup(func() {
+		if t.Failed() {
+			for _, path := range []string{"/var/lib/hutch/boxes/" + id + "/console.log", "/sys/fs/cgroup/hutch/" + id + "/memory.events"} {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				out, _ := exec.CommandContext(ctx, "ssh", os.Getenv("HUTCH_MACHINE"), "sudo", "tail", "-n", "60", path).CombinedOutput()
+				cancel()
+				t.Logf("%s: %s", path, out)
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := call(ctx, api.BoxRm, api.IDParams{ID: id}, nil); err != nil {
+			exec.CommandContext(ctx, "ssh", os.Getenv("HUTCH_MACHINE"), "sudo", "-n", "hutchd", "box", "rm", id).Run()
+		}
+	})
+}
+
+func TestRuntime(t *testing.T) {
+	disposableRuntime(t)
 	parent := fmt.Sprintf("runtime-%d", time.Now().Unix())
 	child := parent + "-child"
 	for _, id := range []string{parent, child} {
-		t.Cleanup(func() {
-			if t.Failed() {
-				for _, path := range []string{"/var/lib/hutch/boxes/" + id + "/console.log", "/sys/fs/cgroup/hutch/" + id + "/memory.events"} {
-					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-					out, _ := exec.CommandContext(ctx, "ssh", os.Getenv("HUTCH_MACHINE"), "sudo", "tail", "-n", "60", path).CombinedOutput()
-					cancel()
-					t.Logf("%s: %s", path, out)
-				}
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if err := call(ctx, api.BoxRm, api.IDParams{ID: id}, nil); err != nil {
-				exec.CommandContext(ctx, "ssh", os.Getenv("HUTCH_MACHINE"), "sudo", "-n", "hutchd", "box", "rm", id).Run()
-			}
-		})
+		cleanupRuntimeBox(t, id)
 	}
 	var original api.Box
 	mustCall(t, api.BoxBoot, api.BootParams{ID: parent, Image: "base", VCPUs: 1, MemMiB: 1024}, &original)
-	inBox(t, parent, `printf original > /workspace/marker
-nohup node -e 'let n=0;require("net").createServer(s=>s.on("data",()=>s.write(String(++n)))).listen(19555,"0.0.0.0")' >/tmp/counter.log 2>&1 </dev/null &
-i=0; until ss -ltn | grep -q ':19555'; do i=$((i+1)); test "$i" -lt 100 || exit 1; sleep 0.1; done`)
+	inBox(t, parent, "printf original > /workspace/marker")
+	counterService(t, parent)
 	if got := port(t, parent); got != "1" {
 		t.Fatalf("initial counter=%q", got)
 	}
@@ -173,19 +206,7 @@ test "$status" = 502 || { echo "expected proxy refusal, got $status" >&2; exit 1
 	t.Log("host files, metadata, gateway SSH, private network, lateral access, and proxy loopback refused")
 
 	remote(t, "systemctl", "kill", "--kill-who=main", "--signal=KILL", "hutchd")
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
-		err := call(ctx, api.WorkerList, struct{}{}, &workers)
-		cancel()
-		if err == nil && len(workers) == 1 && workers[0].Online {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("daemon did not recover after being killed")
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
+	daemonReady(t)
 	if got := port(t, parent); got != "3" {
 		t.Fatalf("daemon restart lost warm process state: %q", got)
 	}

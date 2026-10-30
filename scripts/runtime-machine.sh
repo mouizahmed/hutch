@@ -41,5 +41,10 @@ Host hutch-ci
 SSH
 chmod 600 "$HOME/.ssh/config"
 chmod +x dist/runtime/hutch dist/runtime/hutchd dist/runtime/hutch-guest dist/runtime/tmux-x86_64
+ci_daemon="$PWD/dist/runtime/hutchd"
+if [[ ${HUTCH_TEST_PREVIOUS:-} == 1 ]]; then
+  chmod +x dist/runtime/hutchd-previous
+  ci_daemon="$PWD/dist/runtime/hutchd-previous"
+fi
 dist/runtime/hutch setup hutch-ci --yes --no-bucket --disk none --image-size 32 \
-  --hutchd "$PWD/dist/runtime/hutchd" --images "$PWD/dist/runtime"
+  --hutchd "$ci_daemon" --images "$PWD/dist/runtime"

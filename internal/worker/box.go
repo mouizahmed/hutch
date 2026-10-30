@@ -406,7 +406,7 @@ func (w *Worker) Recover(ctx context.Context) {
 			continue
 		}
 		if b.GVisor != "" {
-			w.runsc(b.GVisor, "resume", b.ID)
+			w.runsc(b.GVisor, "resume", b.sandboxID())
 		} else {
 			w.running(b).api.Resume(ctx)
 		}
