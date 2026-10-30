@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/huh"
 	"github.com/hashicorp/yamux"
@@ -27,6 +29,7 @@ import (
 	"github.com/mouizahmed/hutch/internal/client"
 	"github.com/mouizahmed/hutch/internal/config"
 	"github.com/mouizahmed/hutch/internal/durable"
+	"github.com/mouizahmed/hutch/internal/release"
 	"github.com/mouizahmed/hutch/internal/rpc"
 	"github.com/mouizahmed/hutch/internal/version"
 )
@@ -294,10 +297,23 @@ func planStorage(p probe, disk string, imageGB int64, yes bool) (storagePlan, er
 
 // artifacts are what setup puts on the machine from this computer, built for its
 // architecture: hutchd, the Firecracker guest kernel, and Hutch's image layer.
-type artifacts struct{ hutchd, guest, kernel, tmux, terminfo string }
+type artifacts struct {
+	hutchd, guest, kernel, tmux, terminfo string
+	downloadDir                           string
+}
 
-func findArtifacts(arch, hutchd, images string) (artifacts, error) {
+func (a artifacts) close() {
+	if a.downloadDir != "" {
+		os.RemoveAll(a.downloadDir)
+	}
+}
+
+func findArtifacts(ctx context.Context, arch, hutchd, images string) (artifacts, error) {
 	goarch := map[string]string{"x86_64": "amd64", "aarch64": "arm64"}[arch]
+	if goarch == "" {
+		return artifacts{}, fmt.Errorf("unsupported machine architecture %q", arch)
+	}
+	explicit := hutchd != "" || images != ""
 	exe, err := selfPath()
 	if err != nil {
 		return artifacts{}, err
@@ -312,10 +328,20 @@ func findArtifacts(arch, hutchd, images string) (artifacts, error) {
 	if images == "" {
 		images = filepath.Join(dir, "..", "dist", "images")
 	}
-	a := artifacts{hutchd, filepath.Join(filepath.Dir(hutchd), "hutch-guest"), filepath.Join(images, "vmlinux-"+arch),
-		filepath.Join(images, "tmux-"+arch), filepath.Join(images, "terminfo.tar")}
+	a := artifacts{hutchd: hutchd, guest: filepath.Join(filepath.Dir(hutchd), "hutch-guest"), kernel: filepath.Join(images, "vmlinux-"+arch),
+		tmux: filepath.Join(images, "tmux-"+arch), terminfo: filepath.Join(images, "terminfo.tar")}
 	for _, f := range []string{a.hutchd, a.guest, a.kernel, a.tmux, a.terminfo} {
 		if _, err := os.Stat(f); err != nil {
+			if !explicit && release.IsVersion(version.String()) {
+				fmt.Printf("Downloading machine files for Hutch %s (%s)...\n", version.String(), goarch)
+				dir, err := release.NewClient().Machine(ctx, version.String(), goarch)
+				if err != nil {
+					return artifacts{}, fmt.Errorf("machine release: %w", err)
+				}
+				return artifacts{hutchd: filepath.Join(dir, "hutchd"), guest: filepath.Join(dir, "hutch-guest"),
+					kernel: filepath.Join(dir, "vmlinux-"+arch), tmux: filepath.Join(dir, "tmux-"+arch),
+					terminfo: filepath.Join(dir, "terminfo.tar"), downloadDir: dir}, nil
+			}
 			return a, fmt.Errorf("%s: build it with make linux images, or pass --hutchd and --images", f)
 		}
 	}
@@ -453,15 +479,15 @@ func (f *installFlags) register(c *cobra.Command, setup bool) {
 	c.Flags().BoolVar(&f.yes, "yes", false, "take every recommended answer without asking")
 	c.Flags().StringVar(&f.disk, "disk", "", "blank disk to format for /var/lib/hutch (default: the only blank disk; none: an image file)")
 	c.Flags().Int64Var(&f.imageSize, "image-size", 0, "size in GB of /var/lib/hutch.img when there's no blank disk (default: 80% of free space)")
-	c.Flags().StringVar(&f.hutchd, "hutchd", "", "hutchd binary for the machine (default: linux-<arch>/hutchd next to this program)")
-	c.Flags().StringVar(&f.images, "images", "", "directory with vmlinux-<arch>, tmux-<arch> and terminfo.tar (default: dist/images in this checkout)")
+	c.Flags().StringVar(&f.hutchd, "hutchd", "", "local hutchd binary for the machine (default: download the matching release, or use build output)")
+	c.Flags().StringVar(&f.images, "images", "", "local directory with vmlinux-<arch>, tmux-<arch> and terminfo.tar")
 	if setup {
 		c.Flags().BoolVar(&f.noBucket, "no-bucket", false, "no bucket for now (add one later with hutch machine bucket)")
 	}
 }
 
 // prepare probes and checks a machine and plans its storage and files.
-func prepare(host string, f installFlags) (remote, probe, artifacts, storagePlan, error) {
+func prepare(ctx context.Context, host string, f installFlags) (remote, probe, artifacts, storagePlan, error) {
 	r := remote{host}
 	fmt.Printf("Connecting to %s...\n", host)
 	p, err := r.probe()
@@ -471,7 +497,7 @@ func prepare(host string, f installFlags) (remote, probe, artifacts, storagePlan
 	if err := checkMachine(p); err != nil {
 		return r, p, artifacts{}, storagePlan{}, err
 	}
-	a, err := findArtifacts(p.get("arch"), f.hutchd, f.images)
+	a, err := findArtifacts(ctx, p.get("arch"), f.hutchd, f.images)
 	if err != nil {
 		return r, p, a, storagePlan{}, err
 	}
@@ -480,6 +506,9 @@ func prepare(host string, f installFlags) (remote, probe, artifacts, storagePlan
 		p.blocks, disk = nil, ""
 	}
 	st, err := planStorage(p, disk, f.imageSize, f.yes)
+	if err != nil {
+		a.close()
+	}
 	return r, p, a, st, err
 }
 
@@ -497,10 +526,11 @@ hutch doctor. Run it again to update hutchd; boxes and state are kept.`,
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			host := args[0]
-			r, p, a, st, err := prepare(host, f)
+			r, p, a, st, err := prepare(cmd.Context(), host, f)
 			if err != nil {
 				return err
 			}
+			defer a.close()
 			if err := install(r, p, a, st, true); err != nil {
 				return err
 			}
@@ -571,16 +601,21 @@ func upgradeCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			a, err := findArtifacts(p.get("arch"), f.hutchd, f.images)
+			have, want := p.get("hutchd"), version.String()
+			// A build with uncommitted changes isn't identified by its version.
+			if have == want && want != "dev" && !strings.HasSuffix(want, "-dirty") && !force {
+				// The file may have been uploaded by an interrupted upgrade while
+				// the old process is still running. Ask the actual daemon as well.
+				if running, err := daemonVersion(cmd.Context(), host); err == nil && running == want {
+					fmt.Printf("The machine already runs hutchd %s.\n", have)
+					return nil
+				}
+			}
+			a, err := findArtifacts(cmd.Context(), p.get("arch"), f.hutchd, f.images)
 			if err != nil {
 				return err
 			}
-			have, want := p.get("hutchd"), version.String()
-			// A build with uncommitted changes isn't identified by its version.
-			if have == want && !strings.HasSuffix(want, "-dirty") && !force {
-				fmt.Printf("The machine already runs hutchd %s.\n", have)
-				return nil
-			}
+			defer a.close()
 			fmt.Printf("hutchd %s → %s\n", have, want)
 			if err := install(r, p, a, storagePlan{}, true); err != nil {
 				return err
@@ -599,6 +634,19 @@ func upgradeCommand() *cobra.Command {
 	return c
 }
 
+func daemonVersion(ctx context.Context, host string) (string, error) {
+	sess, err := client.Dial(host, client.Socket)
+	if err != nil {
+		return "", err
+	}
+	defer sess.Close()
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var h api.Handshake
+	err = rpc.Call(ctx, sess, api.Hello, api.Handshake{Protocol: api.Protocol, Version: version.String()}, &h)
+	return h.Version, err
+}
+
 func restoreCommand() *cobra.Command {
 	var f installFlags
 	c := &cobra.Command{
@@ -610,10 +658,11 @@ first time you use them. Then the new machine is your machine.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			host := args[0]
-			r, p, a, st, err := prepare(host, f)
+			r, p, a, st, err := prepare(cmd.Context(), host, f)
 			if err != nil {
 				return err
 			}
+			defer a.close()
 			if p.get("state") == "yes" {
 				return fmt.Errorf("%s already has Hutch state in /var/lib/hutch/state; restore onto a fresh machine", host)
 			}
