@@ -38,6 +38,7 @@ commands:
   box boot <id> [--image NAME] [--cpus N] [--mem MIB]   cold boot a new box from an image
   box fork <src> <id>                                    new box from a sleeping box's snapshot
   box sleep | wake | archive | rm <id>
+  box checkpoint <id> | --running                       checkpoint without stopping boxes
   box ls
   box exec <id> [--user NAME] -- <command> [args...]
   box console <id>                                       print the serial console log
@@ -144,6 +145,25 @@ func dispatch(ctx context.Context, root, fcVersion, socket string, args []string
 			return err
 		}
 		return done(w.Wake(ctx, id))
+	case "checkpoint":
+		if len(rest) != 1 {
+			return fmt.Errorf("usage: hutchd box checkpoint <id> | --running")
+		}
+		if rest[0] != "--running" {
+			return done(w.Checkpoint(ctx, rest[0]))
+		}
+		boxes, err := w.List()
+		if err != nil {
+			return err
+		}
+		for _, b := range boxes {
+			if b.State == worker.Running && w.Alive(b) {
+				if err := done(w.Checkpoint(ctx, b.ID)); err != nil {
+					return fmt.Errorf("checkpoint %s: %w", b.ID, err)
+				}
+			}
+		}
+		return nil
 	case "archive":
 		id, err := oneArg(flag.NewFlagSet("archive", flag.ExitOnError), rest, "box archive <id>")
 		if err != nil {

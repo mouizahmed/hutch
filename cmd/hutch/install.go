@@ -462,6 +462,14 @@ fi`, bk, buildkitVersion, goarch, buildkitSHA256[arch]))); err != nil {
 	}
 	unit := "sudo tee /etc/systemd/system/hutchd.service >/dev/null <<'UNIT'\n" + hutchdUnit + "UNIT\nsudo systemctl daemon-reload && sudo systemctl enable -q hutchd"
 	if start {
+		if p.get("state") == "yes" {
+			// The uploaded binary understands the current checkpoint operation,
+			// even when the old daemon predates it. Per-box file locks coordinate
+			// this with that daemon's own checkpoints. Failure leaves it running.
+			if err := step("checkpointed running boxes", r.run("sudo /usr/local/bin/hutchd box checkpoint --running")); err != nil {
+				return err
+			}
+		}
 		unit += " && sudo systemctl restart hutchd && for i in $(seq 50); do [ -S /run/hutch/api.sock ] && exit 0; sleep 0.2; done; echo 'hutchd did not start:'; sudo journalctl -u hutchd -n 20 --no-pager; exit 1"
 	}
 	return step("hutchd service", r.run(unit))
