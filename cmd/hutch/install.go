@@ -3,9 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base32"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,7 +21,6 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
-	"rsc.io/qr"
 
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/bucket"
@@ -450,8 +447,6 @@ type installFlags struct {
 	images       string
 	imageSize    int64
 	noBucket     bool
-	noNotify     bool
-	ntfy         string
 }
 
 func (f *installFlags) register(c *cobra.Command, setup bool) {
@@ -462,8 +457,6 @@ func (f *installFlags) register(c *cobra.Command, setup bool) {
 	c.Flags().StringVar(&f.images, "images", "", "directory with vmlinux-<arch>, tmux-<arch> and terminfo.tar (default: dist/images in this checkout)")
 	if setup {
 		c.Flags().BoolVar(&f.noBucket, "no-bucket", false, "no bucket for now (add one later with hutch machine bucket)")
-		c.Flags().BoolVar(&f.noNotify, "no-notify", false, "no ntfy notifications")
-		c.Flags().StringVar(&f.ntfy, "ntfy", "https://ntfy.sh", "ntfy server for notifications")
 	}
 }
 
@@ -494,11 +487,11 @@ func setupCommand() *cobra.Command {
 	var f installFlags
 	c := &cobra.Command{
 		Use:   "setup <ssh-host>",
-		Short: "Set up your machine: hutchd, checks, notifications, and an optional bucket",
+		Short: "Set up your machine: hutchd, checks, and an optional bucket",
 		Long: `Set up a machine you reach over SSH to run your boxes. It checks the machine,
 installs what's missing (packages, Firecracker, gVisor, BuildKit, hutchd as a
 service, the default image),
-makes it your machine, offers ntfy notifications and a bucket, and ends with
+makes it your machine, offers a bucket, and ends with
 hutch doctor. Run it again to update hutchd; boxes and state are kept.`,
 		GroupID: "setup",
 		Args:    cobra.ExactArgs(1),
@@ -523,11 +516,6 @@ hutch doctor. Run it again to update hutchd; boxes and state are kept.`,
 			interactive := term.IsTerminal(int(os.Stdin.Fd())) && !f.yes
 			if p.get("state") != "yes" && !f.noBucket && interactive {
 				if err := offerBucket(cmd, sess); err != nil {
-					return err
-				}
-			}
-			if !f.noNotify {
-				if err := offerNtfy(cmd, sess, f.ntfy, f.yes || !interactive); err != nil {
 					return err
 				}
 			}
@@ -564,73 +552,6 @@ func offerBucket(cmd *cobra.Command, sess *yamux.Session) error {
 	}
 	fmt.Printf("  ✓ its details, sealed with your passphrase, in %s (restoring asks only for the passphrase)\n", recoveryPath())
 	return nil
-}
-
-// offerNtfy sets notify.command to publish to a new private ntfy topic, shows how
-// to subscribe, and sends a test notification through the machine.
-func offerNtfy(cmd *cobra.Command, sess *yamux.Session, server string, yes bool) error {
-	cfg, err := config.ReadFile(config.User, config.UserPath())
-	if err != nil {
-		return err
-	}
-	if config.New(cfg).String("notify.command") != "" {
-		fmt.Println("\nNotifications: notify.command is already set.")
-		if err := rpc.Call(cmd.Context(), sess, api.NotifyTest, struct{}{}, nil); err != nil {
-			return fmt.Errorf("test notification: %w", err)
-		}
-		fmt.Println("  ✓ sent a test notification from the machine")
-		return nil
-	}
-	if !yes && !confirm("\nSend notifications to your phone and desktop with ntfy (a private topic on "+server+")?") {
-		fmt.Println("  Notifications show in the TUI while it's open; set notify.command for any other notifier.")
-		return nil
-	}
-	b := make([]byte, 15)
-	rand.Read(b)
-	topic := "hutch-" + strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b))
-	url := strings.TrimRight(server, "/") + "/" + topic
-	command := `curl -fsS -o /dev/null -H "Title: $HUTCH_TITLE" -H "Tags: $HUTCH_EVENT" -d "$HUTCH_MESSAGE" ` + url
-	if err := editLayer(cmd.Context(), sess, config.User, func(text []byte) ([]byte, error) {
-		path, _ := config.SplitPath("notify.command")
-		return config.Set(withVersion(text), path, command)
-	}); err != nil {
-		return err
-	}
-	fmt.Printf("\nNotifications go to %s\n", url)
-	fmt.Println("Subscribe in the ntfy app (phone: scan this; desktop: open the link) to that topic. Anyone with the name can read it, so keep it private.")
-	printQR(url)
-	if err := rpc.Call(cmd.Context(), sess, api.NotifyTest, struct{}{}, nil); err != nil {
-		return fmt.Errorf("test notification: %w", err)
-	}
-	fmt.Println("  ✓ sent a test notification from the machine")
-	return nil
-}
-
-func printQR(text string) {
-	code, err := qr.Encode(text, qr.M)
-	if err != nil {
-		return
-	}
-	black := func(x, y int) bool { return x >= 0 && y >= 0 && x < code.Size && y < code.Size && code.Black(x, y) }
-	var sb strings.Builder
-	for y := -2; y < code.Size+2; y += 2 {
-		sb.WriteString("  ")
-		for x := -2; x < code.Size+2; x++ {
-			top, bottom := black(x, y), black(x, y+1)
-			switch {
-			case top && bottom:
-				sb.WriteString(" ")
-			case top:
-				sb.WriteString("▄")
-			case bottom:
-				sb.WriteString("▀")
-			default:
-				sb.WriteString("█")
-			}
-		}
-		sb.WriteString("\n")
-	}
-	fmt.Print(sb.String())
 }
 
 func upgradeCommand() *cobra.Command {

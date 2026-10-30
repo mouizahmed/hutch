@@ -1,19 +1,15 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/signal"
-	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -32,16 +28,6 @@ import (
 // session, shell-1, shell-2, ...
 const agentSession = "hutch"
 
-// tmuxAttach attaches to a shell session, creating it in dir. The box's tmux config
-// keeps windows open after their command exits, for threads; a shell should close.
-func tmuxAttach(session, dir string) []string {
-	argv := []string{"tmux", "new-session", "-A", "-s", session}
-	if dir != "" {
-		argv = append(argv, "-c", dir)
-	}
-	return append(argv, ";", "set-option", "-w", "remain-on-exit", "off")
-}
-
 func sessionCommands() []*cobra.Command {
 	attach := &cobra.Command{
 		Use:     "attach <box>[/<thread>]",
@@ -56,88 +42,41 @@ func sessionCommands() []*cobra.Command {
 			argv := []string{"tmux", "new-session", "-A", "-s", agentSession}
 			if n > 0 {
 				argv = viewArgv(n)
+				// An agent that exited comes back through its picker.
+				if b, err := findBox(ctx, sess, box); err == nil {
+					for _, t := range b.Threads {
+						if t.N == n && t.Agent != "" && t.State == api.ThreadExited {
+							if err := rpc.Call(ctx, sess, api.ThreadResume, api.ThreadTarget{Box: box, N: n}, nil); err != nil {
+								return err
+							}
+						}
+					}
+				}
 			}
 			return terminal(ctx, sess, box, argv)
 		}),
 	}
 
-	var newShell, list bool
 	shell := &cobra.Command{
 		Use:     "shell <box>",
-		Short:   "Reattach your last shell in a box, or open or list shells",
+		Short:   "Open a thread running bash in a box, and attach to it",
 		GroupID: "boxes",
 		Args:    cobra.ExactArgs(1),
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
-			shells, err := listShells(ctx, sess, args[0])
-			if err != nil {
-				return err
-			}
-			if list {
-				if len(shells) == 0 {
-					fmt.Println("no shells")
-				}
-				for _, s := range shells {
-					fmt.Println(s.name)
-				}
-				return nil
-			}
-			name := "shell-1"
-			switch {
-			case newShell && len(shells) > 0:
-				name = fmt.Sprintf("shell-%d", shells[len(shells)-1].n+1)
-			case len(shells) > 0:
-				name = mostRecent(shells).name
-			}
-			return terminal(ctx, sess, args[0], tmuxAttach(name, "/workspace"))
+			return openShell(ctx, sess, args[0])
 		}),
 	}
-	shell.Flags().BoolVar(&newShell, "new", false, "open a new shell")
-	shell.Flags().BoolVar(&list, "list", false, "list shells")
-	shell.MarkFlagsMutuallyExclusive("new", "list")
 	return []*cobra.Command{attach, shell}
 }
 
-type shellSession struct {
-	name     string
-	n        int
-	attached int64
-}
-
-func listShells(ctx context.Context, sess *yamux.Session, box string) ([]shellSession, error) {
-	var out bytes.Buffer
-	_, err := rpc.Exec(ctx, sess, api.BoxExec, api.ExecParams{ID: box, Argv: []string{"sh", "-c",
-		`tmux list-sessions -F '#{session_name} #{session_last_attached}' 2>/dev/null || true`}}, &out, io.Discard)
-	if err != nil {
-		return nil, err
+// openShell starts a thread running bash in a box and attaches to it; the thread
+// closes when bash exits.
+func openShell(ctx context.Context, sess *yamux.Session, box string) error {
+	var t api.Thread
+	if err := rpc.Call(ctx, sess, api.ThreadNew, api.ThreadParams{Box: box, Cmd: "bash"}, &t); err != nil {
+		return err
 	}
-	var shells []shellSession
-	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
-		f := strings.Fields(line)
-		if len(f) == 0 || !strings.HasPrefix(f[0], "shell-") {
-			continue
-		}
-		n, err := strconv.Atoi(strings.TrimPrefix(f[0], "shell-"))
-		if err != nil {
-			continue
-		}
-		s := shellSession{name: f[0], n: n}
-		if len(f) > 1 {
-			s.attached, _ = strconv.ParseInt(f[1], 10, 64)
-		}
-		shells = append(shells, s)
-	}
-	sort.Slice(shells, func(i, j int) bool { return shells[i].n < shells[j].n })
-	return shells, nil
-}
-
-func mostRecent(shells []shellSession) shellSession {
-	best := shells[0]
-	for _, s := range shells[1:] {
-		if s.attached > best.attached {
-			best = s
-		}
-	}
-	return best
+	return terminal(ctx, sess, box, viewArgv(t.N))
 }
 
 // terminal runs argv on a pseudo-terminal in the box, connected to this terminal.

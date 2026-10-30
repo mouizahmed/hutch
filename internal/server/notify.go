@@ -56,57 +56,12 @@ func (s *Server) notifyTest(ctx context.Context, _ json.RawMessage, _ *rpc.Out) 
 	return nil, runNotify(cmd, "test", "", "Hutch", "Notifications from your machine work.")
 }
 
-// threadWatch is a thread's notification state: whether it has worked since it
-// last notified, and since when it has stopped.
-type threadWatch struct {
-	worked  bool
-	stopped time.Time
-}
-
-// watchThreads notifies once when a thread that was working has been waiting or
-// exited for notify.waiting_after, so a short pause between steps doesn't.
-func (s *Server) watchThreads(box string, states map[int]api.ThreadState) {
-	cfg, err := s.settings()
-	if err != nil || len(states) == 0 {
-		return
-	}
-	after := cfg.Duration("notify.waiting_after")
-	now := time.Now()
-	var due []api.ThreadState
-	s.mu.Lock()
-	for n, t := range states {
-		key := fmt.Sprintf("%s/%d", box, n)
-		w := s.threadWatch[key]
-		if w == nil {
-			w = &threadWatch{}
-			s.threadWatch[key] = w
-		}
-		switch t.State {
-		case api.ThreadWorking:
-			w.worked, w.stopped = true, time.Time{}
-		case api.ThreadWaiting, api.ThreadExited:
-			if !w.worked {
-				continue
-			}
-			if w.stopped.IsZero() {
-				w.stopped = now
-			}
-			if now.Sub(w.stopped) >= after {
-				w.worked = false
-				due = append(due, t)
-			}
-		}
-	}
-	s.mu.Unlock()
-	for _, t := range due {
-		var title string
-		if stored, _, err := s.store.thread(box, t.N); err == nil {
-			title = stored.Title
-		}
-		if t.State == api.ThreadExited {
-			s.notify("exited", box, "Agent exited", fmt.Sprintf("%s/%d exited: %s", box, t.N, title))
-		} else {
-			s.notify("waiting", box, "Agent waiting", fmt.Sprintf("%s/%d is waiting for you: %s", box, t.N, title))
-		}
+// alert tells you an agent wants you: the user's notify command, and each TUI.
+func (s *Server) alert(t api.Thread) {
+	s.events.send(api.Event{Type: api.EventAlert, Thread: &t})
+	if t.State == api.ThreadExited {
+		s.notify("exited", t.Box, "Agent exited", fmt.Sprintf("%s/%d exited: %s", t.Box, t.N, t.Title))
+	} else {
+		s.notify("bell", t.Box, "Agent wants you", fmt.Sprintf("%s/%d: %s", t.Box, t.N, t.Title))
 	}
 }

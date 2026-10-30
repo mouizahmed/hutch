@@ -72,7 +72,6 @@ func templateParams(repo *config.Repo, cfg *config.Config, needCommit bool) (api
 		DiskBytes:    cfg.Size("disk.size"),
 		Idle:         api.Idle{Timeout: cfg.Duration("idle_timeout"), CPUThreshold: cfg.Percent("idle.cpu_threshold")},
 		Credentials:  cfg.List("credentials"),
-		PushInterval: cfg.Duration("git.push_interval"),
 		Allow:        cfg.List("network.allow"),
 		BuildTimeout: cfg.Duration("template.build_timeout"),
 		QuietTimeout: cfg.Duration("template.quiet_timeout"),
@@ -173,13 +172,6 @@ func initCommand() *cobra.Command {
 			if err := os.WriteFile(filepath.Join(dir, "SETUP_PROMPT.md"), prompt.Bytes(), 0o644); err != nil {
 				return err
 			}
-			ignore := filepath.Join(dir, ".gitignore")
-			if _, err := os.Stat(ignore); errors.Is(err, os.ErrNotExist) {
-				if err := os.WriteFile(ignore, []byte("worktrees/\n"), 0o644); err != nil {
-					return err
-				}
-			}
-
 			fmt.Printf("\nProject %s (boxes named %s-…)\n", repo.ID, proj.Slug)
 			if boxErr != nil {
 				fmt.Fprintf(os.Stderr, "warning: the template box isn't ready: %v\n", boxErr)
@@ -263,6 +255,9 @@ func templateCommands() *cobra.Command {
 			if cfg, err = confirmSettings(ctx, sess, repo, cfg, buildFlags, false); err != nil {
 				return err
 			}
+			if err := takeTemplateWork(ctx, sess, repo); err != nil {
+				return err
+			}
 			p, err := templateParams(repo, cfg, true)
 			if err != nil {
 				return err
@@ -289,6 +284,9 @@ func templateCommands() *cobra.Command {
 				return err
 			}
 			if cfg, err = confirmSettings(ctx, sess, repo, cfg, snapFlags, false); err != nil {
+				return err
+			}
+			if err := takeTemplateWork(ctx, sess, repo); err != nil {
 				return err
 			}
 			p, err := templateParams(repo, cfg, true)
@@ -324,7 +322,7 @@ func templateCommands() *cobra.Command {
 			if err := rpc.CallOutput(ctx, sess, api.TemplateBox, p, &b, os.Stderr, os.Stderr); err != nil {
 				return err
 			}
-			return terminal(ctx, sess, b.ID, tmuxAttach("shell-1", "/workspace"))
+			return openShell(ctx, sess, b.ID)
 		}),
 	}
 
@@ -368,7 +366,7 @@ func templateCommands() *cobra.Command {
 }
 
 // templatePrompt tells an agent on the template box what its changes are for.
-const templatePrompt = `You are in this project's template box. Hutch builds every box of the project from the recipe in .hutch/: an image from .hutch/Dockerfile (its build context is .hutch/), services from .hutch/services, then on-create.sh and verify.sh as dev in /workspace; on-create.sh also runs in each new box. Make this change in the recipe, try the commands here, and commit it on the current branch (hutch/template), which Hutch pushes. Anything changed outside the recipe is thrown away at the next build.
+const templatePrompt = `You are in this project's template box. Hutch builds every box of the project from the recipe in .hutch/: an image from .hutch/Dockerfile (its build context is .hutch/), services from .hutch/services, then on-create.sh and verify.sh as dev in /workspace; on-create.sh also runs in each new box. Make this change in the recipe, try the commands here, and commit it with git (a detached HEAD is fine; don't push). When the user builds the template, Hutch commits any recipe changes you left uncommitted, brings your commits into their checkout, merges them into their branch after they review them, and builds that commit in a fresh VM. Anything changed outside the recipe is thrown away at that build.
 
 `
 
@@ -398,6 +396,78 @@ func templateThread(ctx context.Context, sess *yamux.Session, cfg *config.Config
 	}
 	fmt.Printf("%s/%d %s started on the template box\n  hutch attach %s/%d\n", t.Box, t.N, t.Agent, t.Box, t.N)
 	return nil
+}
+
+// templateBranch is the local branch a template box's work arrives on.
+const templateBranch = "hutch/template"
+
+// templateWork brings the project's template box's recipe work into the
+// repository at root, without touching the checkout: recipe changes left
+// uncommitted in the box are committed there, and its HEAD lands on the local
+// branch hutch/template. It returns the commits that branch has and HEAD
+// doesn't, one line each; none without a template box.
+func templateWork(ctx context.Context, sess *yamux.Session, project, root string) ([]string, error) {
+	boxes, err := listBoxes(ctx, sess)
+	if err != nil {
+		return nil, err
+	}
+	i := slices.IndexFunc(boxes, func(b api.Box) bool { return b.Kind == api.BoxTemplate && b.Project == project })
+	if i < 0 {
+		return nil, nil
+	}
+	box := boxes[i].ID
+	script := `set -e
+git add -A -- .hutch
+if ! git diff --cached --quiet; then
+  if git config user.email >/dev/null; then git commit -q -m "$3"
+  else git -c "user.name=$1" -c "user.email=$2" commit -q -m "$3"; fi
+fi
+git rev-parse HEAD`
+	var out, stderr bytes.Buffer
+	code, err := rpc.Exec(ctx, sess, api.BoxExec, api.ExecParams{ID: box, Dir: "/workspace",
+		Argv: []string{"sh", "-c", script, "sh", gitGlobal("user.name"), gitGlobal("user.email"), templateCommit}}, &out, &stderr)
+	if err == nil && code != 0 {
+		err = errors.New(strings.TrimSpace(stderr.String()))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("commit the template box's recipe changes: %w", err)
+	}
+	head := strings.TrimSpace(out.String())
+	if err := fetchBox(ctx, sess, box, root, "HEAD", head); err != nil {
+		return nil, err
+	}
+	if _, err := git(root, "branch", "-f", templateBranch, head); err != nil {
+		return nil, err
+	}
+	log, err := git(root, "log", "--format=%h %s", "HEAD.."+templateBranch)
+	if err != nil || log == "" {
+		return nil, err
+	}
+	return strings.Split(log, "\n"), nil
+}
+
+// mergeTemplate merges hutch/template into the checkout at root. A merge that
+// fails is undone, leaving the checkout as it was.
+func mergeTemplate(root string) error {
+	if _, err := git(root, "merge", "-q", "--no-edit", templateBranch); err != nil {
+		git(root, "merge", "--abort")
+		return fmt.Errorf("%w\nNothing was merged and the template box is kept. Merge its work yourself (git merge %s), then build again", err, templateBranch)
+	}
+	return nil
+}
+
+// takeTemplateWork merges the template box's work into this checkout before a
+// build replaces the box, after you review it; without a terminal it refuses.
+func takeTemplateWork(ctx context.Context, sess *yamux.Session, repo *config.Repo) error {
+	commits, err := templateWork(ctx, sess, repo.ID, repo.Root)
+	if err != nil || len(commits) == 0 {
+		return err
+	}
+	fmt.Printf("The template box has work this checkout doesn't:\n  %s\n", strings.Join(commits, "\n  "))
+	if !term.IsTerminal(int(os.Stdin.Fd())) || !confirm("Merge it into your branch? (a build replaces the template box)") {
+		return fmt.Errorf("not built: the template box's work isn't in this checkout (it's on %s)", templateBranch)
+	}
+	return mergeTemplate(repo.Root)
 }
 
 // syncSecrets uploads the files .hutch/uploads.txt lists when they differ from the

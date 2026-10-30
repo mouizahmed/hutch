@@ -139,6 +139,8 @@ func setupCommands() []*cobra.Command {
 func ago(t time.Time) string {
 	d := time.Since(t)
 	switch {
+	case t.IsZero():
+		return ""
 	case d < time.Minute:
 		return "just now"
 	case d < time.Hour:

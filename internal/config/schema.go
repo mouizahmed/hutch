@@ -93,10 +93,6 @@ var Keys = []*Key{
 	{Path: "network.domains", Kind: List, Layers: project,
 		Doc: "domains boxes may reach when network.egress is allowlist"},
 
-	{Path: "git.merge_check", Kind: Duration, Default: "10m", Min: "1m", Max: "24h", Layers: machine,
-		Doc: "how often the machine checks whether boxes' branches are merged (GitHub pull requests, or contained in the base)"},
-	{Path: "git.push_interval", Kind: Duration, Default: "1m", Min: "10s", Max: "1h", Layers: project,
-		Doc: "a box pushes its branch at most this often after new commits"},
 	{Path: "template.build_timeout", Kind: Duration, Default: "1h", Min: "1m", Max: "24h", Layers: project,
 		Doc: "a template build that runs longer fails"},
 	{Path: "template.quiet_timeout", Kind: Duration, Default: "2m", Min: "1s", Max: "1h", Layers: project,
@@ -130,6 +126,8 @@ var Keys = []*Key{
 		Doc: "how often the machine reads awake boxes' thread states, between fuller checks"},
 	{Path: "threads.working_window", Kind: Duration, Default: "5s", Min: "1s", Max: "10m", Layers: machine,
 		Doc: "a thread with output this recent counts as working"},
+	{Path: "threads.redraw_window", Kind: Duration, Default: "2s", Min: "0s", Max: "1m", Layers: machine,
+		Doc: "output this soon after a terminal attaches to a box is its apps redrawing, not work"},
 
 	{Path: "checkpoint.first_after", Kind: Duration, Default: "2m", Min: "30s", Max: "24h", Layers: machine,
 		Doc: "a new box takes its first checkpoint after this long active, so it soon has a snapshot to recover from"},
@@ -155,8 +153,6 @@ var Keys = []*Key{
 		Doc: "a box awake this long without a break is put to sleep, even mid-task (the machine's value caps yours)"},
 	{Path: "notify.command", Kind: String, Layers: user,
 		Doc: "command the machine runs on events, with HUTCH_EVENT, HUTCH_BOX, HUTCH_TITLE, HUTCH_MESSAGE set"},
-	{Path: "notify.waiting_after", Kind: Duration, Default: "2m", Min: "0s", Max: "24h", Layers: user,
-		Doc: "a thread that stops working notifies you once it has waited or been exited this long"},
 
 	{Path: "tui.list_width", Kind: Int, Default: int64(44), Min: "24", Max: "120", Layers: user,
 		Doc: "the TUI's list width in columns, beside the terminal"},

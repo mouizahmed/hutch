@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -243,53 +241,6 @@ func (s *Server) admitWake(ctx context.Context, box string) (func(), error) {
 			return nil, ctx.Err()
 		case <-time.After(10 * time.Second):
 		}
-	}
-}
-
-// resumeThreads restarts a box's agents after a cold boot, each in its own tmux
-// window and session, through its adapter's resume command.
-func (s *Server) resumeThreads(ctx context.Context, w *workerConn, box string) {
-	threads, err := s.store.threads()
-	if err != nil {
-		return
-	}
-	set, err := s.adapters()
-	if err != nil {
-		return
-	}
-	started := false
-	for _, t := range threads[box] {
-		if t.SessionID == "" {
-			continue
-		}
-		_, autonomy, err := s.store.thread(box, t.N)
-		if err != nil {
-			continue
-		}
-		argv, err := set.ResumeArgv(t.Agent, autonomy, t.SessionID)
-		if err != nil {
-			continue
-		}
-		target := fmt.Sprintf("%s:%d", tmuxSession, t.N)
-		var cmd []string
-		if started {
-			cmd = append([]string{"tmux", "new-window", "-d", "-t", target, "-n", t.Agent, "-c", workspace, "--"}, argv...)
-		} else {
-			cmd = append([]string{"tmux", "new-session", "-d", "-s", tmuxSession, "-x", "200", "-y", "50", "-n", t.Agent, "-c", workspace,
-				"-P", "-F", "#{window_index}", "--"}, argv...)
-		}
-		out, code, err := s.boxRun(ctx, w, box, cmd...)
-		if err != nil || code != 0 {
-			log.Printf("resume %s/%d: exit %d %v", box, t.N, code, err)
-			continue
-		}
-		if !started {
-			if idx, _ := strconv.Atoi(strings.TrimSpace(out)); idx != t.N {
-				s.boxRun(ctx, w, box, "tmux", "move-window", "-s", fmt.Sprintf("%s:%d", tmuxSession, idx), "-t", target)
-			}
-			started = true
-		}
-		s.store.event(box, api.ThreadResume, strconv.Itoa(t.N))
 	}
 }
 

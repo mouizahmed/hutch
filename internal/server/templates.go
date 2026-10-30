@@ -427,7 +427,7 @@ func (s *Server) templateBox(ctx context.Context, params json.RawMessage, out *r
 		if err != nil {
 			return b, err
 		}
-		b.Branch, b.Base, err = s.checkoutBranch(ctx, w, id, "hutch/template", "", p.PushInterval, stderr)
+		b.Branch, b.Base, err = s.checkoutBranch(ctx, w, id, "hutch/template", "", stderr)
 		return b, err
 	}
 	v := versions[0]
@@ -446,7 +446,7 @@ func (s *Server) templateBox(ctx context.Context, params json.RawMessage, out *r
 	if err := s.applyUserLayer(ctx, w, id, p.Credentials); err != nil {
 		return nil, err
 	}
-	b.Branch, b.Base, err = s.checkoutBranch(ctx, w, id, "hutch/template", "", p.PushInterval, stderr)
+	b.Branch, b.Base, err = s.checkoutBranch(ctx, w, id, "hutch/template", "", stderr)
 	return b, err
 }
 
@@ -459,13 +459,6 @@ func (s *Server) forkProject(ctx context.Context, p api.ForkParams, stdout, stde
 	}
 	if len(versions) == 0 {
 		return api.Box{}, errors.New("this project has no template yet: hutch template snapshot (or hutch new --from base)")
-	}
-	if p.Branch != "" {
-		if owner, err := s.store.branchOwner(p.Project, p.Branch); err != nil {
-			return api.Box{}, err
-		} else if owner != "" {
-			return api.Box{}, fmt.Errorf("%s already has %s; a branch belongs to one box (hutch local %s gives it back)", owner, p.Branch, owner)
-		}
 	}
 	v := versions[0]
 	w, release, source, err := s.versionWorker(ctx, v, p.ID, stderr)
@@ -495,7 +488,7 @@ func (s *Server) forkProject(ctx context.Context, p api.ForkParams, stdout, stde
 			return api.Box{}, err
 		}
 	} else {
-		b.Branch, b.Base, err = s.checkoutBranch(ctx, w, b.ID, "hutch/"+b.ID, p.Base, p.PushInterval, stderr)
+		b.Branch, b.Base, err = s.checkoutBranch(ctx, w, b.ID, "hutch/"+b.ID, p.Base, stderr)
 	}
 	if err != nil {
 		return b, err
@@ -526,9 +519,9 @@ func (s *Server) writeSecrets(ctx context.Context, w *workerConn, box string, fi
 }
 
 // checkoutBranch puts a box's /workspace on its own branch, continuing it if it is
-// already on origin, else starting it from base (empty: the default branch), and
-// sets the guest to push it after commits. It returns the branch and base.
-func (s *Server) checkoutBranch(ctx context.Context, w *workerConn, box, branch, base string, interval time.Duration, stderr io.Writer) (string, string, error) {
+// already on origin, else starting it from base (empty: the default branch). It
+// returns the branch and base.
+func (s *Server) checkoutBranch(ctx context.Context, w *workerConn, box, branch, base string, stderr io.Writer) (string, string, error) {
 	var out bytes.Buffer
 	if err := s.run(ctx, w, box, api.ExecParams{Dir: workspace, Argv: []string{"sh", "-ec", `git fetch -q origin
 base="${2:-$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's,^origin/,,')}"
@@ -539,7 +532,7 @@ echo "$base"`, "sh", branch, base}}, &out, stderr); err != nil {
 		return "", "", fmt.Errorf("checkout: %w", err)
 	}
 	base = strings.TrimSpace(out.String())
-	return branch, base, s.setPush(ctx, w, box, branch, base, interval)
+	return branch, base, s.store.setBoxGit(box, branch, base)
 }
 
 // removeBox deletes a box on its worker and in the bucket, and forgets it. A box
@@ -573,6 +566,9 @@ func (s *Server) removeBox(ctx context.Context, id string) error {
 		s.deletePrefix(ctx, store.Prefix)
 	}
 	s.store.event(id, api.BoxRm, "removed")
+	s.mu.Lock()
+	delete(s.threadStates, id)
+	s.mu.Unlock()
 	return s.store.deleteBox(id)
 }
 

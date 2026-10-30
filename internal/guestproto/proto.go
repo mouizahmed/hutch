@@ -40,9 +40,10 @@ type Request struct {
 }
 
 // StatusParams asks for hashes of files the host watches for changes (credentials
-// an agent refreshes). Older guests ignore it.
+// an agent refreshes), and for the workspace's git status. Older guests ignore it.
 type StatusParams struct {
 	Watch []string `json:"watch,omitempty"`
+	Git   bool     `json:"git,omitempty"`
 }
 
 // Files writes files atomically, owned by User (default dev).
@@ -127,25 +128,15 @@ type Status struct {
 	Ports    []ListenPort   `json:"ports,omitempty"`
 	// Files maps each watched path that exists to the SHA-256 of its contents.
 	Files map[string]string `json:"files,omitempty"`
-	Push  *Push             `json:"push,omitempty"`
+	Git   *GitStatus        `json:"git,omitempty"`
 }
 
-// PushConfig is where the guest pushes the box's branch after commits; the host
-// writes it to PushConfigPath when the box is created.
-type PushConfig struct {
-	Dir      string        `json:"dir"`
-	Branch   string        `json:"branch"`
-	Interval time.Duration `json:"interval"`
-}
-
-const PushConfigPath = "/var/lib/hutch-guest/push.json"
-
-// Push is the outcome of the guest's latest push of the box's branch.
-type Push struct {
-	Branch string `json:"branch"`
-	Head   string `json:"head"`            // the commit pushed or tried
-	Error  string `json:"error,omitempty"` // empty when origin has Head
-	At     int64  `json:"at"`              // unix seconds
+// GitStatus is /workspace's repository as it is now: the branch checked out (empty
+// when detached), uncommitted and untracked files, and commits on no remote.
+type GitStatus struct {
+	Branch   string `json:"branch"`
+	Changes  int    `json:"changes"`
+	Unpushed int    `json:"unpushed"`
 }
 
 // ListenPort is a listening TCP socket in the guest.
@@ -159,30 +150,45 @@ type ThreadStatus struct {
 	N          int   `json:"n"`
 	Dead       bool  `json:"dead"`
 	LastOutput int64 `json:"last_output"` // unix seconds
-	// Bell: it rang the bell and has printed nothing since.
-	Bell bool `json:"bell,omitempty"`
+	// Bell: it rang the bell and has printed nothing since; BellAt is when it
+	// last rang (unix seconds).
+	Bell   bool  `json:"bell,omitempty"`
+	BellAt int64 `json:"bell_at,omitempty"`
 	// Redraw: its last output came right after its window was resized, the app
 	// redrawing rather than working.
 	Redraw bool `json:"redraw,omitempty"`
 	// Viewed: a client shows it, other than a view the TUI keeps off screen.
-	Viewed    bool   `json:"viewed,omitempty"`
-	SessionID string `json:"session_id,omitempty"`
+	Viewed bool `json:"viewed,omitempty"`
+	// What hutchd started in the window, from its tmux options: the agent (empty for
+	// a command), its autonomy, the prompt's first line or the command, your name
+	// for it, and when (unix seconds); and the terminal title its program sets.
+	Agent    string `json:"agent,omitempty"`
+	Autonomy string `json:"autonomy,omitempty"`
+	Prompt   string `json:"prompt,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Created  int64  `json:"created,omitempty"`
+	Title    string `json:"title,omitempty"`
 }
+
+// A thread's tmux window carries what hutchd started in it, so the box's tmux is
+// the only record of its threads; the session carries the highest number used, so
+// numbers aren't reused.
+const (
+	OptAgent    = "@hutch-agent"
+	OptAutonomy = "@hutch-autonomy"
+	OptPrompt   = "@hutch-prompt"
+	OptName     = "@hutch-name"
+	OptCreated  = "@hutch-created"
+	OptLast     = "@hutch-last"
+)
+
+// ThreadsPath keeps the box's thread list on its disk, to recreate agent threads
+// after a cold boot.
+const ThreadsPath = "/var/lib/hutch-guest/threads.json"
 
 // HiddenOption marks a tmux view session whose client isn't on screen, so it
 // doesn't count as looking at its window.
 const HiddenOption = "@hutch-hidden"
-
-// ThreadInfo is written by the host to ThreadsDir/<n>.json when it starts an agent
-// thread, so the guest can find its session file.
-type ThreadInfo struct {
-	N         int    `json:"n"`
-	Sessions  string `json:"sessions"` // the adapter's session file glob, under ~/
-	SessionID string `json:"session_id,omitempty"`
-	Started   int64  `json:"started"` // unix seconds
-}
-
-const ThreadsDir = "/var/lib/hutch-guest/threads"
 
 // ServicesPath lists a box's services, one shell command per line, run as dev by
 // its init; a SIGHUP to PID 1 applies changes.

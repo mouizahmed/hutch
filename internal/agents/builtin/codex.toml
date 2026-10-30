@@ -3,7 +3,10 @@ name        = "codex"
 install     = "curl -fsSL https://chatgpt.com/codex/install.sh | sh"
 start       = "codex {prompt}"
 autonomy    = { full = ["--dangerously-bypass-approvals-and-sandbox"], ask = [] }
+pick        = "codex resume"
 resume      = "codex resume {session_id}"
+model       = "--model {model}"
+models      = ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-luna"]
 login       = "codex login"
 sessions    = "~/.codex/sessions/**/*.jsonl"
 credentials = ["~/.codex/auth.json"]
@@ -13,4 +16,4 @@ transcript  = "codex"
 
 [[seed]]
 file  = "~/.codex/config.toml"
-merge = { tui = { screen_reader_detection_done = true }, projects = { "{workspace}" = { trust_level = "trusted" } } }
+merge = { tui = { screen_reader_detection_done = true, notifications = true, notification_method = "bel", notification_condition = "always" }, projects = { "{workspace}" = { trust_level = "trusted" } } }

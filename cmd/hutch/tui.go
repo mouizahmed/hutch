@@ -1,20 +1,22 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"image/color"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	uv "github.com/charmbracelet/ultraviolet"
@@ -24,9 +26,9 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/mouizahmed/hutch/internal/agents"
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/config"
-	"github.com/mouizahmed/hutch/internal/names"
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
@@ -37,32 +39,48 @@ import (
 type rowKind int
 
 const (
-	rowProject rowKind = iota
-	rowBox
+	rowBox      rowKind = iota
+	rowTask             // a hutch command the TUI runs, until it ends well
+	rowTemplate         // a project's template, while it has no template box
 	rowThread
-	rowShell
 )
 
 type tuiRow struct {
-	kind   rowKind
-	label  string
-	box    api.Box
-	thread api.Thread
+	kind    rowKind
+	label   string
+	box     api.Box
+	thread  api.Thread
+	task    *task
+	project string // rowTemplate's
 }
 
-func (r tuiRow) selectable() bool { return r.kind != rowProject }
+// A task is a hutch command the TUI runs in the background: its output, and the
+// step it's on.
+type task struct {
+	id, title string
+	open      string // what to select when it ends well
+	lines     []string
+	step      string
+	err       string
+	ended     bool
+	started   time.Time
+	// report: lines worth keeping in the footer when it ends well; after: what to
+	// fetch then.
+	report []string
+	after  tea.Cmd
+}
 
 // key identifies a row across refreshes.
 func (r tuiRow) key() string {
 	switch r.kind {
+	case rowTask:
+		return "task " + r.task.id
+	case rowTemplate:
+		return "template " + r.project
 	case rowThread:
 		return paneKey(r.box.ID, r.thread.N)
-	case rowShell:
-		return paneKey(r.box.ID, 0)
-	case rowBox:
-		return r.box.ID
 	}
-	return "project " + r.label
+	return r.box.ID
 }
 
 type tui struct {
@@ -87,7 +105,6 @@ type tui struct {
 	rows     []tuiRow
 	cursor   int
 	offset   int
-	shells   map[string]bool // boxes with a shell row
 
 	panes map[string]*pane
 	order []string // pane keys, most recently shown last
@@ -98,15 +115,22 @@ type tui struct {
 	w, h                         int
 	frame                        int
 
-	input    textinput.Model
-	inputFor string // "new", or the box a new thread goes in
-	confirm  string // the row key d asks about
-	open     string // box/n to select once it appears
-	status   string
-	statusAt time.Time
+	form        *taskForm // the n and N popup, when open
+	confirmText string    // what the confirm popup asks, and its keys
+	confirmHint string
+	confirmDir  string                    // the checkout a "build" confirm builds from
+	templates   map[string][]api.Template // each project's versions, newest first
+	tasks       []*task
+	taskN       int
+	agent       string // the agent new tasks and threads start; Tab picks another
+	adapters    agents.Set
+	models      map[string]string // each agent's chosen model; empty is its default
+	confirm     string            // the row key d asks about
+	open        string            // box/n to select once it appears
+	status      string
+	statusAt    time.Time
 
-	states map[string]string // thread states at the last refresh, for notifications
-	read   map[string]bool   // threads you've looked at since they last worked
+	read map[string]bool // threads you've looked at since they last worked
 }
 
 type (
@@ -116,17 +140,23 @@ type (
 	retryMsg    struct{}
 	sessMsg     struct{ sess *yamux.Session }
 	projectsMsg []api.Project
-	paneMsg     struct{}
-	clipMsg     string
-	doneMsg     struct{ status, open string }
+	agentsMsg   agents.Set
+	taskLineMsg struct{ id, line string }
+	taskDoneMsg struct {
+		id  string
+		err error
+	}
+	paneMsg struct{}
+	clipMsg string
+	doneMsg struct{ status, open string }
 )
 
 var (
 	styleBold    = lipgloss.NewStyle().Bold(true)
 	styleDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	styleRule    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	styleCursor  = lipgloss.NewStyle().Background(lipgloss.Color("252")).Foreground(lipgloss.Color("235"))
-	styleBlurred = lipgloss.NewStyle().Background(lipgloss.Color("238"))
+	colorCursor  = lipgloss.Color("239")
+	colorBlurred = lipgloss.Color("236")
 	styleTyping  = lipgloss.NewStyle().Background(lipgloss.Color("42")).Foreground(lipgloss.Color("235"))
 	styleWorking = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	styleUnread  = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
@@ -157,16 +187,14 @@ func runTUI(cmd *cobra.Command, _ []string) error {
 	}
 	cwd, _ := os.Getwd()
 	m := &tui{ctx: ctx, sess: sess, exe: exe, cwd: cwd, focused: true, w: 120, h: 40,
+		agent: cfg.String("default_agent"), adapters: agents.Builtin(), models: map[string]string{},
 		listWidth: int(cfg.Int("tui.list_width")), kept: int(cfg.Int("tui.kept_panes")), reconnect: cfg.Duration("tui.reconnect"),
-		projects: map[string]string{}, shells: map[string]bool{}, panes: map[string]*pane{},
-		states: map[string]string{}, read: map[string]bool{}}
+		projects: map[string]string{}, templates: map[string][]api.Template{}, panes: map[string]*pane{},
+		read: map[string]bool{}}
 	if repo, _ := config.FindRepo(cwd); repo != nil {
 		m.here = repo.ID
 	}
 	m.shown.Store("")
-	m.input = textinput.New()
-	m.input.CharLimit = 4000
-	m.input.Prompt = ""
 	m.prog = tea.NewProgram(m, tea.WithContext(ctx))
 	_, err = m.prog.Run()
 	for _, p := range m.panes {
@@ -176,7 +204,17 @@ func runTUI(cmd *cobra.Command, _ []string) error {
 	return err
 }
 
-func (m *tui) Init() tea.Cmd { return tea.Batch(m.watch(), m.fetchProjects(), frame()) }
+func (m *tui) Init() tea.Cmd {
+	ctx, sess := m.ctx, m.sess
+	agentList := func() tea.Msg {
+		set, err := serverAdapters(ctx, sess)
+		if err != nil {
+			return nil
+		}
+		return agentsMsg(set)
+	}
+	return tea.Batch(m.watch(), m.fetchProjects(), agentList, frame())
+}
 
 func frame() tea.Cmd { return tea.Tick(time.Second/8, func(time.Time) tea.Msg { return frameMsg{} }) }
 
@@ -228,6 +266,7 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
 		m.resize()
+		m.sizeForm()
 	case tea.FocusMsg:
 		m.focused = true
 		m.markHidden()
@@ -244,10 +283,20 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dirty.Store(false)
 	case clipMsg:
 		return m, tea.SetClipboard(string(msg))
+	case agentsMsg:
+		m.adapters = agents.Set(msg)
 	case projectsMsg:
+		var cmds []tea.Cmd
 		for _, p := range msg {
 			m.projects[p.ID] = p.Slug
+			cmds = append(cmds, m.fetchTemplates(p.ID))
 		}
+		m.build()
+		return m, tea.Batch(cmds...)
+	case templateWorkMsg:
+		return m, m.reviewTemplate(msg)
+	case templatesMsg:
+		m.templates[msg.project] = msg.versions
 		m.build()
 	case eventMsg:
 		return m, m.event(api.Event(msg))
@@ -274,6 +323,51 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.drop(k)
 		}
 		return m, tea.Batch(m.watch(), m.fetchProjects())
+	case taskLineMsg:
+		if t := m.task(msg.id); t != nil {
+			t.lines = append(t.lines, msg.line)
+			if len(t.lines) > 500 {
+				t.lines = t.lines[len(t.lines)-500:]
+			}
+			if step, ok := strings.CutPrefix(strings.TrimSpace(msg.line), "==> "); ok {
+				t.step = step
+			}
+		}
+	case taskDoneMsg:
+		if t := m.task(msg.id); t != nil {
+			t.ended = true
+			var after tea.Cmd
+			if msg.err == nil {
+				m.tasks = slices.DeleteFunc(m.tasks, func(x *task) bool { return x == t })
+				if t.open != "" {
+					m.open = t.open
+				}
+				var kept []string
+				for _, l := range t.lines {
+					for _, r := range t.report {
+						if strings.HasPrefix(strings.TrimSpace(l), r) {
+							kept = append(kept, strings.TrimSpace(l))
+						}
+					}
+				}
+				if len(kept) > 0 {
+					m.setStatus(t.title + ": " + strings.Join(kept, " · "))
+				}
+				after = t.after
+			} else {
+				t.err = lastLine(t.lines)
+				if t.err == "" {
+					t.err = msg.err.Error()
+				}
+				m.setStatus(t.title + " failed: " + t.err)
+			}
+			m.build()
+			if m.open != "" && m.selectKey(m.open) {
+				m.open = ""
+			}
+			m.sync()
+			return m, after
+		}
 	case doneMsg:
 		if msg.status != "" {
 			m.setStatus(msg.status)
@@ -282,10 +376,8 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.open = msg.open
 		}
 	case tea.PasteMsg:
-		if m.inputFor != "" {
-			var cmd tea.Cmd
-			m.input, cmd = m.input.Update(msg)
-			return m, cmd
+		if m.form != nil {
+			return m, m.formPaste(msg)
 		}
 		if p := m.shownPane(); m.typing && p != nil {
 			p.withEmu(func(e *vt.Emulator) { e.Paste(msg.Content) })
@@ -294,8 +386,8 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.mouse(msg)
 	case tea.KeyPressMsg:
 		switch {
-		case m.inputFor != "":
-			return m, m.inputKey(msg)
+		case m.form != nil:
+			return m, m.formKey(msg)
 		case m.confirm != "":
 			return m, m.confirmKey(msg)
 		case m.typing:
@@ -317,6 +409,9 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // event applies one change. Until the stream says it's synced, the current state
 // builds up aside, so boxes removed while disconnected disappear.
 func (m *tui) event(e api.Event) tea.Cmd {
+	if e.Type == api.EventAlert {
+		return m.ring(*e.Thread)
+	}
 	var cmds []tea.Cmd
 	switch {
 	case !m.synced && e.Type != api.EventSynced:
@@ -325,11 +420,11 @@ func (m *tui) event(e api.Event) tea.Cmd {
 	case !m.synced:
 		m.boxes, m.workers = m.next.boxes, m.next.workers
 		m.synced, m.reached = true, true
-		m.changes(m.boxes) // a baseline: nothing rings for what happened before
+		m.changes(m.boxes)
 		cmds = append(cmds, m.fetchProjects())
 	default:
 		applyEvent(&m.boxes, &m.workers, e)
-		cmds = append(cmds, m.changes(m.boxes))
+		m.changes(m.boxes)
 		if e.Box != nil && e.Box.Project != "" && m.projects[e.Box.Project] == "" {
 			cmds = append(cmds, m.fetchProjects())
 		}
@@ -400,38 +495,44 @@ func (m *tui) key(msg tea.KeyPressMsg) tea.Cmd {
 		m.move(-1)
 	case "enter":
 		return m.enter(r)
+	case "N", "t", "b", "S":
+		if p := templateOf(r); p != "" {
+			return m.templateKey(p, msg.String())
+		}
+	}
+	switch msg.String() {
 	case "n":
-		if m.here == "" {
-			m.setStatus("new tasks start in a project: run hutch in a project's checkout")
-			return nil
-		}
-		return m.ask("new", "what should the agent do?")
+		return m.openForm("")
 	case "N":
-		if r.box.ID != "" {
-			return m.ask(r.box.ID, "what should the new thread in "+r.box.ID+" do?")
-		}
+		return m.openForm(r.box.ID)
 	case "t":
 		if r.box.ID != "" {
-			m.shells[r.box.ID] = true
-			m.build()
-			m.selectKey(paneKey(r.box.ID, 0))
-			m.sync()
+			return m.newShell(r.box.ID)
 		}
 	case "s":
 		if r.box.ID != "" {
 			return m.sleepWake(r.box)
 		}
 	case "d":
-		if r.kind != rowProject && r.box.ID != "" {
+		if r.kind == rowTask {
+			if r.task.ended {
+				m.tasks = slices.DeleteFunc(m.tasks, func(x *task) bool { return x == r.task })
+				m.build()
+				m.sync()
+			} else {
+				m.setStatus(r.task.title + " is still running")
+			}
+			return nil
+		}
+		if r.box.ID != "" {
 			m.confirm = r.key()
 			what := "box " + r.box.ID + " and its threads"
 			switch r.kind {
 			case rowThread:
 				what = "thread " + r.key() + " (" + r.thread.Title + ")"
-			case rowShell:
-				what = r.box.ID + "'s shell"
 			}
-			m.setStatus("Remove " + what + "? y removes, any other key keeps it")
+			m.confirmText = "Remove " + what + "?"
+			m.confirmHint = "y removes · any other key keeps it"
 		}
 	case "\\":
 		m.below = !m.below
@@ -443,6 +544,18 @@ func (m *tui) key(msg tea.KeyPressMsg) tea.Cmd {
 	return nil
 }
 
+// newShell starts a thread running bash in a box and shows it.
+func (m *tui) newShell(box string) tea.Cmd {
+	ctx, sess := m.ctx, m.sess
+	return func() tea.Msg {
+		var t api.Thread
+		if err := rpc.Call(ctx, sess, api.ThreadNew, api.ThreadParams{Box: box, Cmd: "bash"}, &t); err != nil {
+			return doneMsg{status: err.Error()}
+		}
+		return doneMsg{open: paneKey(box, t.N)}
+	}
+}
+
 // enter wakes a sleeping box (saying so), reconnects a dropped terminal, or types
 // into a live one.
 func (m *tui) enter(r tuiRow) tea.Cmd {
@@ -451,6 +564,16 @@ func (m *tui) enter(r tuiRow) tea.Cmd {
 	}
 	if r.box.State != "running" {
 		return m.sleepWake(r.box)
+	}
+	if r.kind == rowThread && r.thread.State == api.ThreadExited && r.thread.Agent != "" {
+		ctx, sess, target := m.ctx, m.sess, api.ThreadTarget{Box: r.box.ID, N: r.thread.N}
+		m.setStatus("starting " + r.thread.Agent + "'s picker in " + r.key() + "…")
+		return func() tea.Msg {
+			if err := rpc.Call(ctx, sess, api.ThreadResume, target, nil); err != nil {
+				return doneMsg{status: err.Error()}
+			}
+			return doneMsg{status: r.key() + ": pick a conversation (Enter types into it)"}
+		}
 	}
 	p := m.shownPane()
 	switch {
@@ -480,104 +603,131 @@ func (m *tui) sleepWake(b api.Box) tea.Cmd {
 	}
 }
 
-func (m *tui) ask(target, placeholder string) tea.Cmd {
-	m.inputFor = target
-	m.input.Placeholder = placeholder
-	m.input.SetValue("")
-	m.input.SetWidth(max(m.w-30, 20))
-	return m.input.Focus()
+// newProject is where a new task goes: the launch folder's project, else the
+// selected box's, else the only project checked out on this computer.
+func (m *tui) newProject(r tuiRow) (project, dir string) {
+	if m.here != "" {
+		return m.here, m.cwd
+	}
+	if r.box.Project != "" {
+		if d := projectDir(r.box.Project, m.boxes); d != "" {
+			return r.box.Project, d
+		}
+	}
+	var found []string
+	for id := range m.projects {
+		if projectDir(id, m.boxes) != "" {
+			found = append(found, id)
+		}
+	}
+	if len(found) == 1 {
+		return found[0], projectDir(found[0], m.boxes)
+	}
+	return "", ""
 }
 
-func (m *tui) inputKey(msg tea.KeyPressMsg) tea.Cmd {
-	switch msg.String() {
-	case "esc":
-		m.inputFor = ""
-		m.input.Blur()
-		return nil
-	case "enter":
-		prompt := strings.TrimSpace(m.input.Value())
-		target := m.inputFor
-		m.inputFor = ""
-		m.input.Blur()
-		if prompt == "" {
-			return nil
-		}
-		if target == "new" {
-			taken := map[string]bool{}
-			for _, b := range m.boxes {
-				taken[b.ID] = true
-			}
-			name := names.New(taken)
-			return m.run(m.cwd, name+"/1", "new", "--name", name, prompt)
-		}
-		next := 1
-		for _, b := range m.boxes {
-			if b.ID == target {
-				for _, t := range b.Threads {
-					next = max(next, t.N+1)
-				}
-			}
-		}
-		dir := m.cwd
-		for _, b := range m.boxes {
-			if b.ID == target && b.Project != "" && b.Project != m.here {
-				if d := projectDir(b.Project, m.boxes); d != "" {
-					dir = d
-				}
-			}
-		}
-		return m.run(dir, paneKey(target, next), "thread", target, prompt)
+// nextAgent is the agent after (or before) the current one.
+func (m *tui) nextAgent(forward bool) string {
+	names := m.adapters.Names()
+	i := slices.Index(names, m.agent)
+	if len(names) == 0 {
+		return m.agent
 	}
-	var cmd tea.Cmd
-	m.input, cmd = m.input.Update(msg)
-	return cmd
+	if forward {
+		return names[(i+1)%len(names)]
+	}
+	return names[(max(i, 0)+len(names)-1)%len(names)]
 }
 
 func (m *tui) confirmKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := m.confirm
 	m.confirm = ""
-	m.status = ""
 	if msg.String() != "y" {
 		return nil
+	}
+	if project, ok := strings.CutPrefix(key, "build "); ok {
+		return m.buildTemplate(project, m.confirmDir)
 	}
 	for _, r := range m.rows {
 		if r.key() != key {
 			continue
 		}
 		switch r.kind {
-		case rowShell:
-			delete(m.shells, r.box.ID)
-			m.drop(key)
-			m.build()
-			m.sync()
-			return nil
 		case rowThread:
 			m.drop(key)
-			return m.run(m.cwd, "", "thread", "rm", key)
+			return m.run(m.cwd, "remove "+key, "", "thread", "rm", key)
 		default:
 			for k, p := range m.panes {
 				if p.box == r.box.ID {
 					m.drop(k)
 				}
 			}
-			delete(m.shells, r.box.ID)
-			return m.run(m.cwd, "", "rm", r.box.ID)
+			return m.run(m.cwd, "remove "+r.box.ID, "", "rm", r.box.ID)
 		}
 	}
 	return nil
 }
 
-// run runs a hutch command in the terminal, in dir, then comes back to the TUI,
-// pausing first if it failed so its error can be read.
-func (m *tui) run(dir, open string, args ...string) tea.Cmd {
-	c := exec.Command("sh", "-c", shellJoin(append([]string{m.exe}, args...)...)+` || { printf '\n[press Enter]'; read _; }`)
+// run runs a hutch command in the background, in dir, as a task row at the top of
+// the list whose pane shows its output; it goes when the command ends well, and
+// open is selected. A failed task stays, with its output, until d dismisses it.
+func (m *tui) run(dir, title, open string, args ...string) tea.Cmd {
+	return m.start(dir, title, open, exec.Command(m.exe, args...))
+}
+
+// start runs c as a task (see run).
+func (m *tui) start(dir, title, open string, c *exec.Cmd) tea.Cmd {
+	m.taskN++
+	t := &task{id: strconv.Itoa(m.taskN), title: title, open: open, step: "starting", started: time.Now()}
+	m.tasks = append(m.tasks, t)
+	m.build()
+	m.selectKey("task " + t.id)
+	m.sync()
+	prog := m.prog
 	c.Dir = dir
-	return tea.ExecProcess(c, func(err error) tea.Msg {
+	c.Env = append(os.Environ(), "NO_COLOR=1")
+	go func() {
+		r, w, err := os.Pipe()
 		if err != nil {
-			return doneMsg{status: err.Error()}
+			prog.Send(taskDoneMsg{t.id, err})
+			return
 		}
-		return doneMsg{open: open}
-	})
+		c.Stdout, c.Stderr = w, w
+		err = c.Start()
+		w.Close()
+		if err != nil {
+			r.Close()
+			prog.Send(taskDoneMsg{t.id, err})
+			return
+		}
+		sc := bufio.NewScanner(r)
+		sc.Buffer(make([]byte, 64<<10), 1<<20)
+		for sc.Scan() {
+			prog.Send(taskLineMsg{t.id, ansi.Strip(sc.Text())})
+		}
+		r.Close()
+		prog.Send(taskDoneMsg{t.id, c.Wait()})
+	}()
+	return nil
+}
+
+func (m *tui) task(id string) *task {
+	for _, t := range m.tasks {
+		if t.id == id {
+			return t
+		}
+	}
+	return nil
+}
+
+// lastLine is a command's last line of output, its error when it fails.
+func lastLine(lines []string) string {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if l := strings.TrimSpace(strings.TrimPrefix(lines[i], "hutch: ")); l != "" {
+			return l
+		}
+	}
+	return ""
 }
 
 func (m *tui) projectName(id string) string {
@@ -624,7 +774,7 @@ func (m *tui) mouse(msg tea.MouseMsg) tea.Cmd {
 		}
 	case tea.MouseClickMsg:
 		m.typing = false
-		if i := m.offset + mo.Y - 1; mo.Y > 0 && i < len(m.rows) && m.rows[i].selectable() {
+		if i := m.offset + mo.Y - 1; mo.Y > 0 && i < len(m.rows) {
 			m.cursor = i
 			m.sync()
 		}
@@ -632,33 +782,29 @@ func (m *tui) mouse(msg tea.MouseMsg) tea.Cmd {
 	return nil
 }
 
-// changes notices threads that stopped working, and rings for those you aren't
-// looking at: the bell, and a desktop notification (OSC 9).
-func (m *tui) changes(boxes []api.Box) tea.Cmd {
-	var out strings.Builder
-	next := map[string]string{}
+// changes forgets that you read threads that are working again.
+func (m *tui) changes(boxes []api.Box) {
 	for _, b := range boxes {
 		for _, t := range b.Threads {
-			key := paneKey(b.ID, t.N)
-			next[key] = t.State
 			if t.State == api.ThreadWorking {
-				delete(m.read, key)
+				delete(m.read, paneKey(b.ID, t.N))
 			}
-			if m.states[key] != api.ThreadWorking || t.State == api.ThreadWorking || m.looking(key) {
-				continue
-			}
-			verb := "is waiting"
-			if t.State == api.ThreadExited {
-				verb = "exited"
-			}
-			fmt.Fprintf(&out, "\a\x1b]9;hutch: %s %s: %s\a", key, verb, strings.ReplaceAll(t.Title, "\a", ""))
 		}
 	}
-	m.states = next
-	if out.Len() == 0 {
+}
+
+// ring is an agent wanting you, unless you're looking at it: the bell, and a
+// desktop notification (OSC 9).
+func (m *tui) ring(t api.Thread) tea.Cmd {
+	key := paneKey(t.Box, t.N)
+	if m.looking(key) {
 		return nil
 	}
-	return tea.Raw(out.String())
+	verb := "wants you"
+	if t.State == api.ThreadExited {
+		verb = "exited"
+	}
+	return tea.Raw(fmt.Sprintf("\a\x1b]9;hutch: %s %s: %s\a", key, verb, strings.ReplaceAll(t.Title, "\a", "")))
 }
 
 func (m *tui) looking(key string) bool { return m.focused && m.shown.Load().(string) == key }
@@ -688,6 +834,12 @@ func (m *tui) build() {
 			g.at = at
 		}
 	}
+	// Projects checked out here appear, for their template, even without boxes.
+	for id := range m.projects {
+		if groups[id] == nil && m.checkout(id) != "" {
+			groups[id] = &group{id: id}
+		}
+	}
 	var order []*group
 	for _, g := range groups {
 		order = append(order, g)
@@ -699,38 +851,33 @@ func (m *tui) build() {
 		return order[i].at.After(order[j].at)
 	})
 	m.rows = nil
+	for _, t := range m.tasks {
+		m.rows = append(m.rows, tuiRow{kind: rowTask, label: t.title, task: t})
+	}
 	for _, g := range order {
-		name := m.projectName(g.id)
-		if g.id == "" {
-			name = "outside projects"
-		}
-		m.rows = append(m.rows, tuiRow{kind: rowProject, label: name})
 		sort.SliceStable(g.boxes, func(i, j int) bool {
 			if (g.boxes[i].Kind == api.BoxTemplate) != (g.boxes[j].Kind == api.BoxTemplate) {
 				return g.boxes[j].Kind == api.BoxTemplate
 			}
 			return boxActive(g.boxes[i]).After(boxActive(g.boxes[j]))
 		})
+		templateBox := false
 		for _, b := range g.boxes {
 			label := b.ID
 			if b.Kind == api.BoxTemplate {
-				label = "template"
+				label, templateBox = m.templateLabel(b.Project), true
 			}
 			m.rows = append(m.rows, tuiRow{kind: rowBox, box: b, label: label})
 			for _, t := range b.Threads {
 				m.rows = append(m.rows, tuiRow{kind: rowThread, box: b, thread: t, label: t.Title})
 			}
-			if m.shells[b.ID] {
-				m.rows = append(m.rows, tuiRow{kind: rowShell, box: b, label: "shell"})
-			}
+		}
+		if g.id != "" && !templateBox {
+			m.rows = append(m.rows, tuiRow{kind: rowTemplate, project: g.id, label: m.templateLabel(g.id)})
 		}
 	}
 	if !m.selectKey(selected) {
-		m.cursor = min(m.cursor, len(m.rows)-1)
-		if m.cursor < 0 || !m.rows[m.cursor].selectable() {
-			m.cursor = 0
-			m.move(1)
-		}
+		m.cursor = max(min(m.cursor, len(m.rows)-1), 0)
 	}
 }
 
@@ -753,7 +900,7 @@ func (m *tui) selected() tuiRow {
 
 func (m *tui) selectKey(key string) bool {
 	for i, r := range m.rows {
-		if r.selectable() && r.key() == key {
+		if r.key() == key {
 			m.cursor = i
 			return true
 		}
@@ -762,13 +909,10 @@ func (m *tui) selectKey(key string) bool {
 }
 
 func (m *tui) move(d int) {
-	for i := m.cursor + d; i >= 0 && i < len(m.rows); i += d {
-		if m.rows[i].selectable() {
-			m.cursor = i
-			m.typing = false
-			m.sync()
-			return
-		}
+	if i := m.cursor + d; i >= 0 && i < len(m.rows) {
+		m.cursor = i
+		m.typing = false
+		m.sync()
 	}
 }
 
@@ -781,8 +925,6 @@ func (m *tui) target(r tuiRow) (box string, n int, ok bool) {
 	switch r.kind {
 	case rowThread:
 		return r.box.ID, r.thread.N, true
-	case rowShell:
-		return r.box.ID, 0, true
 	case rowBox:
 		if len(r.box.Threads) > 0 {
 			return r.box.ID, r.box.Threads[len(r.box.Threads)-1].N, true
@@ -829,18 +971,12 @@ func (m *tui) connect(box string, n int) {
 	p := newPane(box, n, w, h)
 	key := paneKey(box, n)
 	m.panes[key] = p
-	dir := "/workspace"
-	for _, b := range m.boxes {
-		if b.ID == box && b.Path != "" {
-			dir = b.Path
-		}
-	}
 	changed := func() {
 		if m.shown.Load().(string) == key && m.dirty.CompareAndSwap(false, true) {
 			go m.prog.Send(paneMsg{})
 		}
 	}
-	go p.run(m.ctx, m.sess, dir, changed, func(s string) { go m.prog.Send(clipMsg(s)) })
+	go p.run(m.ctx, m.sess, changed, func(s string) { go m.prog.Send(clipMsg(s)) })
 }
 
 func (m *tui) drop(key string) {
@@ -881,7 +1017,14 @@ func (m *tui) View() tea.View {
 		sep := styleRule.Render(strings.TrimSuffix(strings.Repeat("│\n", ph), "\n"))
 		body = lipgloss.JoinHorizontal(lipgloss.Top, m.listView(px-1, ph), sep, screen)
 	}
-	v := tea.NewView(lipgloss.JoinVertical(lipgloss.Left, body, m.footer()))
+	screen = lipgloss.JoinVertical(lipgloss.Left, body, m.footer())
+	switch {
+	case m.form != nil:
+		screen = m.overlay(screen, m.formView())
+	case m.confirm != "":
+		screen = m.overlay(screen, m.confirmView())
+	}
+	v := tea.NewView(screen)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 	v.ReportFocus = true
@@ -899,6 +1042,32 @@ func (m *tui) paneView(w, h int) (string, *uv.Position) {
 	switch {
 	case len(m.rows) == 0:
 		return box.Render(styleDim.Render("\n  No boxes yet. n starts a task in a new box.")), nil
+	case r.kind == rowThread && r.thread.State == api.ThreadExited && r.box.State == "running":
+		return box.Render(styleDim.Render(fmt.Sprintf("\n  %s exited. ", r.thread.Agent)) + styleBold.Render("Enter") +
+			styleDim.Render(" opens its conversation picker here; d removes the thread.")), nil
+	case r.kind == rowTemplate:
+		lines := []string{"", "  The " + m.projectName(r.project) + " template: new boxes start from its newest version.", ""}
+		for i, v := range m.templates[r.project] {
+			if i == 5 {
+				break
+			}
+			lines = append(lines, fmt.Sprintf("  v%d  %.12s  %s", v.Version, v.Commit, ago(v.Created)))
+		}
+		lines = append(lines, "", "  N  an agent on the template (edits .hutch/, e.g. \"add Playwright browsers\")",
+			"  t  a shell in a template box", "  b  build from your checkout's .hutch/ (offers to commit and push it)",
+			"  S  snapshot the build as the next version")
+		return box.Render(styleDim.Render(strings.Join(lines, "\n"))), nil
+	case r.kind == rowTask:
+		t := r.task
+		head := styleBold.Render(t.title) + styleDim.Render(fmt.Sprintf(" · %s · %s", t.step, time.Since(t.started).Round(time.Second)))
+		if t.ended {
+			head = styleError.Render(t.title+" failed") + styleDim.Render(" · d dismisses")
+		}
+		var lines []string
+		for _, l := range t.lines[max(len(t.lines)-(h-2), 0):] {
+			lines = append(lines, truncate(l, w-1))
+		}
+		return box.Render(head + "\n\n" + strings.Join(lines, "\n")), nil
 	case p != nil && p.ended.Load():
 		why, _ := p.err.Load().(string)
 		return box.Render(styleDim.Render(fmt.Sprintf("\n  %s: %s. Enter reconnects.", m.shown.Load(), why))), nil
@@ -926,11 +1095,11 @@ func (m *tui) listView(w, h int) string {
 	for i := m.offset; i < len(m.rows) && len(lines) < h; i++ {
 		line := m.rowView(m.rows[i], w)
 		if i == m.cursor {
-			st := styleCursor
+			bg := colorCursor
 			if m.typing || !m.focused {
-				st = styleBlurred
+				bg = colorBlurred
 			}
-			line = st.Render(padRight(ansi.Strip(line), w))
+			line = highlight(line, w, bg)
 		}
 		lines = append(lines, line)
 	}
@@ -975,9 +1144,6 @@ func (m *tui) machineLine(w int) string {
 
 func (m *tui) rowView(r tuiRow, w int) string {
 	switch r.kind {
-	case rowProject:
-		left := " " + styleBold.Render(truncate(r.label, w-4)) + " "
-		return left + styleRule.Render(strings.Repeat("─", max(w-lipgloss.Width(left), 0)))
 	case rowBox:
 		state := ""
 		switch r.box.State {
@@ -987,21 +1153,45 @@ func (m *tui) rowView(r tuiRow, w int) string {
 		default:
 			state = r.box.State
 		}
-		if r.box.PushError != "" {
-			state = "push failed"
+		// Work only in the box: commits on no remote, and uncommitted changes.
+		var only []string
+		if r.box.Unpushed > 0 {
+			only = append(only, fmt.Sprintf("%d unpushed", r.box.Unpushed))
+		}
+		if r.box.Changes > 0 {
+			only = append(only, "edited")
+		}
+		if state == "" {
+			state = strings.Join(only, " · ")
 		}
 		right := styleDim.Render(state)
 		branch := ""
-		if r.box.Branch != "" {
-			branch = styleDim.Render(" ↳ " + r.box.Branch)
+		if r.box.Project != "" {
+			branch = styleDim.Render(" · " + m.projectName(r.box.Project))
+		}
+		// A box's own hutch/<box> branch goes without saying.
+		if r.box.Branch != "" && r.box.Branch != "hutch/"+r.box.ID {
+			branch += styleWorking.Render(" ↳ " + r.box.Branch)
 		}
 		name := styleBold.Render(r.label)
 		if r.box.State != "running" {
 			name = styleDim.Render(r.label)
 		}
 		return spread(" "+name+truncateStyled(branch, w-lipgloss.Width(r.label)-lipgloss.Width(state)-4), right, w)
-	case rowShell:
-		return spread("   "+styleDim.Render("❯")+" shell", "", w)
+	case rowTemplate:
+		right := "none yet: b builds it"
+		if vs := m.templates[r.project]; len(vs) > 0 {
+			right = shortAge(vs[0].Created)
+		}
+		return spread(" "+styleDim.Render(r.label+" · "+m.projectName(r.project)), styleDim.Render(right), w)
+	case rowTask:
+		t := r.task
+		dot, step := styleWorking.Render(spinner[m.frame%len(spinner)]), t.step
+		if t.ended {
+			dot, step = styleError.Render("!"), "failed"
+		}
+		right := styleDim.Render(truncate(step, w/2))
+		return spread(" "+dot+" "+truncate(t.title, w-lipgloss.Width(right)-5), right, w)
 	}
 	t := r.thread
 	key := r.key()
@@ -1029,23 +1219,35 @@ func (m *tui) rowView(r tuiRow, w int) string {
 
 func (m *tui) footer() string {
 	switch {
-	case m.inputFor != "":
-		label := "New task in " + m.projectName(m.here) + ": "
-		if m.inputFor != "new" {
-			label = "New thread in " + m.inputFor + ": "
-		}
-		return " " + styleBold.Render(label) + m.input.View() + styleDim.Render("  enter starts · esc cancels")
 	case m.status != "":
-		st := styleDim
-		if m.confirm != "" {
-			st = styleBold
-		}
-		return " " + st.Render(truncate(m.status, m.w-2))
+		return " " + styleDim.Render(truncate(m.status, m.w-2))
 	case m.typing:
 		return styleTyping.Render(" typing ") + styleDim.Render(" ctrl+] gives the keys back")
 	}
 	keys := "n new · N thread · enter type · t shell · s sleep/wake · d rm · \\ move · z zoom · q quit"
+	if templateOf(m.selected()) != "" {
+		keys = "N template agent · t shell · b build · S snapshot · n new task · q quit"
+	}
 	return styleDim.Render(" " + truncate(keys, m.w-2))
+}
+
+// highlight puts bg behind a styled line of width w, keeping its colors.
+func highlight(line string, w int, bg color.Color) string {
+	buf := uv.NewScreenBuffer(w, 1)
+	uv.NewStyledString(line).Draw(buf, buf.Bounds())
+	for x := 0; x < w; x++ {
+		c := buf.CellAt(x, 0)
+		if c == nil {
+			continue
+		}
+		cell := *c
+		if cell.Content == "" && cell.Width == 0 {
+			cell = uv.EmptyCell
+		}
+		cell.Style.Bg = bg
+		buf.SetCell(x, 0, &cell)
+	}
+	return buf.Render()
 }
 
 // spread puts right at the right edge of a line of width w.

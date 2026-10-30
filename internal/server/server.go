@@ -10,15 +10,18 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/hashicorp/yamux"
 
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/durable"
+	"github.com/mouizahmed/hutch/internal/guestproto"
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
@@ -62,11 +65,9 @@ type Server struct {
 	// files; syncing marks boxes whose changed credentials are being read.
 	fileHashes map[string]map[string]string
 	syncing    map[string]bool
-	// pushErrors holds each box's latest failed branch push.
-	pushErrors map[string]string
-	// threadWatch decides when a thread's stop is worth a notification, by box/n.
-	threadWatch map[string]*threadWatch
-	events      *hub
+	// gitStates holds each box's latest git status.
+	gitStates map[string]guestproto.GitStatus
+	events    *hub
 }
 
 type workerConn struct {
@@ -94,8 +95,8 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, store: st, master: master, workers: map[string]*workerConn{}, pending: map[string]int{}, peaks: map[string]int{}, relieving: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{}, threadWatch: map[string]*threadWatch{},
-		fileHashes: map[string]map[string]string{}, syncing: map[string]bool{}, pushErrors: map[string]string{}, events: newHub()}
+	s := &Server{cfg: cfg, store: st, master: master, workers: map[string]*workerConn{}, pending: map[string]int{}, peaks: map[string]int{}, relieving: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{},
+		fileHashes: map[string]map[string]string{}, syncing: map[string]bool{}, gitStates: map[string]guestproto.GitStatus{}, events: newHub()}
 	st.onChange = s.changed
 	go s.publish()
 	s.changed()
@@ -122,7 +123,6 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.gcLoop(ctx)
 	go s.archiveLoop(ctx)
 	go s.maxAwakeLoop(ctx)
-	go s.mergeLoop(ctx)
 	select {
 	case <-ctx.Done():
 		return nil
@@ -319,15 +319,17 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 					s.store.event(br.Box.ID, "state", br.Box.State)
 				}
 				s.mu.Lock()
-				states := s.applyThreads(br.Box.ID, br.Box.State == "running", br.Threads)
-				if br.Push != nil {
-					if prev := s.pushErrors[br.Box.ID]; br.Push.Error != prev && br.Push.Error != "" {
-						s.store.event(br.Box.ID, "push", br.Push.Error)
+				alerts := s.applyThreads(br.Box.ID, br.Box.State == "running", br.Threads)
+				if g := br.Git; g != nil {
+					s.gitStates[br.Box.ID] = *g
+					if g.Branch != "" && prev.Branch != "" && g.Branch != prev.Branch {
+						s.store.setBoxGit(br.Box.ID, g.Branch, prev.Base)
 					}
-					s.pushErrors[br.Box.ID] = br.Push.Error
 				}
 				s.mu.Unlock()
-				s.watchThreads(br.Box.ID, states)
+				for _, t := range alerts {
+					s.alert(t)
+				}
 				s.watchReport(br)
 			}
 			s.changed()
@@ -342,44 +344,87 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 				return nil, nil
 			}
 			s.mu.Lock()
-			states := s.applyThreads(p.Box, true, p.Threads)
+			alerts := s.applyThreads(p.Box, true, p.Threads)
 			s.mu.Unlock()
-			s.watchThreads(p.Box, states)
+			for _, t := range alerts {
+				s.alert(t)
+			}
 			s.changed()
 			return nil, nil
 		},
 	}
 }
 
-// applyThreads takes a box's reported thread states, with s.mu held: their
-// sessions, and whether each is unread. A box that stops forgets its threads'
-// states, so the first report after a wake, whose redraw is output, is only a
-// baseline.
-func (s *Server) applyThreads(box string, running bool, threads []api.ThreadState) map[int]api.ThreadState {
+// applyThreads takes a box's reported threads, with s.mu held: their states, and
+// whether each is unread, cached with the box. A box that stops keeps its threads
+// listed, and forgets their states, so the first report after a wake, whose redraw
+// is output, is only a baseline. It returns the agents that want you: a new bell,
+// or an exit, while no one looked. Output alone never alerts: an idle app redraws.
+func (s *Server) applyThreads(box string, running bool, threads []api.ThreadState) (alerts []api.Thread) {
 	states := map[int]api.ThreadState{}
 	for _, t := range threads {
 		states[t.N] = t
 	}
 	prevStates := s.threadStates[box]
-	if running {
-		s.threadStates[box] = states
-	} else {
+	if !running {
 		delete(s.threadStates, box)
+		return nil
 	}
-	for n, t := range states {
-		if t.SessionID != "" && prevStates[n].SessionID != t.SessionID {
-			s.store.updateThread(box, n, "session_id", t.SessionID)
-		}
+	s.threadStates[box] = states
+	b, err := s.store.box(box)
+	if err != nil {
+		return nil
+	}
+	unread := map[int]bool{}
+	for _, t := range b.Threads {
+		unread[t.N] = t.Unread
+	}
+	var out []api.Thread
+	for _, t := range threads {
 		// A thread that worked and stopped while nobody looked is unread, even
 		// when the turn fell between two reports; looking at it, or it working
 		// again, reads it.
-		prev, known := prevStates[n]
+		u := unread[t.N]
+		prev, known := prevStates[t.N]
 		switch {
 		case t.Viewed || t.State == api.ThreadWorking:
-			s.store.setUnread(box, n, false)
+			u = false
 		case known && (prev.State == api.ThreadWorking || t.LastOutput.After(prev.LastOutput)):
-			s.store.setUnread(box, n, true)
+			u = true
+		}
+		th := api.Thread{Box: box, N: t.N, Agent: t.Agent, Autonomy: t.Autonomy, Title: threadTitle(b, t),
+			Created: t.Created, State: t.State, Unread: u}
+		out = append(out, th)
+		if known && t.Agent != "" && !t.Viewed &&
+			(t.Bell.After(prev.Bell) || t.State == api.ThreadExited && prev.State != api.ThreadExited) {
+			alerts = append(alerts, th)
 		}
 	}
-	return states
+	s.store.setThreads(box, out)
+	return alerts
+}
+
+// threadTitle is your name for a thread, else the title its program gives its
+// terminal (without leading status symbols, a trailing " | <folder>" or
+// " - <folder>" for the box's folder, and not the bare hostname), else the first
+// line of what it was started with.
+func threadTitle(b api.Box, t api.ThreadState) string {
+	if t.Name != "" {
+		return t.Name
+	}
+	title := strings.TrimLeftFunc(t.Title, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
+	dir := b.Path
+	if dir == "" {
+		dir = workspace
+	}
+	for _, sep := range []string{" | ", " - "} {
+		title = strings.TrimSuffix(title, sep+filepath.Base(dir))
+	}
+	if title == "" || title == b.ID || strings.HasPrefix(title, b.ID+".") || title == filepath.Base(dir) {
+		title = t.Prompt
+	}
+	if r := []rune(title); len(r) > 80 {
+		title = string(r[:79]) + "…"
+	}
+	return title
 }

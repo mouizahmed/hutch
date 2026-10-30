@@ -3,10 +3,8 @@ package server
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +31,28 @@ func (s *Server) boxRun(ctx context.Context, w *workerConn, box string, argv ...
 	return stdout.String(), code, nil
 }
 
+// newWindow is how a thread starts: a window at the next unused number in the
+// box's "hutch" session, carrying what started in it. Numbers only go up, so a new
+// thread never takes a removed one's. An agent's window stays when it exits, for
+// its picker; a command's closes, like a terminal tab.
+const newWindow = `name=$1 dir=$2 agent=$3 autonomy=$4 prompt=$5 created=$6; shift 6
+s=` + tmuxSession + `
+last=$(tmux show-options -qv -t $s @hutch-last 2>/dev/null)
+saved=$(sed -n 's/.*"last":\([0-9]*\).*/\1/p' ` + guestproto.ThreadsPath + ` 2>/dev/null)
+[ "${saved:-0}" -gt "${last:-0}" ] && last=$saved
+max=$(tmux list-windows -t $s -F '#{window_index}' 2>/dev/null | sort -n | tail -1)
+n=$(( ${last:-0} > ${max:-0} ? ${last:-0} : ${max:-0} )); n=$((n + 1))
+keep=off; [ -n "$agent" ] && keep=on
+if tmux has-session -t $s 2>/dev/null; then
+  tmux new-window -d -t $s:$n -n "$name" -c "$dir" -- "$@" \; set-option -w -t $s:$n remain-on-exit $keep
+else
+  tmux new-session -d -s $s -x 200 -y 50 -n "$name" -c "$dir" -- "$@" \; set-option -w remain-on-exit $keep \; move-window -t $s:$n
+fi
+w=$s:$n
+tmux set-option -w -t $w @hutch-agent "$agent" \; set-option -w -t $w @hutch-autonomy "$autonomy" \; \
+  set-option -w -t $w @hutch-prompt "$prompt" \; set-option -w -t $w @hutch-created "$created" \; set-option -t $s @hutch-last $n
+echo $n`
+
 func (s *Server) threadNew(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
 	var p api.ThreadParams
 	if err := rpc.Decode(params, &p); err != nil {
@@ -48,16 +68,11 @@ func (s *Server) threadNew(ctx context.Context, params json.RawMessage, _ *rpc.O
 	if err != nil {
 		return nil, err
 	}
-	var sessionID string
 	var argv []string
 	if p.Resume != "" {
-		sessionID = p.Resume
 		argv, err = set.ResumeArgv(p.Agent, p.Autonomy, p.Resume)
 	} else {
-		if a := set[p.Agent]; p.Cmd == "" && a != nil && a.ChoosesSession() {
-			sessionID = newUUID()
-		}
-		argv, err = set.Argv(p.Agent, p.Cmd, p.Prompt, p.Autonomy, sessionID)
+		argv, err = set.Argv(p.Agent, p.Cmd, p.Prompt, p.Autonomy, p.Model)
 	}
 	if err != nil {
 		return nil, err
@@ -70,9 +85,9 @@ func (s *Server) threadNew(ctx context.Context, params json.RawMessage, _ *rpc.O
 	if err != nil {
 		return nil, err
 	}
-	name := p.Agent
+	agent, name := p.Agent, p.Agent
 	if p.Cmd != "" {
-		name = "cmd"
+		agent, name = "", "cmd"
 	}
 	w, err := s.awake(ctx, p.Box)
 	if err != nil {
@@ -81,18 +96,13 @@ func (s *Server) threadNew(ctx context.Context, params json.RawMessage, _ *rpc.O
 	if err := s.writeFiles(ctx, w, p.Box, p.Files); err != nil {
 		return nil, fmt.Errorf("session files: %w", err)
 	}
-
-	_, code, err := s.boxRun(ctx, w, p.Box, "tmux", "has-session", "-t", tmuxSession)
-	if err != nil && code < 0 {
-		return nil, err
+	prompt := agents.Title(p.Agent, p.Cmd, p.Prompt)
+	if p.Resume != "" {
+		prompt = p.Agent + " session from your laptop"
 	}
-	var tmux []string
-	if code == 0 {
-		tmux = []string{"tmux", "new-window", "-t", tmuxSession + ":", "-n", name, "-c", dir, "-P", "-F", "#{window_index}", "--"}
-	} else {
-		tmux = []string{"tmux", "new-session", "-d", "-s", tmuxSession, "-x", "200", "-y", "50", "-n", name, "-c", dir, "-P", "-F", "#{window_index}", "--"}
-	}
-	out, code, err := s.boxRun(ctx, w, p.Box, append(tmux, argv...)...)
+	created := time.Now().UTC().Truncate(time.Second)
+	args := append([]string{"sh", "-c", newWindow, "sh", name, dir, agent, p.Autonomy, prompt, strconv.FormatInt(created.Unix(), 10)}, argv...)
+	out, code, err := s.boxRun(ctx, w, p.Box, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -103,37 +113,34 @@ func (s *Server) threadNew(ctx context.Context, params json.RawMessage, _ *rpc.O
 	if err != nil {
 		return nil, fmt.Errorf("tmux window index %q: %w", out, err)
 	}
-	title := agents.Title(p.Agent, p.Cmd, p.Prompt)
-	if p.Resume != "" {
-		title = p.Agent + " session from your laptop"
+	s.store.event(p.Box, api.ThreadNew, fmt.Sprintf("%d %s", n, prompt))
+	return api.Thread{Box: p.Box, N: n, Agent: agent, Autonomy: p.Autonomy, Title: prompt, Created: created}, nil
+}
+
+// thread is a box's thread as it last reported it.
+func (s *Server) thread(box string, n int) (api.Box, api.Thread, error) {
+	b, err := s.store.box(box)
+	if err != nil {
+		return b, api.Thread{}, err
 	}
-	t := api.Thread{Box: p.Box, N: n, Agent: name, Title: title, Created: time.Now().UTC(), SessionID: sessionID}
-	if a := set[p.Agent]; p.Cmd == "" && a != nil && a.Sessions != "" {
-		if err := s.registerThread(ctx, w, p.Box, a, t); err != nil {
-			return nil, err
+	for _, t := range b.Threads {
+		if t.N == n {
+			return b, t, nil
 		}
 	}
-	if err := s.store.addThread(t, p.Autonomy); err != nil {
-		return nil, err
+	return b, api.Thread{}, fmt.Errorf("no thread %s/%d", box, n)
+}
+
+// dropThread takes a thread out of its box's cached list at once, before the next
+// report confirms it.
+func (s *Server) dropThread(b api.Box, n int) {
+	var keep []api.Thread
+	for _, t := range b.Threads {
+		if t.N != n {
+			keep = append(keep, t)
+		}
 	}
-	s.store.event(p.Box, api.ThreadNew, fmt.Sprintf("%d %s", n, t.Title))
-	return t, nil
-}
-
-// registerThread tells the guest where the agent keeps its sessions, so it can
-// report the thread's session for resuming it.
-func (s *Server) registerThread(ctx context.Context, w *workerConn, box string, a *agents.Adapter, t api.Thread) error {
-	info, _ := json.Marshal(guestproto.ThreadInfo{N: t.N, Sessions: a.Sessions, SessionID: t.SessionID, Started: t.Created.Unix()})
-	return rpc.Call(ctx, w.sess, api.BoxFiles, api.FilesParams{ID: box, Files: guestproto.Files{User: "root",
-		Files: []guestproto.File{{Path: fmt.Sprintf("%s/%d.json", guestproto.ThreadsDir, t.N), Mode: 0o644, Data: info}}}}, nil)
-}
-
-func newUUID() string {
-	b := make([]byte, 16)
-	rand.Read(b)
-	b[6] = b[6]&0x0f | 0x40
-	b[8] = b[8]&0x3f | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+	s.store.setThreads(b.ID, keep)
 }
 
 func (s *Server) threadRm(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
@@ -141,7 +148,8 @@ func (s *Server) threadRm(ctx context.Context, params json.RawMessage, _ *rpc.Ou
 	if err := rpc.Decode(params, &p); err != nil {
 		return nil, err
 	}
-	if _, _, err := s.store.thread(p.Box, p.N); err != nil {
+	b, _, err := s.thread(p.Box, p.N)
+	if err != nil {
 		return nil, err
 	}
 	w, err := s.awake(ctx, p.Box)
@@ -149,17 +157,9 @@ func (s *Server) threadRm(ctx context.Context, params json.RawMessage, _ *rpc.Ou
 		return nil, err
 	}
 	s.boxRun(ctx, w, p.Box, "tmux", "kill-window", "-t", fmt.Sprintf("%s:%d", tmuxSession, p.N))
-	s.run(ctx, w, p.Box, api.ExecParams{User: "root", Argv: []string{"rm", "-f", fmt.Sprintf("%s/%d.json", guestproto.ThreadsDir, p.N)}}, io.Discard, io.Discard)
 	s.store.event(p.Box, api.ThreadRm, strconv.Itoa(p.N))
-	return nil, s.store.deleteThread(p.Box, p.N)
-}
-
-func (s *Server) threadPin(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
-	var p api.ThreadTarget
-	if err := rpc.Decode(params, &p); err != nil {
-		return nil, err
-	}
-	return nil, s.store.updateThread(p.Box, p.N, "pinned", p.Pinned)
+	s.dropThread(b, p.N)
+	return nil, nil
 }
 
 func (s *Server) threadRename(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
@@ -167,34 +167,42 @@ func (s *Server) threadRename(ctx context.Context, params json.RawMessage, _ *rp
 	if err := rpc.Decode(params, &p); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(p.Title) == "" {
-		return nil, fmt.Errorf("empty title")
+	name := strings.TrimSpace(p.Title)
+	if name == "" {
+		return nil, fmt.Errorf("empty name")
 	}
-	if err := s.store.updateThread(p.Box, p.N, "title", p.Title); err != nil {
+	if _, _, err := s.thread(p.Box, p.N); err != nil {
 		return nil, err
 	}
-	return nil, s.store.updateThread(p.Box, p.N, "renamed", true)
+	w, err := s.awake(ctx, p.Box)
+	if err != nil {
+		return nil, err
+	}
+	_, code, err := s.boxRun(ctx, w, p.Box, "tmux", "set-option", "-w", "-t", fmt.Sprintf("%s:%d", tmuxSession, p.N), guestproto.OptName, name)
+	if err == nil && code != 0 {
+		err = fmt.Errorf("tmux exited %d", code)
+	}
+	return nil, err
 }
 
-// threadResume restarts an agent whose process has exited (or was lost to a cold
-// boot) in its own session, in the same tmux window.
+// threadResume runs the agent's picker in a thread whose agent exited.
 func (s *Server) threadResume(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
 	var p api.ThreadTarget
 	if err := rpc.Decode(params, &p); err != nil {
 		return nil, err
 	}
-	t, autonomy, err := s.store.thread(p.Box, p.N)
+	b, t, err := s.thread(p.Box, p.N)
 	if err != nil {
 		return nil, err
 	}
-	if t.SessionID == "" {
-		return nil, fmt.Errorf("%s/%d has no known session to resume", p.Box, p.N)
+	if t.Agent == "" {
+		return nil, fmt.Errorf("%s/%d runs a command, not an agent", p.Box, p.N)
 	}
 	set, err := s.adapters()
 	if err != nil {
 		return nil, err
 	}
-	argv, err := set.ResumeArgv(t.Agent, autonomy, t.SessionID)
+	argv, err := set.PickArgv(t.Agent, t.Autonomy)
 	if err != nil {
 		return nil, err
 	}
@@ -203,16 +211,8 @@ func (s *Server) threadResume(ctx context.Context, params json.RawMessage, _ *rp
 		return nil, err
 	}
 	target := fmt.Sprintf("%s:%d", tmuxSession, p.N)
-	out, _, err := s.boxRun(ctx, w, p.Box, "tmux", "display-message", "-p", "-t", target, "#{pane_dead}")
-	if err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(out) == "0" {
-		return nil, fmt.Errorf("%s/%d is still running", p.Box, p.N)
-	}
-	b, err := s.store.box(p.Box)
-	if err != nil {
-		return nil, err
+	if dead, _ := s.paneDead(ctx, w, p.Box, target); !dead {
+		return nil, fmt.Errorf("%s/%d's %s is still running", p.Box, p.N, t.Agent)
 	}
 	dir, _ := threadDir(b, "")
 	cmd := append([]string{"tmux", "respawn-pane", "-t", target, "-c", dir, "--"}, argv...)
@@ -221,6 +221,11 @@ func (s *Server) threadResume(ctx context.Context, params json.RawMessage, _ *rp
 	}
 	s.store.event(p.Box, api.ThreadResume, strconv.Itoa(p.N))
 	return t, nil
+}
+
+func (s *Server) paneDead(ctx context.Context, w *workerConn, box, target string) (bool, error) {
+	out, _, err := s.boxRun(ctx, w, box, "tmux", "display-message", "-p", "-t", target, "#{pane_dead}")
+	return strings.TrimSpace(out) == "1", err
 }
 
 func (s *Server) threadSend(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
@@ -232,9 +237,14 @@ func (s *Server) threadSend(ctx context.Context, params json.RawMessage, _ *rpc.
 	if err != nil {
 		return nil, err
 	}
+	target := fmt.Sprintf("%s:%d", tmuxSession, p.N)
+	if dead, err := s.paneDead(ctx, w, p.Box, target); err != nil {
+		return nil, err
+	} else if dead {
+		return nil, fmt.Errorf("the agent in %s/%d exited; open it to resume (hutch attach %s/%d)", p.Box, p.N, p.Box, p.N)
+	}
 	// A bracketed paste, then Enter a moment later: typed fast, a long message reads
 	// as a paste to agents, which take an Enter inside it as a newline.
-	target := fmt.Sprintf("%s:%d", tmuxSession, p.N)
 	_, _, err = s.boxRun(ctx, w, p.Box, "sh", "-c", `tmux set-buffer -b hutch-send -- "$2" && tmux paste-buffer -p -d -b hutch-send -t "$1" && sleep 0.3 && tmux send-keys -t "$1" Enter`, "sh", target, p.Message)
 	return nil, err
 }

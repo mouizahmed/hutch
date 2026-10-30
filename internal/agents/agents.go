@@ -17,18 +17,25 @@ import (
 )
 
 type Adapter struct {
-	Name        string              `toml:"name"`
-	Install     string              `toml:"install"` // shell, as dev, at template build and in login boxes
-	Start       string              `toml:"start"`   // command; {prompt} and {session_id} are filled in
-	Autonomy    map[string][]string `toml:"autonomy"`
-	Resume      string              `toml:"resume"`
-	Login       string              `toml:"login"`
-	Sessions    string              `toml:"sessions"`
-	Credentials []Source            `toml:"credentials"`
-	Config      []Source            `toml:"config"`
-	MCP         *MCP                `toml:"mcp"`
-	Transcript  string              `toml:"transcript"`
-	Seed        []Seed              `toml:"seed"`
+	Name     string              `toml:"name"`
+	Install  string              `toml:"install"` // shell, as dev, at template build and in login boxes
+	Start    string              `toml:"start"`   // command; {prompt} is filled in
+	Autonomy map[string][]string `toml:"autonomy"`
+	// Model is the arguments that choose a model, with {model}; Models are
+	// suggestions to pick from.
+	Model  string   `toml:"model"`
+	Models []string `toml:"models"`
+	// Pick is the agent's own conversation picker, run in a thread whose agent
+	// exited; Resume continues one session by id ({session_id}), for hutch cloud.
+	Pick        string   `toml:"pick"`
+	Resume      string   `toml:"resume"`
+	Login       string   `toml:"login"`
+	Sessions    string   `toml:"sessions"`
+	Credentials []Source `toml:"credentials"`
+	Config      []Source `toml:"config"`
+	MCP         *MCP     `toml:"mcp"`
+	Transcript  string   `toml:"transcript"`
+	Seed        []Seed   `toml:"seed"`
 }
 
 // Source is a file or directory under ~, or with Keys only those top-level keys of
@@ -126,6 +133,12 @@ func Parse(source string, data []byte) (*Adapter, error) {
 	if a.Start == "" && a.Login == "" {
 		return nil, fmt.Errorf("%s: needs start (an agent) or login", source)
 	}
+	if a.Model != "" && !strings.Contains(a.Model, "{model}") {
+		return nil, fmt.Errorf("%s: model needs {model}, like \"--model {model}\"", source)
+	}
+	if len(a.Models) > 0 && a.Model == "" {
+		return nil, fmt.Errorf("%s: models needs model, the arguments that choose one", source)
+	}
 	for mode := range a.Autonomy {
 		if mode != "full" && mode != "ask" {
 			return nil, fmt.Errorf("%s: autonomy modes are full and ask, not %q", source, mode)
@@ -181,10 +194,9 @@ func (s Set) Sorted() []*Adapter {
 	return out
 }
 
-// Argv returns a thread's command: the agent with its autonomy flags and prompt, or
-// a generic command run by bash when cmd is set. sessionID fills {session_id} for
-// agents that take one at start (see ChoosesSession).
-func (s Set) Argv(agent, cmd, prompt, autonomy, sessionID string) ([]string, error) {
+// Argv returns a thread's command: the agent with its autonomy flags, model, and
+// prompt, or a generic command run by bash when cmd is set.
+func (s Set) Argv(agent, cmd, prompt, autonomy, model string) ([]string, error) {
 	if cmd != "" {
 		return []string{"bash", "-lc", cmd}, nil
 	}
@@ -192,10 +204,33 @@ func (s Set) Argv(agent, cmd, prompt, autonomy, sessionID string) ([]string, err
 	if err != nil {
 		return nil, err
 	}
-	return fill(a.Start, a.Autonomy[autonomy], prompt, sessionID), nil
+	flags := a.Autonomy[autonomy]
+	if model != "" {
+		if a.Model == "" {
+			return nil, fmt.Errorf("the %s adapter has no model setting, so a model can't be chosen", agent)
+		}
+		for _, f := range strings.Fields(a.Model) {
+			flags = append(flags, strings.ReplaceAll(f, "{model}", model))
+		}
+	}
+	return fill(a.Start, flags, prompt, ""), nil
 }
 
-// ResumeArgv continues a session after the agent's process is gone.
+// PickArgv restarts an agent that exited in its thread: its conversation picker,
+// or without one, the agent fresh.
+func (s Set) PickArgv(agent, autonomy string) ([]string, error) {
+	a, err := s.agent(agent)
+	if err != nil {
+		return nil, err
+	}
+	cmd := a.Pick
+	if cmd == "" {
+		cmd = a.Start
+	}
+	return fill(cmd, a.Autonomy[autonomy], "", ""), nil
+}
+
+// ResumeArgv continues one session by id: hutch cloud's, from the laptop.
 func (s Set) ResumeArgv(agent, autonomy, sessionID string) ([]string, error) {
 	a, err := s.agent(agent)
 	if err != nil {
@@ -207,9 +242,6 @@ func (s Set) ResumeArgv(agent, autonomy, sessionID string) ([]string, error) {
 	return fill(a.Resume, a.Autonomy[autonomy], "", sessionID), nil
 }
 
-// ChoosesSession reports whether Hutch picks the session id when starting the agent.
-func (a *Adapter) ChoosesSession() bool { return strings.Contains(a.Start, "{session_id}") }
-
 func (s Set) agent(name string) (*Adapter, error) {
 	a, ok := s[name]
 	if !ok || !a.Agent() {
@@ -218,9 +250,9 @@ func (s Set) agent(name string) (*Adapter, error) {
 	return a, nil
 }
 
-// fill splits a command template into argv. Autonomy flags go where {prompt} is,
-// before the prompt, or at the end.
-func fill(template string, autonomy []string, prompt, sessionID string) []string {
+// fill splits a command template into argv. Flags go where {prompt} is, before
+// the prompt, or at the end.
+func fill(template string, flags []string, prompt, sessionID string) []string {
 	var argv []string
 	placed := false
 	for _, f := range strings.Fields(template) {
@@ -228,7 +260,7 @@ func fill(template string, autonomy []string, prompt, sessionID string) []string
 		case "{session_id}":
 			argv = append(argv, sessionID)
 		case "{prompt}":
-			argv = append(argv, autonomy...)
+			argv = append(argv, flags...)
 			placed = true
 			if prompt != "" {
 				argv = append(argv, prompt)
@@ -238,7 +270,7 @@ func fill(template string, autonomy []string, prompt, sessionID string) []string
 		}
 	}
 	if !placed {
-		argv = append(argv, autonomy...)
+		argv = append(argv, flags...)
 	}
 	return argv
 }

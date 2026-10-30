@@ -17,7 +17,6 @@ func (s *Server) apiMux() rpc.Mux {
 		api.BoxList:          s.boxList,
 		api.BoxBoot:          s.boxBoot,
 		api.BoxFork:          s.boxFork,
-		api.BoxRelease:       s.boxRelease,
 		api.ProjectList:      s.projectList,
 		api.BoxSleep:         s.onBoxWorker(api.BoxSleep),
 		api.BoxWake:          s.boxWake,
@@ -27,7 +26,6 @@ func (s *Server) apiMux() rpc.Mux {
 		api.BoxStatus:        s.boxStatus,
 		api.ThreadNew:        s.threadNew,
 		api.ThreadRm:         s.threadRm,
-		api.ThreadPin:        s.threadPin,
 		api.ThreadRename:     s.threadRename,
 		api.ThreadResume:     s.threadResume,
 		api.ThreadSend:       s.threadSend,
@@ -66,22 +64,17 @@ func (s *Server) boxList(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (an
 	if err != nil {
 		return nil, err
 	}
-	threads, err := s.store.threads()
-	if err != nil {
-		return nil, err
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := range boxes {
-		ts := threads[boxes[i].ID]
-		for j := range ts {
-			st := s.threadStates[boxes[i].ID][ts[j].N]
-			if boxes[i].State == "running" {
-				ts[j].State = st.State
+		// A sleeping box's threads keep their last titles, without live states.
+		if boxes[i].State != "running" {
+			for j := range boxes[i].Threads {
+				boxes[i].Threads[j].State = ""
 			}
 		}
-		boxes[i].Threads = ts
-		boxes[i].PushError = s.pushErrors[boxes[i].ID]
+		g := s.gitStates[boxes[i].ID]
+		boxes[i].Changes, boxes[i].Unpushed = g.Changes, g.Unpushed
 	}
 	return boxes, nil
 }
@@ -294,9 +287,6 @@ func (s *Server) awake(ctx context.Context, id string) (*workerConn, error) {
 			return nil, fmt.Errorf("wake %s: %w", id, err)
 		}
 		s.refreshCredentials(ctx, w, id)
-		if b.State == "archived" {
-			s.resumeThreads(ctx, w, id)
-		}
 	}
 	return w, nil
 }

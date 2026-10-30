@@ -1,8 +1,11 @@
 name        = "claude"
 install     = "curl -fsSL https://claude.ai/install.sh | bash"
-start       = "claude --session-id {session_id} {prompt}"
+start       = "claude {prompt}"
 autonomy    = { full = ["--dangerously-skip-permissions"], ask = [] }
+pick        = "claude --resume"
 resume      = "claude --resume {session_id}"
+model       = "--model {model}"
+models      = ["fable", "opus", "sonnet", "haiku"]
 login       = "claude auth login"
 sessions    = "~/.claude/projects/**/*.jsonl"
 credentials = [
@@ -23,10 +26,10 @@ config = [
 mcp        = { file = "~/.claude.json", key = "mcpServers", format = "claude" }
 transcript = "claude"
 
-# First-run prompts a box would otherwise stop at.
+# First-run prompts a box would otherwise stop at, and the bell Hutch alerts on.
 [[seed]]
 file  = "~/.claude.json"
-merge = { hasCompletedOnboarding = true, projects = { "{workspace}" = { hasTrustDialogAccepted = true } } }
+merge = { hasCompletedOnboarding = true, preferredNotifChannel = "terminal_bell", projects = { "{workspace}" = { hasTrustDialogAccepted = true } } }
 
 [[seed]]
 file  = "~/.claude/settings.json"

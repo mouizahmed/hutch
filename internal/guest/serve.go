@@ -44,7 +44,7 @@ func ListenAndServe(ctx context.Context, listen string) error {
 		<-ctx.Done()
 		ln.Close()
 	}()
-	go pushLoop(ctx)
+	go restoreThreads()
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -132,11 +132,11 @@ func handle(ctx context.Context, conn net.Conn) {
 	}
 
 	if req.Type == guestproto.TypeStatus {
-		var watch []string
+		var p guestproto.StatusParams
 		if req.Status != nil {
-			watch = req.Status.Watch
+			p = *req.Status
 		}
-		st, err := status(watch)
+		st, err := status(p)
 		r := &responder{conn: conn}
 		if err != nil {
 			r.fail(err)

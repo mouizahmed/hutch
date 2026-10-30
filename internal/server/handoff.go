@@ -3,13 +3,10 @@ package server
 import (
 	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/guestproto"
@@ -73,8 +70,8 @@ func (s *Server) writeDelta(ctx context.Context, w *workerConn, box string, d *a
 }
 
 // takeOverBranch puts a box's /workspace on a branch from a laptop at commit, with
-// the laptop's delta applied, and sets the guest to push it. The default branch is
-// refused: the box would push its agents' commits straight to it.
+// the laptop's delta applied. The default branch continues as hutch/<box> instead,
+// so agents' commits don't land on it.
 func (s *Server) takeOverBranch(ctx context.Context, w *workerConn, box string, p api.ForkParams, stderr io.Writer) (string, string, error) {
 	if err := s.writeDelta(ctx, w, box, p.Delta); err != nil {
 		return "", "", err
@@ -82,33 +79,20 @@ func (s *Server) takeOverBranch(ctx context.Context, w *workerConn, box string, 
 	var out bytes.Buffer
 	if err := s.run(ctx, w, box, api.ExecParams{Dir: workspace, Argv: []string{"sh", "-ec", `git fetch -q origin
 base=$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's,^origin/,,')
-if [ "$1" = "$base" ]; then echo "$1 is the default branch; the box would push to it. Switch to a branch of your own first (git switch -c <name>)." >&2; exit 3; fi
+branch=$1
+if [ "$branch" = "$base" ]; then branch=hutch/$3; fi
 d=` + deltaDir + `
 if [ -s $d/bundle ]; then git fetch -q $d/bundle HEAD; fi
-git checkout -q --no-track -B "$1" "$2"
+git checkout -q --no-track -B "$branch" "$2"
 if [ -s $d/staged ]; then git apply --index $d/staged; fi
 if [ -s $d/unstaged ]; then git apply $d/unstaged; fi
 if [ -s $d/files ]; then tar -xf $d/files; fi
 rm -rf $d
-echo "$base"`, "sh", p.Branch, p.Commit}}, &out, stderr); err != nil {
+echo "$branch $base"`, "sh", p.Branch, p.Commit, box}}, &out, stderr); err != nil {
 		return "", "", fmt.Errorf("apply your changes: %w", err)
 	}
-	base := strings.TrimSpace(out.String())
-	return p.Branch, base, s.setPush(ctx, w, box, p.Branch, base, p.PushInterval)
-}
-
-// setPush records a box's branch and has the guest push it after commits; an empty
-// branch stops pushing.
-func (s *Server) setPush(ctx context.Context, w *workerConn, box, branch, base string, interval time.Duration) error {
-	if err := s.store.setBoxGit(box, branch, base); err != nil {
-		return err
-	}
-	conf, _ := json.Marshal(guestproto.PushConfig{Dir: workspace, Branch: branch, Interval: interval})
-	if err := rpc.Call(ctx, w.sess, api.BoxFiles, api.FilesParams{ID: box, Files: guestproto.Files{User: "root",
-		Files: []guestproto.File{{Path: guestproto.PushConfigPath, Mode: 0o644, Data: conf}}}}, nil); err != nil {
-		return fmt.Errorf("push config: %w", err)
-	}
-	return nil
+	branch, base, _ := strings.Cut(strings.TrimSpace(out.String()), " ")
+	return branch, base, s.store.setBoxGit(box, branch, base)
 }
 
 // extractFiles unpacks a delta's tar into /workspace: a directory outside a project.
@@ -158,24 +142,4 @@ func threadDir(b api.Box, dir string) (string, error) {
 		return "", fmt.Errorf("%s is outside the box's %s", dir, root)
 	}
 	return dir, nil
-}
-
-func (s *Server) boxRelease(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
-	var p api.IDParams
-	if err := rpc.Decode(params, &p); err != nil {
-		return nil, err
-	}
-	b, err := s.store.box(p.ID)
-	if err != nil {
-		return nil, err
-	}
-	if b.Branch == "" || strings.HasPrefix(b.Branch, "hutch/") {
-		return nil, errors.New("only a branch a box took over with hutch cloud is released")
-	}
-	w, err := s.awake(ctx, p.ID)
-	if err != nil {
-		return nil, err
-	}
-	s.store.event(p.ID, api.BoxRelease, b.Branch)
-	return nil, s.setPush(ctx, w, p.ID, "", b.Base, 0)
 }

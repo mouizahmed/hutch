@@ -144,12 +144,9 @@ func (c *Client) Exec(ctx context.Context, e Exec, stdout, stderr io.Writer) (in
 	return code, err
 }
 
-func (c *Client) Status(ctx context.Context, watch ...string) (Status, error) {
+func (c *Client) Status(ctx context.Context, p StatusParams) (Status, error) {
 	var st Status
-	req := Request{Type: TypeStatus}
-	if len(watch) > 0 {
-		req.Status = &StatusParams{Watch: watch}
-	}
+	req := Request{Type: TypeStatus, Status: &p}
 	err := c.call(ctx, req, func(r Response) (bool, error) {
 		if r.Status != nil {
 			st = *r.Status

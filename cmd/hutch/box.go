@@ -35,6 +35,30 @@ func withServer(f func(ctx context.Context, sess *yamux.Session, args []string) 
 	}
 }
 
+// gitSummary is a box's branch when it isn't its own hutch/<box>, and its work
+// that is only in the box.
+func gitSummary(b api.Box) string {
+	var parts []string
+	if b.Branch != "" && b.Branch != "hutch/"+b.ID {
+		parts = append(parts, "↳ "+b.Branch)
+	}
+	if b.Unpushed > 0 {
+		parts = append(parts, plural(fmt.Sprint(b.Unpushed), "unpushed commit"))
+	}
+	if b.Changes > 0 {
+		parts = append(parts, "uncommitted changes")
+	}
+	return strings.Join(parts, " · ")
+}
+
+// threadAgent is what a thread runs: its agent, or a command.
+func threadAgent(t api.Thread) string {
+	if t.Agent == "" {
+		return "cmd"
+	}
+	return t.Agent
+}
+
 // threadState is a thread's state as lists show it.
 func threadState(t api.Thread) string {
 	if t.Unread && t.State != api.ThreadWorking {
@@ -86,6 +110,9 @@ func boxCommands() []*cobra.Command {
 			if err != nil {
 				return err
 			}
+			if dryRun && (image != "" || from != "" || repo == nil) {
+				return fmt.Errorf("--dry-run plans a box from this project's template: run it in a checkout, without --from or --image")
+			}
 			if image != "" {
 				p := api.BootParams{ID: name, Image: image, VCPUs: cpus, MemMiB: memMiB, DiskBytes: cfg.Size("disk.size"), Idle: idle}
 				if err := rpc.Call(ctx, sess, api.BoxBoot, p, &b); err != nil {
@@ -93,7 +120,7 @@ func boxCommands() []*cobra.Command {
 				}
 			} else if from == "" && repo != nil {
 				p := api.ForkParams{Project: repo.ID, Path: repo.Root, Base: cfg.String("base"), ID: name, Idle: idle, Credentials: cfg.List("credentials"),
-					PushInterval: cfg.Duration("git.push_interval"), Allow: cfg.List("network.allow")}
+					Allow: cfg.List("network.allow")}
 				if err := checkAllow(p.Allow); err != nil {
 					return err
 				}
@@ -145,21 +172,13 @@ func boxCommands() []*cobra.Command {
 				if b.Kind == api.BoxVersion {
 					continue
 				}
-				state := b.State
-				if b.Merged != "" {
-					state += " ✓ merged"
+				name := b.ID
+				if g := gitSummary(b); g != "" {
+					name += "  " + g
 				}
-				fmt.Fprintf(tw, "%s\t\t%s\t%d vCPU, %s\t%s\n", b.ID, state, b.VCPUs, mib(b.MemMiB), ago(b.Created))
-				if b.PushError != "" {
-					msg, _, _ := strings.Cut(b.PushError, "\n")
-					fmt.Fprintf(tw, "  ! push of %s failed: %s\t\t\t\t\n", b.Branch, msg)
-				}
+				fmt.Fprintf(tw, "%s\t\t%s\t%d vCPU, %s\t%s\n", name, b.State, b.VCPUs, mib(b.MemMiB), ago(b.Created))
 				for _, t := range b.Threads {
-					pin := ""
-					if t.Pinned {
-						pin = "* "
-					}
-					fmt.Fprintf(tw, "  %d  %s%s\t%s\t%s\t\t%s\n", t.N, pin, t.Title, t.Agent, threadState(t), ago(t.Created))
+					fmt.Fprintf(tw, "  %d  %s\t%s\t%s\t\t%s\n", t.N, t.Title, threadAgent(t), threadState(t), ago(t.Created))
 				}
 			}
 			return tw.Flush()
@@ -245,7 +264,10 @@ func boxCommands() []*cobra.Command {
 				return err
 			}
 			fmt.Println(args[0], "removed")
-			return cleanUpGit(b)
+			if b.Unpushed > 0 || b.Changes > 0 {
+				fmt.Printf("Its unpushed work went with it; any branch it pushed is still on origin.\n")
+			}
+			return nil
 		}),
 	}
 
@@ -265,17 +287,19 @@ func mib(m int) string {
 }
 
 type agentFlags struct {
-	agent, cmd string
+	agent, cmd, model string
 }
 
 func (a *agentFlags) register(c *cobra.Command) {
 	c.Flags().StringVar(&a.agent, "agent", "", "agent to run: "+strings.Join(agents.Builtin().Names(), ", ")+" (default: default_agent)")
 	c.Flags().StringVar(&a.cmd, "cmd", "", "run any terminal command instead of an agent")
+	c.Flags().StringVar(&a.model, "model", "", "the agent's model, like opus or gpt-6.1-sol (default: the agent's own)")
 	c.MarkFlagsMutuallyExclusive("agent", "cmd")
+	c.MarkFlagsMutuallyExclusive("model", "cmd")
 }
 
 func startThread(ctx context.Context, sess *yamux.Session, cfg *config.Config, box string, a agentFlags, args []string) (api.Thread, error) {
-	p := api.ThreadParams{Box: box, Agent: a.agent, Cmd: a.cmd, Autonomy: cfg.String("autonomy")}
+	p := api.ThreadParams{Box: box, Agent: a.agent, Cmd: a.cmd, Model: a.model, Autonomy: cfg.String("autonomy")}
 	if len(args) > 0 {
 		p.Prompt = args[0]
 	}
@@ -303,7 +327,7 @@ func threadCommands() []*cobra.Command {
 	var agent agentFlags
 	thread := &cobra.Command{
 		Use:     `thread <box> ["<prompt>"]`,
-		Short:   "Start another agent thread in a box",
+		Short:   "Start another thread in a box: an agent, or a command",
 		GroupID: "boxes",
 		Args:    cobra.RangeArgs(1, 2),
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
@@ -318,7 +342,7 @@ func threadCommands() []*cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("%s/%d %s started\n  hutch attach %s/%d\n", t.Box, t.N, t.Agent, t.Box, t.N)
+			fmt.Printf("%s/%d %s started\n  hutch attach %s/%d\n", t.Box, t.N, threadAgent(t), t.Box, t.N)
 			return nil
 		}),
 	}
@@ -362,36 +386,22 @@ func threadSubcommands() []*cobra.Command {
 			}),
 		}
 	}
-	rm := target("rm <box>/<thread>", "Stop a thread and forget it", func(ctx context.Context, sess *yamux.Session, box string, n int, _ []string) error {
+	rm := target("rm <box>/<thread>", "Close a thread, and what runs in it", func(ctx context.Context, sess *yamux.Session, box string, n int, _ []string) error {
 		return rpc.Call(ctx, sess, api.ThreadRm, api.ThreadTarget{Box: box, N: n}, nil)
 	})
-	pin := target("pin <box>/<thread>", "Pin a thread to the top of lists", func(ctx context.Context, sess *yamux.Session, box string, n int, _ []string) error {
-		return rpc.Call(ctx, sess, api.ThreadPin, api.ThreadTarget{Box: box, N: n, Pinned: true}, nil)
-	})
-	unpin := target("unpin <box>/<thread>", "Unpin a thread", func(ctx context.Context, sess *yamux.Session, box string, n int, _ []string) error {
-		return rpc.Call(ctx, sess, api.ThreadPin, api.ThreadTarget{Box: box, N: n}, nil)
-	})
-	rename := target(`rename <box>/<thread> "<title>"`, "Give a thread your own title", func(ctx context.Context, sess *yamux.Session, box string, n int, args []string) error {
+	rename := target(`rename <box>/<thread> "<name>"`, "Give a thread your own name, over its agent's title", func(ctx context.Context, sess *yamux.Session, box string, n int, args []string) error {
 		if len(args) != 1 {
 			return errors.New("give one title")
 		}
 		return rpc.Call(ctx, sess, api.ThreadRename, api.ThreadTarget{Box: box, N: n, Title: args[0]}, nil)
 	})
-	resume := target("resume <box>/<thread>", "Restart an exited agent in its own session", func(ctx context.Context, sess *yamux.Session, box string, n int, _ []string) error {
-		var t api.Thread
-		if err := rpc.Call(ctx, sess, api.ThreadResume, api.ThreadTarget{Box: box, N: n}, &t); err != nil {
-			return err
-		}
-		fmt.Printf("%s/%d resumed %s session %s\n  hutch attach %s/%d\n", box, n, t.Agent, t.SessionID, box, n)
-		return nil
-	})
-	return []*cobra.Command{rm, pin, unpin, rename, resume}
+	return []*cobra.Command{rm, rename}
 }
 
 func statusCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:     "status <box>",
-		Short:   "Show a box and its threads, with token counts",
+		Short:   "Show a box, its branch, and its threads",
 		GroupID: "boxes",
 		Args:    cobra.ExactArgs(1),
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
@@ -400,20 +410,21 @@ func statusCommand() *cobra.Command {
 				return err
 			}
 			fmt.Printf("%s  %s, %d vCPU, %s, on %s\n", b.ID, b.State, b.VCPUs, mib(b.MemMiB), b.Worker)
-			if b.Branch != "" {
-				fmt.Printf("branch %s (base %s)\n", b.Branch, b.Base)
-			}
-			if b.PushError != "" {
-				fmt.Printf("push failed: %s\n", b.PushError)
+			if b.Base != "" {
+				fmt.Printf("branch %s (compared with %s)", b.Branch, b.Base)
+				if b.Unpushed > 0 || b.Changes > 0 {
+					fmt.Printf(": %s, only in the box", plural(fmt.Sprint(b.Unpushed), "commit")+" not pushed, "+plural(fmt.Sprint(b.Changes), "uncommitted file"))
+				}
+				fmt.Println()
 			}
 			if len(b.Threads) == 0 {
 				return nil
 			}
 			fmt.Println()
 			tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(tw, "THREAD\tAGENT\tSTATE\tSESSION")
+			fmt.Fprintln(tw, "THREAD\tAGENT\tSTATE")
 			for _, t := range b.Threads {
-				fmt.Fprintf(tw, "%d  %s\t%s\t%s\t%s\n", t.N, t.Title, t.Agent, threadState(t), t.SessionID)
+				fmt.Fprintf(tw, "%d  %s\t%s\t%s\n", t.N, t.Title, threadAgent(t), threadState(t))
 			}
 			return tw.Flush()
 		}),
@@ -442,7 +453,7 @@ func moveCommand() *cobra.Command {
 			case "warm":
 				fmt.Printf("Warm move from %s to %s: everything kept running, agents mid-conversation.\n", r.From, r.To)
 			default:
-				fmt.Printf("Cold move from %s to %s (another snapshot class): files kept, processes restarted, agents resumed.\n", r.From, r.To)
+				fmt.Printf("Cold move from %s to %s (another snapshot class): files kept, processes restarted; Enter on an agent's thread reopens its conversations.\n", r.From, r.To)
 			}
 			return nil
 		},
@@ -456,9 +467,9 @@ func resizeCommand() *cobra.Command {
 	var memory, disk string
 	cmd := &cobra.Command{
 		Use:   "resize <box>",
-		Short: "Change one box's CPUs, memory, or disk (a cold boot; agents resume)",
-		Long: `Change one box's size. It applies with a cold boot: running processes restart
-and agents resume through their adapters. CPU and memory can go up or down; the
+		Short: "Change one box's CPUs, memory, or disk (a cold boot; processes restart)",
+		Long: `Change one box's size. It applies with a cold boot: running processes restart,
+and each agent's thread waits at its exit, a key from its conversation picker. CPU and memory can go up or down; the
 disk only grows. If the box no longer fits its worker, it moves to one that fits.`,
 		GroupID: "boxes",
 		Args:    cobra.ExactArgs(1),

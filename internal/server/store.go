@@ -38,14 +38,6 @@ CREATE TABLE IF NOT EXISTS boxes (
 	created    TIMESTAMP NOT NULL,
 	updated    TIMESTAMP NOT NULL
 );
-CREATE TABLE IF NOT EXISTS threads (
-	box_id  TEXT NOT NULL REFERENCES boxes(id) ON DELETE CASCADE,
-	n       INTEGER NOT NULL,
-	agent   TEXT NOT NULL,
-	title   TEXT NOT NULL,
-	created TIMESTAMP NOT NULL,
-	PRIMARY KEY (box_id, n)
-);
 CREATE TABLE IF NOT EXISTS projects (
 	id      TEXT PRIMARY KEY,
 	slug    TEXT NOT NULL UNIQUE,
@@ -146,15 +138,10 @@ func (s *store) changed() {
 
 // migrations add columns to tables from earlier versions; each may already be done.
 var migrations = []string{
-	`ALTER TABLE threads ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`,
-	`ALTER TABLE threads ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0`,
-	`ALTER TABLE threads ADD COLUMN autonomy TEXT NOT NULL DEFAULT 'full'`,
-	`ALTER TABLE threads ADD COLUMN renamed INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE box_meta ADD COLUMN secrets TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE templates ADD COLUMN secrets TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE projects ADD COLUMN peaks TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE projects ADD COLUMN confirmed TEXT NOT NULL DEFAULT ''`,
-	`ALTER TABLE threads ADD COLUMN unread INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE box_meta ADD COLUMN version INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE boxes ADD COLUMN state_since TIMESTAMP`,
 	`ALTER TABLE workers ADD COLUMN cpus INTEGER NOT NULL DEFAULT 0`,
@@ -165,7 +152,9 @@ var migrations = []string{
 	`ALTER TABLE workers ADD COLUMN draining INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE templates ADD COLUMN params TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE boxes ADD COLUMN path TEXT NOT NULL DEFAULT ''`,
-	`ALTER TABLE box_git ADD COLUMN merged TEXT NOT NULL DEFAULT ''`,
+	// A box's threads, as it last reported them: its tmux is their record.
+	`ALTER TABLE boxes ADD COLUMN threads TEXT NOT NULL DEFAULT ''`,
+	`DROP TABLE IF EXISTS threads`,
 	`UPDATE configs SET name = 'machine' WHERE name = 'server'`,
 	`ALTER TABLE box_meta ADD COLUMN image TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE templates ADD COLUMN image TEXT NOT NULL DEFAULT ''`,
@@ -327,9 +316,9 @@ func (s *store) deleteBox(id string) error {
 func (s *store) box(id string) (api.Box, error) {
 	var b api.Box
 	err := s.db.QueryRow(`SELECT id, worker_id, state, boxes.image, vcpus, mem_mib, generation, class, reach_ip, created,
-		COALESCE(m.project_id, ''), COALESCE(m.kind, ''), COALESCE(g.branch, ''), COALESCE(g.base, ''), path, COALESCE(g.merged, '')
+		COALESCE(m.project_id, ''), COALESCE(m.kind, ''), COALESCE(g.branch, ''), COALESCE(g.base, ''), path, threads
 		FROM boxes LEFT JOIN box_meta m ON m.box_id = boxes.id LEFT JOIN box_git g ON g.box_id = boxes.id WHERE id = ?`, id).
-		Scan(&b.ID, &b.Worker, &b.State, &b.Image, &b.VCPUs, &b.MemMiB, &b.Generation, &b.Class, &b.ReachIP, &b.Created, &b.Project, &b.Kind, &b.Branch, &b.Base, &b.Path, &b.Merged)
+		Scan(&b.ID, &b.Worker, &b.State, &b.Image, &b.VCPUs, &b.MemMiB, &b.Generation, &b.Class, &b.ReachIP, &b.Created, &b.Project, &b.Kind, &b.Branch, &b.Base, &b.Path, threadsJSON{&b.Threads})
 	if errors.Is(err, sql.ErrNoRows) {
 		return b, fmt.Errorf("no box %q", id)
 	}
@@ -338,7 +327,7 @@ func (s *store) box(id string) (api.Box, error) {
 
 func (s *store) boxes() ([]api.Box, error) {
 	rows, err := s.db.Query(`SELECT id, worker_id, state, boxes.image, vcpus, mem_mib, generation, class, reach_ip, created,
-		COALESCE(m.project_id, ''), COALESCE(m.kind, ''), COALESCE(g.branch, ''), COALESCE(g.base, ''), path, COALESCE(g.merged, '')
+		COALESCE(m.project_id, ''), COALESCE(m.kind, ''), COALESCE(g.branch, ''), COALESCE(g.base, ''), path, threads
 		FROM boxes LEFT JOIN box_meta m ON m.box_id = boxes.id LEFT JOIN box_git g ON g.box_id = boxes.id ORDER BY created`)
 	if err != nil {
 		return nil, err
@@ -347,7 +336,7 @@ func (s *store) boxes() ([]api.Box, error) {
 	var bs []api.Box
 	for rows.Next() {
 		var b api.Box
-		if err := rows.Scan(&b.ID, &b.Worker, &b.State, &b.Image, &b.VCPUs, &b.MemMiB, &b.Generation, &b.Class, &b.ReachIP, &b.Created, &b.Project, &b.Kind, &b.Branch, &b.Base, &b.Path, &b.Merged); err != nil {
+		if err := rows.Scan(&b.ID, &b.Worker, &b.State, &b.Image, &b.VCPUs, &b.MemMiB, &b.Generation, &b.Class, &b.ReachIP, &b.Created, &b.Project, &b.Kind, &b.Branch, &b.Base, &b.Path, threadsJSON{&b.Threads}); err != nil {
 			return nil, err
 		}
 		bs = append(bs, b)
@@ -410,65 +399,32 @@ func (s *store) event(boxID, kind, msg string) {
 	s.exec(`INSERT INTO events (ts, box_id, kind, message) VALUES (?, ?, ?, ?)`, time.Now().UTC(), boxID, kind, msg)
 }
 
-func (s *store) addThread(t api.Thread, autonomy string) error {
-	_, err := s.exec(`INSERT INTO threads (box_id, n, agent, title, created, session_id, autonomy) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		t.Box, t.N, t.Agent, t.Title, t.Created, t.SessionID, autonomy)
-	return err
-}
-
-// updateThread sets one column of a thread.
-func (s *store) updateThread(box string, n int, column string, value any) error {
-	res, err := s.exec(`UPDATE threads SET `+column+` = ? WHERE box_id = ? AND n = ?`, value, box, n)
+// setThreads caches a box's threads as it reported them.
+func (s *store) setThreads(box string, threads []api.Thread) error {
+	data, err := json.Marshal(threads)
 	if err != nil {
 		return err
 	}
-	if c, _ := res.RowsAffected(); c == 0 {
-		return fmt.Errorf("no thread %s/%d", box, n)
-	}
-	return nil
-}
-
-// setUnread sets a thread's unread flag, reporting whether it changed.
-func (s *store) setUnread(box string, n int, unread bool) (bool, error) {
-	res, err := s.exec(`UPDATE threads SET unread = ? WHERE box_id = ? AND n = ? AND unread != ?`, unread, box, n, unread)
-	if err != nil {
-		return false, err
-	}
-	changed, err := res.RowsAffected()
-	return changed > 0, err
-}
-
-func (s *store) deleteThread(box string, n int) error {
-	_, err := s.exec(`DELETE FROM threads WHERE box_id = ? AND n = ?`, box, n)
+	_, err = s.exec(`UPDATE boxes SET threads = ? WHERE id = ? AND threads != ?`, string(data), box, string(data))
 	return err
 }
 
-func (s *store) thread(box string, n int) (api.Thread, string, error) {
-	t := api.Thread{Box: box, N: n}
-	var autonomy string
-	err := s.db.QueryRow(`SELECT agent, title, created, session_id, pinned, autonomy FROM threads WHERE box_id = ? AND n = ?`, box, n).
-		Scan(&t.Agent, &t.Title, &t.Created, &t.SessionID, &t.Pinned, &autonomy)
-	if errors.Is(err, sql.ErrNoRows) {
-		return t, "", fmt.Errorf("no thread %s/%d", box, n)
-	}
-	return t, autonomy, err
-}
+// threadsJSON scans a box's cached threads.
+type threadsJSON struct{ t *[]api.Thread }
 
-func (s *store) threads() (map[string][]api.Thread, error) {
-	rows, err := s.db.Query(`SELECT box_id, n, agent, title, created, session_id, pinned, renamed, unread FROM threads ORDER BY box_id, n`)
-	if err != nil {
-		return nil, err
+func (j threadsJSON) Scan(v any) error {
+	var data []byte
+	switch v := v.(type) {
+	case string:
+		data = []byte(v)
+	case []byte:
+		data = v
 	}
-	defer rows.Close()
-	byBox := map[string][]api.Thread{}
-	for rows.Next() {
-		var t api.Thread
-		if err := rows.Scan(&t.Box, &t.N, &t.Agent, &t.Title, &t.Created, &t.SessionID, &t.Pinned, &t.Renamed, &t.Unread); err != nil {
-			return nil, err
-		}
-		byBox[t.Box] = append(byBox[t.Box], t)
+	if len(data) == 0 {
+		*j.t = nil
+		return nil
 	}
-	return byBox, rows.Err()
+	return json.Unmarshal(data, j.t)
 }
 
 func (s *store) config(name string) (api.ConfigDoc, error) {
@@ -706,27 +662,11 @@ func (s *store) setBoxPath(box, path string) error {
 	return err
 }
 
-// branchOwner returns the box that owns a project's branch, if any.
-func (s *store) branchOwner(project, branch string) (string, error) {
-	var id string
-	err := s.db.QueryRow(`SELECT g.box_id FROM box_git g JOIN box_meta m ON m.box_id = g.box_id
-		WHERE m.project_id = ? AND g.branch = ?`, project, branch).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	return id, err
-}
-
-// setBoxGit records a box's branch; a new branch isn't merged yet.
+// setBoxGit records a box's branch, as checked out now, and the default branch it
+// is compared with.
 func (s *store) setBoxGit(box, branch, base string) error {
 	_, err := s.exec(`INSERT INTO box_git (box_id, branch, base) VALUES (?, ?, ?)
-		ON CONFLICT(box_id) DO UPDATE SET branch = excluded.branch, base = excluded.base,
-			merged = CASE WHEN box_git.branch = excluded.branch THEN box_git.merged ELSE '' END`, box, branch, base)
-	return err
-}
-
-func (s *store) setMerged(box, how string) error {
-	_, err := s.exec(`UPDATE box_git SET merged = ? WHERE box_id = ?`, how, box)
+		ON CONFLICT(box_id) DO UPDATE SET branch = excluded.branch, base = excluded.base`, box, branch, base)
 	return err
 }
 

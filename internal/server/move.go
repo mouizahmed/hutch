@@ -23,7 +23,7 @@ func (s *Server) boxMove(ctx context.Context, params json.RawMessage, out *rpc.O
 }
 
 // move puts a box on another worker through the bucket: warm (processes and all)
-// on a worker of its snapshot class, else cold (its disk, booted, agents resumed).
+// on a worker of its snapshot class, else cold (its disk, booted; agents' threads come back exited).
 // A box that was awake is awake again afterwards.
 func (s *Server) move(ctx context.Context, id, to string, stdout, stderr io.Writer) (api.MoveResult, error) {
 	var r api.MoveResult
@@ -177,7 +177,7 @@ func (s *Server) workerRm(ctx context.Context, params json.RawMessage, _ *rpc.Ou
 
 // boxResize changes a box's size with a cold boot: it sleeps (a snapshot), drops
 // its memory, takes the new size, and wakes, on another worker if it no longer
-// fits its own. Its agents resume through their adapters.
+// fits its own. Its agents' threads come back exited.
 func (s *Server) boxResize(ctx context.Context, params json.RawMessage, out *rpc.Out) (any, error) {
 	var p api.ResizeParams
 	if err := rpc.Decode(params, &p); err != nil {

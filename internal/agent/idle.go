@@ -36,6 +36,10 @@ type boxActivity struct {
 	since time.Time
 	// The thread states the server has.
 	reported []api.ThreadState
+	// Terminals attached at the last check, and until when output is a redraw:
+	// attaching resizes a window and its app repaints.
+	clients     int
+	redrawUntil time.Time
 }
 
 // monitor checks running boxes, puts idle ones to sleep, and reports to the server
@@ -170,15 +174,22 @@ func (m *monitor) check(ctx context.Context, server *atomic.Pointer[yamux.Sessio
 // threadStates reads each thread's state from its terminal. Agents print while
 // they work (spinners, timers) and stop when they hand back; a bell hands back at
 // once, and a redraw after a resize isn't work.
-func (m *monitor) threadStates(a *boxActivity, threads []guestproto.ThreadStatus, now time.Time) []api.ThreadState {
+func (m *monitor) threadStates(a *boxActivity, st guestproto.Status, now time.Time) []api.ThreadState {
 	a.working = false
 	window := m.settings.Load().WorkingWindow
+	if st.Clients > a.clients {
+		a.redrawUntil = now.Add(m.settings.Load().RedrawWindow)
+	}
+	a.clients = st.Clients
 	if a.output == nil {
 		a.output = map[int]time.Time{}
 	}
 	var out []api.ThreadState
-	for _, th := range threads {
+	for _, th := range st.Threads {
 		last := time.Unix(th.LastOutput, 0)
+		// Output from before the redraw window ended is the repaint, even once the
+		// window has passed.
+		th.Redraw = th.Redraw || !a.redrawUntil.IsZero() && !last.After(a.redrawUntil)
 		if prev, ok := a.output[th.N]; th.Redraw && ok {
 			last = prev
 		}
@@ -194,9 +205,18 @@ func (m *monitor) threadStates(a *boxActivity, threads []guestproto.ThreadStatus
 		if last.After(a.lastActive) {
 			a.lastActive = last
 		}
-		out = append(out, api.ThreadState{N: th.N, State: state, LastOutput: last, Viewed: th.Viewed, SessionID: th.SessionID})
+		out = append(out, api.ThreadState{N: th.N, State: state, LastOutput: last, Bell: unixTime(th.BellAt), Viewed: th.Viewed, Agent: th.Agent,
+			Autonomy: th.Autonomy, Prompt: th.Prompt, Name: th.Name, Created: unixTime(th.Created), Title: th.Title})
 	}
 	return out
+}
+
+// unixTime is a time a guest reported, or zero when it didn't report one.
+func unixTime(sec int64) time.Time {
+	if sec <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(sec, 0)
 }
 
 // checkThreads reads awake boxes' thread states between full checks, and tells
@@ -222,7 +242,7 @@ func (m *monitor) checkThreads(ctx context.Context, server *atomic.Pointer[yamux
 		if err != nil {
 			continue
 		}
-		states := m.threadStates(a, st.Threads, now)
+		states := m.threadStates(a, st, now)
 		if sameThreads(a.reported, states) {
 			continue
 		}
@@ -241,7 +261,7 @@ func (m *monitor) checkThreads(ctx context.Context, server *atomic.Pointer[yamux
 // alone don't count as a change.
 func sameThreads(a, b []api.ThreadState) bool {
 	return slices.EqualFunc(a, b, func(x, y api.ThreadState) bool {
-		return x.N == y.N && x.State == y.State && x.Viewed == y.Viewed && x.SessionID == y.SessionID
+		return x.N == y.N && x.State == y.State && x.Bell.Equal(y.Bell) && x.Viewed == y.Viewed && x.Title == y.Title && x.Name == y.Name
 	})
 }
 
@@ -299,12 +319,12 @@ func (m *monitor) checkBox(ctx context.Context, b *worker.Box) (api.BoxReport, b
 		r.LastActive = now
 		return r, false
 	}
-	r.Files, r.Push = st.Files, st.Push
+	r.Files, r.Git = st.Files, st.Git
 	a.attached = st.Clients > 0 || st.Sessions > 0
 	if a.attached {
 		a.lastActive = now
 	}
-	r.Threads = m.threadStates(a, st.Threads, now)
+	r.Threads = m.threadStates(a, st, now)
 	a.reported = r.Threads
 	r.LastActive = a.lastActive
 	return r, now.Sub(a.lastActive) >= policy.Timeout

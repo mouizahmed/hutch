@@ -32,7 +32,7 @@ const tmuxFeatures = "RGB,strikethrough,usstyle,hyperlinks,title,focus,clipboard
 // in-process emulator, which the TUI draws.
 type pane struct {
 	box     string
-	n       int    // the thread; 0 is the box's shell
+	n       int    // the thread
 	session string // the thread's view session in the box's tmux
 
 	mu  sync.Mutex // guards emu
@@ -41,33 +41,54 @@ type pane struct {
 	wmu  sync.Mutex // guards writes to conn
 	conn net.Conn
 
+	// in carries what the emulator writes (keys, and its answers to terminal
+	// queries) to the stream, so typing never waits on the connection; ready
+	// closes once the stream is up or has failed.
+	in        chan []byte
+	ready     chan struct{}
+	readyOnce sync.Once
+
 	ended  atomic.Bool
 	err    atomic.Value // string: why it ended
 	hidden atomic.Bool  // its view session is marked off screen
 }
 
-func paneKey(box string, n int) string {
-	if n == 0 {
-		return box + "/shell"
-	}
-	return box + "/" + strconv.Itoa(n)
-}
+func paneKey(box string, n int) string { return box + "/" + strconv.Itoa(n) }
 
 func newPane(box string, n, w, h int) *pane {
 	b := make([]byte, 4)
 	rand.Read(b)
-	p := &pane{box: box, n: n, session: "view-" + hex.EncodeToString(b)}
+	p := &pane{box: box, n: n, session: "view-" + hex.EncodeToString(b), in: make(chan []byte, 256), ready: make(chan struct{})}
 	p.emu = vt.NewEmulator(w, h)
 	p.emu.SetScrollbackSize(1) // tmux in the box keeps the history
+	// The emulator's input is an unbuffered pipe: a key blocks until this reads it.
+	go func() {
+		defer close(p.in)
+		buf := make([]byte, 32<<10)
+		for {
+			n, err := p.emu.Read(buf)
+			if n > 0 {
+				p.in <- append([]byte(nil), buf[:n]...)
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	go func() {
+		<-p.ready
+		for data := range p.in {
+			p.send(guestproto.Input{Type: guestproto.InputStdin, Data: data})
+		}
+	}()
 	return p
 }
 
-// argv attaches the pane's terminal: a thread with the mouse on, so the wheel
-// scrolls tmux's history, or the box's first shell.
-func (p *pane) argv(dir string) []string {
-	if p.n == 0 {
-		return append([]string{"tmux", "-T", tmuxFeatures}, tmuxAttach("shell-1", dir)[1:]...)
-	}
+func (p *pane) setReady() { p.readyOnce.Do(func() { close(p.ready) }) }
+
+// argv attaches the pane's thread with the mouse on, so the wheel scrolls tmux's
+// history.
+func (p *pane) argv() []string {
 	return []string{"tmux", "-T", tmuxFeatures, "new-session", "-t", agentSession, "-s", p.session,
 		";", "set-option", "destroy-unattached", "on", ";", "set-option", "status", "off", ";", "set-option", "prefix", "None",
 		";", "set-option", "mouse", "on", ";", "select-window", "-t", p.session + ":" + strconv.Itoa(p.n)}
@@ -75,8 +96,9 @@ func (p *pane) argv(dir string) []string {
 
 // run connects the pane and copies its output into the emulator until the stream
 // ends; changed is called after each write, clip with what the box copied.
-func (p *pane) run(ctx context.Context, sess *yamux.Session, dir string, changed func(), clip func(string)) {
+func (p *pane) run(ctx context.Context, sess *yamux.Session, changed func(), clip func(string)) {
 	defer changed()
+	defer p.setReady()
 	fail := func(err error) {
 		p.err.Store(err.Error())
 		p.ended.Store(true)
@@ -93,7 +115,7 @@ func (p *pane) run(ctx context.Context, sess *yamux.Session, dir string, changed
 		return true
 	})
 	p.mu.Unlock()
-	conn, err := rpc.OpenStream(ctx, sess, api.BoxPTY, api.PTYParams{ID: p.box, Argv: p.argv(dir), User: "dev",
+	conn, err := rpc.OpenStream(ctx, sess, api.BoxPTY, api.PTYParams{ID: p.box, Argv: p.argv(), User: "dev",
 		Term: "xterm-256color", Rows: h, Cols: w})
 	if err != nil {
 		fail(err)
@@ -112,20 +134,7 @@ func (p *pane) run(ctx context.Context, sess *yamux.Session, dir string, changed
 	p.wmu.Lock()
 	p.conn = conn
 	p.wmu.Unlock()
-	// The emulator writes keys and its answers to terminal queries to its input;
-	// a write blocks until this reads it.
-	go func() {
-		buf := make([]byte, 32<<10)
-		for {
-			n, err := p.emu.Read(buf)
-			if n > 0 {
-				p.send(guestproto.Input{Type: guestproto.InputStdin, Data: append([]byte(nil), buf[:n]...)})
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
+	p.setReady()
 	for {
 		var r guestproto.Response
 		if err := wire.Read(conn, &r); err != nil {
@@ -202,7 +211,7 @@ func (p *pane) withEmu(f func(*vt.Emulator)) {
 // setHidden marks the thread's view session off screen or on, so the machine
 // knows whether you see the thread (for unread).
 func (p *pane) setHidden(ctx context.Context, sess *yamux.Session, hidden bool) {
-	if p.n == 0 || p.hidden.Swap(hidden) == hidden {
+	if p.hidden.Swap(hidden) == hidden {
 		return
 	}
 	argv := []string{"tmux", "set-option", "-t", p.session, "-u", guestproto.HiddenOption}

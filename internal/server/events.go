@@ -111,6 +111,20 @@ func (h *hub) update(boxes []api.Box, workers []api.Worker) {
 	}
 }
 
+// send gives every client one event that isn't part of the state.
+func (h *hub) send(e api.Event) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for ch := range h.subs {
+		select {
+		case ch <- e:
+		default:
+			close(ch)
+			delete(h.subs, ch)
+		}
+	}
+}
+
 // subscribe returns a channel of changes, and the current state as events to
 // send first.
 func (h *hub) subscribe() (chan api.Event, []api.Event) {

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -66,7 +67,7 @@ func handoffCommands() []*cobra.Command {
 				}
 			}
 			p := api.ForkParams{ID: name, Idle: api.Idle{Timeout: cfg.Duration("idle_timeout"), CPUThreshold: cfg.Percent("idle.cpu_threshold")},
-				Credentials: cfg.List("credentials"), PushInterval: cfg.Duration("git.push_interval"), Allow: cfg.List("network.allow")}
+				Credentials: cfg.List("credentials"), Allow: cfg.List("network.allow")}
 			if err := checkAllow(p.Allow); err != nil {
 				return err
 			}
@@ -189,15 +190,12 @@ func handoffCommands() []*cobra.Command {
 	cloud.MarkFlagsMutuallyExclusive("agent", "no-session")
 
 	local := &cobra.Command{
-		Use:     "local <box>[/<thread>]",
-		Short:   "Bring a box's work and agent sessions back here; the box sleeps",
+		Use:     "local <box>",
+		Short:   "Bring a box's branch and agent sessions into this checkout; the box sleeps",
 		GroupID: "boxes",
 		Args:    cobra.ExactArgs(1),
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
-			id, n, err := parseTarget(args[0])
-			if err != nil {
-				return err
-			}
+			id := args[0]
 			b, err := boxBranch(ctx, sess, id)
 			if err != nil {
 				return err
@@ -209,51 +207,42 @@ func handoffCommands() []*cobra.Command {
 			if repo == nil || repo.ID != b.Project {
 				return fmt.Errorf("run this in a checkout of %s", b.Project)
 			}
-			var threads []api.Thread
+			// Every session of the box's agents comes back; the agent's own picker
+			// chooses among them.
+			var agentNames []string
 			for _, t := range b.Threads {
-				if (n == 0 || t.N == n) && t.SessionID != "" {
-					threads = append(threads, t)
+				if t.Agent != "" && !slices.Contains(agentNames, t.Agent) {
+					agentNames = append(agentNames, t.Agent)
 				}
 			}
-			if n > 0 && len(threads) == 0 {
-				return fmt.Errorf("%s/%d has no agent session to bring back", id, n)
+
+			if dirty, err := git(repo.Root, "status", "--porcelain"); err != nil {
+				return err
+			} else if dirty != "" {
+				return fmt.Errorf("%s has uncommitted changes; commit or stash them first, so the box's branch can come in", repo.Root)
 			}
 
-			fmt.Printf("Committing and pushing %s in %s...\n", b.Branch, id)
-			// A box made before it had a git identity commits as this machine's.
-			script := `set -e
-git add -A
-if ! git diff --cached --quiet; then
-  if git config user.email >/dev/null; then git commit -q -m "WIP (hutch)"
-  else git -c "user.name=$2" -c "user.email=$3" commit -q -m "WIP (hutch)"; fi
-fi
-git push -q origin "HEAD:refs/heads/$1"`
-			var stderr bytes.Buffer
-			code, err := rpc.Exec(ctx, sess, api.BoxExec, api.ExecParams{ID: id, Dir: "/workspace", Argv: []string{"sh", "-c", script, "sh", b.Branch, gitGlobal("user.name"), gitGlobal("user.email")}}, io.Discard, &stderr)
-			if err == nil && code != 0 {
-				err = fmt.Errorf("exit %d: %s", code, strings.TrimSpace(stderr.String()))
-			}
+			branch, head, wip, err := commitBox(ctx, sess, id)
 			if err != nil {
-				return fmt.Errorf("commit and push in %s: %w", id, err)
+				return err
+			}
+			if wip {
+				fmt.Printf("Committed %s's uncommitted work as \"WIP (hutch)\".\n", id)
+			}
+			if err := fetchBox(ctx, sess, id, repo.Root, "refs/heads/"+branch, head); err != nil {
+				return err
 			}
 
 			set, err := serverAdapters(ctx, sess)
 			if err != nil {
 				return err
 			}
-			sessions, err := boxSessions(ctx, sess, id, set, threads)
+			sessions, err := boxSessions(ctx, sess, id, set, agentNames)
 			if err != nil {
 				return err
 			}
-
-			landed, why, err := bringBack(repo, b)
-			if err != nil {
+			if err := checkoutHere(repo.Root, branch, head); err != nil {
 				return err
-			}
-			if !strings.HasPrefix(b.Branch, "hutch/") {
-				if err := rpc.Call(ctx, sess, api.BoxRelease, api.IDParams{ID: id}, nil); err != nil {
-					return err
-				}
 			}
 			var slept api.Box
 			if err := rpc.Call(ctx, sess, api.BoxSleep, api.IDParams{ID: id}, &slept); err != nil {
@@ -266,7 +255,7 @@ git push -q origin "HEAD:refs/heads/$1"`
 			}
 			home, _ := os.UserHomeDir()
 			for _, f := range sessions {
-				rel, data := agents.Relocate(f.transcript, f.rel, f.data, from, landed)
+				rel, data := agents.Relocate(f.transcript, f.rel, f.data, from, repo.Root)
 				dst := filepath.Join(home, filepath.FromSlash(rel))
 				if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 					return err
@@ -276,22 +265,14 @@ git push -q origin "HEAD:refs/heads/$1"`
 				}
 			}
 
-			head, _ := git(landed, "log", "-1", "--format=%h %s")
-			fmt.Printf("\n✓ %s at %s\n  in %s\n", b.Branch, head, landed)
-			if why != "" {
-				fmt.Printf("  (%s)\n", why)
-			}
-			if !strings.HasPrefix(b.Branch, "hutch/") {
-				fmt.Printf("✓ %s released; %s is asleep and pushes no more\n", b.Branch, id)
-			} else {
-				fmt.Printf("✓ %s is asleep\n", id)
-			}
-			for _, t := range threads {
-				argv, err := set.ResumeArgv(t.Agent, "ask", t.SessionID)
+			subject, _ := git(repo.Root, "log", "-1", "--format=%h %s")
+			fmt.Printf("\n✓ %s at %s\n  in %s\n✓ %s is asleep\n", branch, subject, repo.Root, id)
+			for _, name := range agentNames {
+				argv, err := set.PickArgv(name, "ask")
 				if err != nil {
 					continue
 				}
-				fmt.Printf("\nResume %s/%d (%s):\n  cd %s && %s\n", id, t.N, t.Title, landed, strings.Join(argv, " "))
+				fmt.Printf("\nContinue a %s session here:\n  %s\n", name, strings.Join(argv, " "))
 			}
 			return nil
 		}),
@@ -320,15 +301,12 @@ func serverAdapters(ctx context.Context, sess *yamux.Session) (agents.Set, error
 	return agents.Load(st.Layer.Adapters)
 }
 
-// gitDelta fills in what a box needs to take over the current branch: HEAD, the
+// gitDelta fills in what a box needs to continue the current branch: HEAD, the
 // commits origin lacks, staged and unstaged changes, and untracked files.
 func gitDelta(root string, p *api.ForkParams) error {
 	branch, _ := git(root, "symbolic-ref", "--short", "-q", "HEAD")
 	if branch == "" {
-		return errors.New("HEAD is detached; check out a branch first (the box takes over your branch)")
-	}
-	if def, _ := git(root, "symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"); def == "origin/"+branch {
-		return fmt.Errorf("you're on %s, the default branch; the box would push to it. Switch to a branch of your own first (git switch -c <name>)", branch)
+		return errors.New("HEAD is detached; check out a branch first (the box continues your branch)")
 	}
 	commit, err := git(root, "rev-parse", "HEAD")
 	if err != nil {
@@ -373,7 +351,11 @@ func gitDelta(root string, p *api.ForkParams) error {
 		nChanged = len(strings.Split(changed, "\n"))
 	}
 	p.Branch, p.Commit, p.Delta = branch, commit, d
-	fmt.Printf("Branch:   %s @ %s (the box takes over this branch)\n", branch, commit[:7])
+	if def, _ := git(root, "symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"); def == "origin/"+branch {
+		fmt.Printf("Branch:   %s @ %s (the default branch, so the box works on hutch/%s from here)\n", branch, commit[:7], p.ID)
+	} else {
+		fmt.Printf("Branch:   %s @ %s (the box continues this branch)\n", branch, commit[:7])
+	}
 	delta := fmt.Sprintf("%d changed, %d untracked", nChanged, len(untracked))
 	if ahead != "0" && ahead != "" {
 		delta = plural(ahead, "commit") + " not on origin, " + delta
@@ -478,23 +460,24 @@ type sessionFile struct {
 	data            []byte
 }
 
-// boxSessions copies the threads' session files out of a box, with the transcript
-// format of each, by the session id in their paths.
-func boxSessions(ctx context.Context, sess *yamux.Session, box string, set agents.Set, threads []api.Thread) ([]sessionFile, error) {
+// boxSessions copies the agents' session files out of a box, with the transcript
+// format of each: everything under each agent's sessions directory, since a box
+// works on one checkout.
+func boxSessions(ctx context.Context, sess *yamux.Session, box string, set agents.Set, names []string) ([]sessionFile, error) {
 	var out []sessionFile
-	for _, t := range threads {
-		a := set[t.Agent]
+	for _, name := range names {
+		a := set[name]
 		if a == nil || a.Sessions == "" {
 			continue
 		}
 		var buf, stderr bytes.Buffer
-		script := `cd && find "$1" -type f -path "*$2*" -print0 | tar --null -T - -cf -`
-		code, err := rpc.Exec(ctx, sess, api.BoxExec, api.ExecParams{ID: box, Argv: []string{"sh", "-c", script, "sh", a.SessionsRoot(), t.SessionID}}, &buf, &stderr)
+		script := `cd && [ -d "$1" ] || exit 0; find "$1" -type f -print0 | tar --null -T - -cf -`
+		code, err := rpc.Exec(ctx, sess, api.BoxExec, api.ExecParams{ID: box, Argv: []string{"sh", "-c", script, "sh", a.SessionsRoot()}}, &buf, &stderr)
 		if err == nil && code != 0 {
 			err = fmt.Errorf("exit %d: %s", code, strings.TrimSpace(stderr.String()))
 		}
 		if err != nil {
-			return nil, fmt.Errorf("%s/%d session: %w", box, t.N, err)
+			return nil, fmt.Errorf("%s's %s sessions: %w", box, name, err)
 		}
 		tr := tar.NewReader(&buf)
 		found := false
@@ -517,73 +500,90 @@ func boxSessions(ctx context.Context, sess *yamux.Session, box string, set agent
 			found = true
 		}
 		if !found {
-			fmt.Printf("warning: no session files for %s/%d in the box\n", box, t.N)
+			fmt.Printf("warning: no %s session files in %s\n", name, box)
 		}
 	}
 	return out, nil
 }
 
-// bringBack puts a box's pushed branch on this laptop. A branch from hutch cloud
-// is fast-forwarded in the checkout when it is on that branch, clean, and behind;
-// otherwise, and for hutch/<box> branches, it goes in the box's worktree. It
-// returns where the code is and, for the worktree fallback, why.
-func bringBack(repo *config.Repo, b api.Box) (string, string, error) {
-	if _, err := git(repo.Root, "fetch", "-q", "origin", b.Branch); err != nil {
-		return "", "", err
+// commitBox commits a box's uncommitted work as WIP, the one commit Hutch makes,
+// and returns its branch and head.
+func commitBox(ctx context.Context, sess *yamux.Session, box string) (branch, head string, wip bool, err error) {
+	// A box made before it had a git identity commits as this computer's.
+	script := `set -e
+branch=$(git symbolic-ref --short -q HEAD) || { echo "HEAD is detached in the box; check out a branch first" >&2; exit 3; }
+wip=no
+git add -A
+if ! git diff --cached --quiet; then
+  if git config user.email >/dev/null; then git commit -q -m "WIP (hutch)"
+  else git -c "user.name=$1" -c "user.email=$2" commit -q -m "WIP (hutch)"; fi
+  wip=yes
+fi
+echo "$branch $(git rev-parse HEAD) $wip"`
+	var out, stderr bytes.Buffer
+	code, err := rpc.Exec(ctx, sess, api.BoxExec, api.ExecParams{ID: box, Dir: "/workspace", Argv: []string{"sh", "-c", script, "sh", gitGlobal("user.name"), gitGlobal("user.email")}}, &out, &stderr)
+	if err == nil && code != 0 {
+		err = errors.New(strings.TrimSpace(stderr.String()))
 	}
-	remote := "origin/" + b.Branch
-	why := ""
-	if !strings.HasPrefix(b.Branch, "hutch/") {
-		cur, _ := git(repo.Root, "symbolic-ref", "--short", "-q", "HEAD")
-		dirty, err := git(repo.Root, "status", "--porcelain")
-		if err != nil {
-			return "", "", err
-		}
-		_, behind := git(repo.Root, "merge-base", "--is-ancestor", "HEAD", remote)
-		switch {
-		case cur != b.Branch:
-			why = fmt.Sprintf("your checkout is on %s, not %s", cur, b.Branch)
-		case dirty != "":
-			why = "your checkout has local changes"
-		case behind != nil:
-			why = "your checkout has commits the box's branch doesn't"
-		default:
-			if _, err := git(repo.Root, "merge", "-q", "--ff-only", remote); err != nil {
-				return "", "", err
-			}
-			return repo.Root, "", nil
-		}
+	if err != nil {
+		return "", "", false, fmt.Errorf("%s: %w", box, err)
 	}
-	wt := worktreePath(repo, b.ID)
-	if _, err := os.Stat(wt); err == nil {
-		if dirty, err := git(wt, "status", "--porcelain"); err != nil {
-			return "", "", err
-		} else if dirty != "" {
-			return "", "", fmt.Errorf("%s has local changes; commit or discard them first", wt)
-		}
-		if _, err := git(wt, "merge", "-q", "--ff-only", remote); err != nil {
-			return "", "", err
-		}
-		return wt, why, nil
+	f := strings.Fields(out.String())
+	if len(f) != 3 {
+		return "", "", false, fmt.Errorf("%s: unexpected answer %q", box, out.String())
 	}
-	// A branch checked out elsewhere, or with local commits origin lacks, can't be
-	// moved here without losing something, so the worktree is detached at origin's.
-	list, _ := git(repo.Root, "worktree", "list", "--porcelain")
-	_, ahead := git(repo.Root, "merge-base", "--is-ancestor", "refs/heads/"+b.Branch, remote)
-	_, missing := git(repo.Root, "rev-parse", "-q", "--verify", "refs/heads/"+b.Branch)
-	if strings.Contains(list+"\n", "branch refs/heads/"+b.Branch+"\n") || (missing == nil && ahead != nil) {
-		if _, err := git(repo.Root, "worktree", "add", "-q", "--detach", wt, remote); err != nil {
-			return "", "", err
-		}
-		if why != "" {
-			why += "; "
-		}
-		return wt, why + "detached at origin's " + b.Branch + ", since yours can't move", nil
+	return f[0], f[1], f[2] == "yes", nil
+}
+
+// fetchBox brings a box's commits up to head, at ref there, into the repository at
+// root as a git bundle over Hutch's connection, so no remote is needed: everything
+// since the commits this repository's branches already have.
+func fetchBox(ctx context.Context, sess *yamux.Session, box, root, ref, head string) error {
+	if _, err := git(root, "cat-file", "-e", head+"^{commit}"); err == nil {
+		return nil
 	}
-	if _, err := git(repo.Root, "worktree", "add", "-q", "-B", b.Branch, wt, remote); err != nil {
-		return "", "", err
+	tips, err := git(root, "for-each-ref", "--format=%(objectname)", "refs/heads", "refs/remotes", "refs/tags")
+	if err != nil {
+		return err
 	}
-	return wt, why, nil
+	script := `not=
+for c; do git cat-file -e "$c^{commit}" 2>/dev/null && not="$not ^$c"; done
+git bundle create -q - "$0" $not`
+	f, err := os.CreateTemp("", "hutch-bundle-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	var stderr bytes.Buffer
+	code, err := rpc.Exec(ctx, sess, api.BoxExec, api.ExecParams{ID: box, Dir: "/workspace", Argv: append([]string{"sh", "-c", script, ref}, strings.Fields(tips)...)}, f, &stderr)
+	f.Close()
+	if err == nil && code != 0 {
+		err = errors.New(strings.TrimSpace(stderr.String()))
+	}
+	if err != nil {
+		return fmt.Errorf("bundle %s's commits: %w", box, err)
+	}
+	if _, err := git(root, "fetch", "-q", f.Name(), ref); err != nil {
+		return fmt.Errorf("take in %s's commits: %w", box, err)
+	}
+	return nil
+}
+
+// checkoutHere checks out branch at head in the clean checkout at root: a new
+// branch, or a fast-forward of the one here. One that has diverged is left alone.
+func checkoutHere(root, branch, head string) error {
+	if _, err := git(root, "rev-parse", "-q", "--verify", "refs/heads/"+branch); err != nil {
+		_, err := git(root, "checkout", "-q", "--no-track", "-b", branch, head)
+		return err
+	}
+	if _, err := git(root, "merge-base", "--is-ancestor", "refs/heads/"+branch, head); err != nil {
+		return fmt.Errorf("your %s has commits the box's doesn't; nothing was changed here. Merge the box's work with: git switch %s && git merge %s", branch, branch, head[:12])
+	}
+	if _, err := git(root, "checkout", "-q", branch); err != nil {
+		return err
+	}
+	_, err := git(root, "merge", "-q", "--ff-only", head)
+	return err
 }
 
 func size(n int) string {

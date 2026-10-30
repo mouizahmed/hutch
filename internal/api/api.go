@@ -36,8 +36,6 @@ const (
 	BoxArchive = "box.archive" // hutchd only
 	BoxStatus  = "box.status"
 	BoxDial    = "box.dial"
-	// BoxRelease gives a branch a box took over back to the laptop (hutch local).
-	BoxRelease = "box.release"
 	// Events is a stream of Event: the current boxes, threads, and workers, then
 	// each change.
 	Events = "events"
@@ -63,7 +61,6 @@ const (
 	ThreadNew    = "thread.new"
 	ThreadSend   = "thread.send"
 	ThreadRm     = "thread.rm"
-	ThreadPin    = "thread.pin"
 	ThreadRename = "thread.rename"
 	ThreadResume = "thread.resume"
 
@@ -127,7 +124,7 @@ type MoveParams struct {
 }
 
 // MoveResult says how a box moved: warm (everything survived) or cold (its disk
-// survived; processes restarted and agents resumed).
+// survived; processes restarted, agents' threads exited).
 type MoveResult struct {
 	From string `json:"from"`
 	To   string `json:"to"`
@@ -204,6 +201,7 @@ type WorkerSettingsParams struct {
 	IdleInterval    time.Duration `json:"idle_interval"`
 	ThreadInterval  time.Duration `json:"thread_interval"`
 	WorkingWindow   time.Duration `json:"working_window"`
+	RedrawWindow    time.Duration `json:"redraw_window"`
 	Checkpoint      time.Duration `json:"checkpoint"`
 	FirstCheckpoint time.Duration `json:"first_checkpoint"`
 	// ChunkCache is the share of the worker's disk downloaded chunks may use, in percent.
@@ -224,7 +222,7 @@ type WorkerSettingsParams struct {
 
 // NewWorkerSettings is the part of the worker's settings that comes from config.
 func NewWorkerSettings(c *config.Config) WorkerSettingsParams {
-	return WorkerSettingsParams{IdleInterval: c.Duration("idle.check_interval"), ThreadInterval: c.Duration("threads.check_interval"), WorkingWindow: c.Duration("threads.working_window"),
+	return WorkerSettingsParams{IdleInterval: c.Duration("idle.check_interval"), ThreadInterval: c.Duration("threads.check_interval"), WorkingWindow: c.Duration("threads.working_window"), RedrawWindow: c.Duration("threads.redraw_window"),
 		Checkpoint: c.Duration("checkpoint.interval"), FirstCheckpoint: c.Duration("checkpoint.first_after"), ChunkCache: c.Percent("machine.chunk_cache"), Refresh: c.Duration("gc.grace") / 2,
 		Overcommit: c.Float("machine.overcommit"), MemoryHigh: c.Percent("machine.memory_high"), MemoryCritical: c.Percent("machine.memory_critical"),
 		PeakWindow: c.Duration("machine.peak_window"), PressureStall: c.Duration("machine.pressure_stall")}
@@ -266,9 +264,10 @@ type Box struct {
 	Kind       string    `json:"kind,omitempty"` // BoxTemplate, BoxVersion, or empty for a box
 	Branch     string    `json:"branch,omitempty"`
 	Base       string    `json:"base,omitempty"`
-	PushError  string    `json:"push_error,omitempty"`
-	// Merged says how the box's branch landed in its base ("PR #12", "in main").
-	Merged string `json:"merged,omitempty"`
+	// Changes and Unpushed are uncommitted files and commits on no remote, from the
+	// box's latest report.
+	Changes  int `json:"changes,omitempty"`
+	Unpushed int `json:"unpushed,omitempty"`
 	// Path is the laptop directory /workspace also appears at; threads start there.
 	Path string `json:"path,omitempty"`
 }
@@ -335,7 +334,6 @@ type TemplateParams struct {
 	DiskBytes    int64         `json:"disk_bytes"`
 	Idle         Idle          `json:"idle"`
 	Credentials  []string      `json:"credentials,omitempty"`
-	PushInterval time.Duration `json:"push_interval,omitempty"`
 	Allow        []string      `json:"allow,omitempty"`
 	BuildTimeout time.Duration `json:"build_timeout"`
 	QuietTimeout time.Duration `json:"quiet_timeout"`
@@ -415,27 +413,25 @@ type RenameParams struct {
 }
 
 // Thread is one agent session: a tmux window in the box's "hutch" session.
+// A Thread is a terminal in a box running an agent or a command, as the box last
+// reported it (threads.md).
 type Thread struct {
-	Box     string    `json:"box"`
-	N       int       `json:"n"`
-	Agent   string    `json:"agent"`
-	Title   string    `json:"title"`
-	Created time.Time `json:"created"`
-	State   string    `json:"state,omitempty"` // working, waiting, exited; from the latest report
+	Box      string    `json:"box"`
+	N        int       `json:"n"`
+	Agent    string    `json:"agent,omitempty"` // empty for a command
+	Autonomy string    `json:"autonomy,omitempty"`
+	Title    string    `json:"title"`
+	Created  time.Time `json:"created"`
+	State    string    `json:"state,omitempty"` // working, waiting, exited
 	// Unread: it stopped working while nobody was looking at it.
-	Unread  bool `json:"unread,omitempty"`
-	Pinned  bool `json:"pinned,omitempty"`
-	Renamed bool `json:"renamed,omitempty"` // Title is the user's, not the one from its prompt
-	// SessionID is the agent's own session, for resuming it.
-	SessionID string `json:"session_id,omitempty"`
+	Unread bool `json:"unread,omitempty"`
 }
 
-// ThreadTarget names one thread, with what to change for pin and rename.
+// ThreadTarget names one thread, with a new name for rename.
 type ThreadTarget struct {
-	Box    string `json:"box"`
-	N      int    `json:"n"`
-	Title  string `json:"title,omitempty"`
-	Pinned bool   `json:"pinned,omitempty"`
+	Box   string `json:"box"`
+	N     int    `json:"n"`
+	Title string `json:"title,omitempty"`
 }
 
 const (
@@ -469,11 +465,11 @@ type Crash struct {
 }
 
 type BoxReport struct {
-	Box        Box               `json:"box"`
-	Threads    []ThreadState     `json:"threads,omitempty"`
-	LastActive time.Time         `json:"last_active"`
-	Files      map[string]string `json:"files,omitempty"` // hashes of watched files
-	Push       *guestproto.Push  `json:"push,omitempty"`
+	Box        Box                   `json:"box"`
+	Threads    []ThreadState         `json:"threads,omitempty"`
+	LastActive time.Time             `json:"last_active"`
+	Files      map[string]string     `json:"files,omitempty"` // hashes of watched files
+	Git        *guestproto.GitStatus `json:"git,omitempty"`
 	// MemMiB is the host memory the box's VM holds now; PeakMiB its highest
 	// over the peak window.
 	MemMiB  int `json:"mem_mib,omitempty"`
@@ -484,8 +480,15 @@ type ThreadState struct {
 	N          int       `json:"n"`
 	State      string    `json:"state"`
 	LastOutput time.Time `json:"last_output"`
+	Bell       time.Time `json:"bell"`             // when it last rang the bell
 	Viewed     bool      `json:"viewed,omitempty"` // a client shows it now
-	SessionID  string    `json:"session_id,omitempty"`
+	// What its window carries (guestproto.ThreadStatus).
+	Agent    string    `json:"agent,omitempty"`
+	Autonomy string    `json:"autonomy,omitempty"`
+	Prompt   string    `json:"prompt,omitempty"`
+	Name     string    `json:"name,omitempty"`
+	Created  time.Time `json:"created"`
+	Title    string    `json:"title,omitempty"`
 }
 
 // WorkerThreadsParams reports a box's thread states when they change.
@@ -513,6 +516,9 @@ const (
 	EventThreadRemoved = "thread_removed"
 	EventWorker        = "worker"
 	EventWorkerRemoved = "worker_removed"
+	// EventAlert is an agent wanting you: it rang the bell or exited while no
+	// one looked. Sent once, never part of the state.
+	EventAlert = "alert"
 	// EventSynced follows the current state when a stream starts.
 	EventSynced = "synced"
 )
@@ -523,6 +529,7 @@ type ThreadParams struct {
 	Cmd      string `json:"cmd,omitempty"`
 	Prompt   string `json:"prompt,omitempty"`
 	Autonomy string `json:"autonomy,omitempty"` // full or ask
+	Model    string `json:"model,omitempty"`    // passed through the adapter's model setting; empty for its default
 	// Resume continues this agent session, from Files written first (hutch cloud).
 	Resume string            `json:"resume,omitempty"`
 	Files  []guestproto.File `json:"files,omitempty"`
@@ -616,11 +623,10 @@ type ForkParams struct {
 	ID      string `json:"id"`
 	Idle    Idle   `json:"idle"`
 	// Logins the box gets ("*": all), resolved from the project's grants.
-	Credentials  []string      `json:"credentials,omitempty"`
-	PushInterval time.Duration `json:"push_interval,omitempty"`
-	Allow        []string      `json:"allow,omitempty"`
-	Store        *Store        `json:"store,omitempty"` // set by the server
-	Path         string        `json:"path,omitempty"`
+	Credentials []string `json:"credentials,omitempty"`
+	Allow       []string `json:"allow,omitempty"`
+	Store       *Store   `json:"store,omitempty"` // set by the server
+	Path        string   `json:"path,omitempty"`
 	// Branch makes the box take over an existing branch at Commit instead of
 	// starting hutch/<id> (hutch cloud), with Delta applied.
 	Branch string `json:"branch,omitempty"`
