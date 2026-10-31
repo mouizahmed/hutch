@@ -81,7 +81,11 @@ jobs:
             /home/hutch-first/fixture/scripts/
           sudo cp -r dist/release /home/hutch-first/fixture/release
           sudo chown -R hutch-first:hutch-first /home/hutch-first
-          sudo -u hutch-first env HOME=/home/hutch-first PATH="$PATH" \
+          sudo -u hutch-first env -i HOME=/home/hutch-first USER=hutch-first LOGNAME=hutch-first \
+            PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin TERM=xterm-256color \
+            XDG_CONFIG_HOME=/home/hutch-first/.config XDG_CACHE_HOME=/home/hutch-first/.cache \
+            XDG_DATA_HOME=/home/hutch-first/.local/share XDG_STATE_HOME=/home/hutch-first/.local/state \
+            TMPDIR=/home/hutch-first/tmp \
             GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_TEMP=/home/hutch-first/tmp \
             HUTCH_TEST_BACKEND=firecracker HUTCH_TEST_COMMIT="$CANDIDATE_SHA" \
             HUTCH_VERSION="$HUTCH_VERSION" HUTCH_TEST_ASSETS=/home/hutch-first/fixture/release \
