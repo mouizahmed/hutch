@@ -21,6 +21,16 @@ hutch doctor
 hutch machine
 ```
 
+You can check the machine before signing in to an agent by starting a shell box:
+
+```sh
+hutch new --image base --cpus 1 --mem 1024 --cmd bash --name first-box
+hutch exec first-box -- uname -a
+hutch attach first-box
+```
+
+Detach with `Ctrl-b`, then `d`. This shell uses the default image; the project template below adds your development environment. Remove the trial box when finished with `hutch rm first-box`.
+
 ## Add your tools and project
 
 Log in with each tool's own flow, then review what Hutch will copy from your computer:
