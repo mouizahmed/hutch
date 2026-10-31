@@ -5,6 +5,7 @@ package worker
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,12 +26,8 @@ func exchangeWorker(t *testing.T) *Worker {
 	if os.Geteuid() != 0 {
 		t.Fatal("runtime exchange requires root")
 	}
-	entries, err := os.ReadDir("/var/lib/hutch/boxes")
-	if err != nil && !os.IsNotExist(err) {
+	if err := emptyExchangeRoot("/var/lib/hutch/boxes"); err != nil {
 		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		t.Fatal("snapshot exchange requires an empty disposable machine")
 	}
 	version := os.Getenv("HUTCH_TEST_FC")
 	if version == "" {
@@ -42,6 +39,49 @@ func exchangeWorker(t *testing.T) *Worker {
 	}
 	t.Logf("actual receiving class: %s; warm classes: %v", w.Class(), w.Classes())
 	return w
+}
+
+func emptyExchangeRoot(root string) error {
+	entries, err := os.ReadDir(root)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		// Locks outlive removed boxes. Existing box/restore directories and
+		// unknown entries still refuse the destructive tests.
+		if entry.Type().IsRegular() && strings.HasPrefix(entry.Name(), ".") && strings.HasSuffix(entry.Name(), ".lock") {
+			continue
+		}
+		return fmt.Errorf("snapshot exchange requires an empty disposable machine; found %s", entry.Name())
+	}
+	return nil
+}
+
+func TestSnapshotExchangeGuard(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{".slots.lock", ".exchange-target.lock"} {
+		if err := os.WriteFile(filepath.Join(root, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := emptyExchangeRoot(root); err != nil {
+		t.Fatalf("removed boxes' locks prevented a repeat run: %v", err)
+	}
+	for _, name := range []string{"existing-box", ".restore-exchange-target", ".fake.lock"} {
+		t.Run(name, func(t *testing.T) {
+			dir := filepath.Join(root, name)
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			defer os.Remove(dir)
+			if err := emptyExchangeRoot(root); err == nil {
+				t.Fatal("existing state did not prevent destructive tests")
+			}
+		})
+	}
 }
 
 func exchangeExec(t *testing.T, w *Worker, id, script string) string {
