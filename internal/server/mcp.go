@@ -133,7 +133,7 @@ func (s *Server) mcpLogins(set agents.Set) ([]keys.Login, map[string]bool, error
 
 // mcpFiles is an adapter's MCP secret files as a box gets them: keys of servers
 // with hosts as placeholders.
-func mcpFiles(adapter string, files []guestproto.File, logins []keys.Login, real map[string]bool) []guestproto.File {
+func mcpFiles(adapter string, files []guestproto.File, logins []keys.Login, real map[string]bool) ([]guestproto.File, error) {
 	swaps := map[string]string{}
 	for _, l := range logins {
 		if l.Adapter != adapter {

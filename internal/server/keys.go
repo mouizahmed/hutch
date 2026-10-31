@@ -155,7 +155,7 @@ func (s *Server) syncSecrets(a *agents.Adapter, files []guestproto.File) error {
 
 // placeholdered is a login's files as boxes get them: each secret replaced by its
 // newest placeholder.
-func placeholdered(files []guestproto.File, secrets []keys.Secret) []guestproto.File {
+func placeholdered(files []guestproto.File, secrets []keys.Secret) ([]guestproto.File, error) {
 	swaps := map[string]string{}
 	for _, sec := range secrets {
 		swaps[sec.Real] = sec.Placeholders[0]
@@ -164,13 +164,17 @@ func placeholdered(files []guestproto.File, secrets []keys.Secret) []guestproto.
 }
 
 // placeholderedBy is files with each real value in swaps replaced by its placeholder.
-func placeholderedBy(files []guestproto.File, swaps map[string]string) []guestproto.File {
+func placeholderedBy(files []guestproto.File, swaps map[string]string) ([]guestproto.File, error) {
 	out := make([]guestproto.File, len(files))
 	for i, f := range files {
-		f.Data = keys.Replace(slices.Clone(f.Data), swaps)
+		var err error
+		f.Data, err = keys.ReplaceFile(f.Path, f.Data, swaps)
+		if err != nil {
+			return nil, fmt.Errorf("invalid credential format in %s", f.Path)
+		}
 		out[i] = f
 	}
-	return out
+	return out, nil
 }
 
 // proxied reports whether a box can use its keys proxy: its hutch-guest gives
@@ -217,7 +221,11 @@ func (s *Server) boxFiles(creds []string, proxied bool) ([]guestproto.File, erro
 			files = append(files, c.Files...)
 			continue
 		case mcp != "":
-			files = append(files, mcpFiles(a, c.Files, mcpLogins, real)...)
+			part, err := mcpFiles(a, c.Files, mcpLogins, real)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, part...)
 			continue
 		}
 		secrets, err := s.loginSecrets(a)
@@ -230,7 +238,11 @@ func (s *Server) boxFiles(creds []string, proxied bool) ([]guestproto.File, erro
 			log.Printf("keys: %s's login has no placeholders yet", a)
 			continue
 		}
-		files = append(files, placeholdered(c.Files, secrets)...)
+		part, err := placeholdered(c.Files, secrets)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, part...)
 	}
 	return files, nil
 }
@@ -392,7 +404,10 @@ func (s *Server) storeRefresh(p api.KeysRefreshedParams) error {
 		return fmt.Errorf("%s's stored login: %w", p.Adapter, err)
 	}
 	for i := range files {
-		files[i].Data = keys.Replace(files[i].Data, swaps)
+		files[i].Data, err = keys.ReplaceFile(files[i].Path, files[i].Data, swaps)
+		if err != nil {
+			return fmt.Errorf("invalid stored credential format in %s", files[i].Path)
+		}
 	}
 	data, _ := json.Marshal(files)
 	if _, _, err := s.store.putLayerPart(part, -1, data); err != nil {

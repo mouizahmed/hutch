@@ -8,9 +8,11 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"net"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -219,8 +221,76 @@ var yamlLine = regexp.MustCompile(`(?m)^[ \t-]*([A-Za-z0-9_-]+):[ \t]*["']?([^\s
 
 // Replace swaps every old value in data for its new one.
 func Replace(data []byte, swaps map[string]string) []byte {
-	for old, nw := range swaps {
-		data = bytes.ReplaceAll(data, []byte(old), []byte(nw))
+	var old []string
+	for value := range swaps {
+		if value != "" {
+			old = append(old, value)
+		}
 	}
-	return data
+	sort.Slice(old, func(i, j int) bool {
+		if len(old[i]) != len(old[j]) {
+			return len(old[i]) > len(old[j])
+		}
+		return old[i] < old[j]
+	})
+	var pairs []string
+	for _, value := range old {
+		pairs = append(pairs, value, swaps[value])
+	}
+	return []byte(strings.NewReplacer(pairs...).Replace(string(data)))
+}
+
+// ReplaceFile substitutes decoded string values so escaped JSON/TOML tokens
+// cannot escape replacement. Numbers and unrelated metadata retain their types.
+func ReplaceFile(path string, data []byte, swaps map[string]string) ([]byte, error) {
+	if len(swaps) == 0 {
+		return bytes.Clone(data), nil
+	}
+	var doc any
+	switch {
+	case strings.HasSuffix(path, ".json"):
+		if !json.Valid(data) {
+			return nil, fmt.Errorf("invalid JSON credential file")
+		}
+		d := json.NewDecoder(bytes.NewReader(data))
+		d.UseNumber()
+		if err := d.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("invalid JSON credential file")
+		}
+	case strings.HasSuffix(path, ".toml"):
+		var m map[string]any
+		if _, err := toml.Decode(string(data), &m); err != nil {
+			return nil, fmt.Errorf("invalid TOML credential file")
+		}
+		doc = m
+	default:
+		return Replace(data, swaps), nil
+	}
+	var walk func(any) any
+	walk = func(value any) any {
+		switch value := value.(type) {
+		case string:
+			return string(Replace([]byte(value), swaps))
+		case map[string]any:
+			for key, item := range value {
+				value[key] = walk(item)
+			}
+		case []any:
+			for i, item := range value {
+				value[i] = walk(item)
+			}
+		case []map[string]any:
+			for _, item := range value {
+				walk(item)
+			}
+		}
+		return value
+	}
+	doc = walk(doc)
+	if strings.HasSuffix(path, ".json") {
+		return json.Marshal(doc)
+	}
+	var out bytes.Buffer
+	err := toml.NewEncoder(&out).Encode(doc)
+	return out.Bytes(), err
 }

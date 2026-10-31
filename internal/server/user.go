@@ -445,13 +445,15 @@ func checkCapturedLogin(a *agents.Adapter, files []guestproto.File, known []keys
 }
 
 // readSources reads adapter sources from a box; missing files are skipped.
+const maxCredentialFileBytes = 1 << 20
+
 func (s *Server) readSources(ctx context.Context, w *workerConn, box string, sources []agents.Source) ([]guestproto.File, error) {
 	var files []guestproto.File
 	for _, src := range sources {
-		var data bytes.Buffer
+		data := boundedBuffer{limit: maxCredentialFileBytes}
 		err := s.run(ctx, w, box, api.ExecParams{Argv: []string{"sh", "-c", `f="$HOME/${1#\~/}"; [ ! -f "$f" ] || cat -- "$f"`, "sh", src.File}}, &data, io.Discard)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("capture %s (maximum %d bytes): %w", src.File, maxCredentialFileBytes, err)
 		}
 		if data.Len() == 0 {
 			continue

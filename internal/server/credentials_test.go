@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -193,5 +194,34 @@ func TestLegacyClaudeCaptureScopesLoginAndProxy(t *testing.T) {
 	}
 	if checkCapturedLogin(a, []guestproto.File{{Path: a.Credentials[0].File, Data: []byte(`{"mcpOAuth":{"fixture":{"accessToken":"` + mcp + `"}}}`)}}, nil) == nil {
 		t.Fatal("an MCP session was accepted as the agent's login")
+	}
+}
+
+func TestCaptureBoundsOutputFromUntrustedGuest(t *testing.T) {
+	left, right := net.Pipe()
+	cfg := yamux.DefaultConfig()
+	cfg.LogOutput = io.Discard
+	client, err := yamux.Client(left, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	worker, err := yamux.Server(right, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go rpc.Serve(ctx, worker, rpc.Mux{api.BoxExec: func(_ context.Context, _ json.RawMessage, out *rpc.Out) (any, error) {
+		return rpc.ExitCode(0), out.Stdout(bytes.Repeat([]byte("private-file-content"), 100000))
+	}}, nil)
+	s := &Server{}
+	files, err := s.readSources(ctx, &workerConn{sess: client}, "fixture", agents.Builtin()["codex"].Credentials)
+	if err == nil || !strings.Contains(err.Error(), "maximum 1048576 bytes") || len(files) != 0 {
+		t.Fatal("oversized guest credential output was not refused at capture")
+	}
+	if strings.Contains(err.Error(), "private-file-content") {
+		t.Fatal("capture size failure disclosed file content")
 	}
 }

@@ -21,7 +21,11 @@ func TestMCPFiles(t *testing.T) {
 		{Name: "claude/mcp/linear", Adapter: "claude", Secrets: []keys.Secret{{Real: "Bearer LINEARKEY", Placeholders: []string{"Bearer PH1"}}}},
 		{Name: "claude/mcp/api", Adapter: "claude", Secrets: []keys.Secret{{Real: "SHAREDKEY", Placeholders: []string{"PH2"}}}},
 	}
-	got := string(mcpFiles("claude", []guestproto.File{file}, logins, map[string]bool{"SHAREDKEY": true})[0].Data)
+	files, err := mcpFiles("claude", []guestproto.File{file}, logins, map[string]bool{"SHAREDKEY": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(files[0].Data)
 	if strings.Contains(got, "LINEARKEY") || !strings.Contains(got, "Bearer PH1") {
 		t.Errorf("hosted key not replaced: %s", got)
 	}
@@ -81,7 +85,11 @@ func TestMCPRotationAndTransport(t *testing.T) {
 		t.Fatalf("transport policy: %+v, raw=%v", logins, real)
 	}
 	// The same value is also needed by plain HTTP, so it must remain real.
-	got := string(mcpFiles(a.Name, []guestproto.File{file(newValue)}, logins, real)[0].Data)
+	files, err := mcpFiles(a.Name, []guestproto.File{file(newValue)}, logins, real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(files[0].Data)
 	if strings.Count(got, newValue) != 2 {
 		t.Fatal("plain HTTP's key was replaced by an unusable placeholder")
 	}

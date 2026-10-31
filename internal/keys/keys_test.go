@@ -2,11 +2,51 @@ package keys
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"net"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/BurntSushi/toml"
 )
+
+func TestEscapedCredentialFileSubstitution(t *testing.T) {
+	const real = "synthetic-\"quoted\\token<value>"
+	data, _ := json.Marshal(map[string]any{"access_token": real, "number": json.Number("9007199254740993")})
+	got, err := ReplaceFile("auth.json", data, map[string]string{real: "placeholder"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]json.RawMessage
+	if json.Unmarshal(got, &doc) != nil || string(doc["access_token"]) != `"placeholder"` || string(doc["number"]) != "9007199254740993" {
+		t.Fatal("escaped token was retained or credential metadata was changed")
+	}
+	// TOML basic strings have escaping too; literal strings retain backslashes.
+	for _, data := range []string{
+		"access_token = \"synthetic-\\\"quoted\\\\token<value>\"\nnumber = 9007199254740993\n",
+		"access_token = 'synthetic-\"quoted\\token<value>'\nnumber = 9007199254740993\n",
+	} {
+		got, err := ReplaceFile("auth.toml", []byte(data), map[string]string{real: "placeholder"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc map[string]any
+		if _, err := toml.Decode(string(got), &doc); err != nil || doc["access_token"] != "placeholder" || doc["number"] != int64(9007199254740993) {
+			t.Fatal("TOML token escaping bypassed substitution or lost integer precision")
+		}
+	}
+	if _, err := ReplaceFile("auth.json", []byte(`{"token":"private-value`), map[string]string{"private-value": "placeholder"}); err == nil || strings.Contains(err.Error(), "private-value") {
+		t.Fatal("malformed credentials were accepted or disclosed")
+	}
+}
+
+func TestCredentialReplacementDoesNotCascade(t *testing.T) {
+	got := Replace([]byte("prefix-long prefix"), map[string]string{"prefix-long": "prefix", "prefix": "changed"})
+	if string(got) != "prefix changed" {
+		t.Fatal("overlapping tokens were corrupted by prefix order or replacement cascades")
+	}
+}
 
 // A placeholder must never be the secret, and must keep what clients read: a
 // token's prefix and length, a JWT's claims.
