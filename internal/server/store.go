@@ -642,6 +642,25 @@ func (s *store) deleteLayerPart(part string) error {
 	return err
 }
 
+// putLayerParts commits related encrypted parts together. In particular, a
+// refresh's credential files and proxy aliases must survive or roll back as one.
+func (s *store) putLayerParts(parts map[string][]byte) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC()
+	for part, content := range parts {
+		if _, err := tx.Exec(`INSERT INTO user_layer (part, version, content, updated) VALUES (?, 1, ?, ?)
+			ON CONFLICT(part) DO UPDATE SET version = user_layer.version + 1, content = excluded.content, updated = excluded.updated`,
+			part, s.userKey.Seal("user/"+part, content), now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *store) setBoxCredentials(box string, creds []string) error {
 	data, _ := json.Marshal(creds)
 	_, err := s.exec(`INSERT INTO box_credentials (box_id, credentials) VALUES (?, ?)

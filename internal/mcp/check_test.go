@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/mouizahmed/hutch/internal/agents"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -137,7 +138,7 @@ func TestHTTPChecks(t *testing.T) {
 			defer server.Close()
 			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 			defer cancel()
-			n, err := check(ctx, spec{URL: server.URL, HTTP: map[string]string{"Authorization": "Bearer synthetic-secret"}})
+			n, err := check(ctx, spec{URL: server.URL, Headers: map[string]string{"Authorization": "Bearer synthetic-secret"}})
 			if err != nil || n != 1 || !closed.Load() {
 				t.Fatalf("tools=%d closed=%v err=%v", n, closed.Load(), err)
 			}
@@ -156,7 +157,7 @@ func TestFileErrorsAndAuth(t *testing.T) {
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	results, err := CheckFile(t.Context(), path, "mcpServers", time.Second)
+	results, err := CheckFile(t.Context(), path, "mcpServers", agents.MCPFields{Enabled: "enabled"}, time.Second)
 	if err != nil || len(results) != 2 {
 		t.Fatalf("%+v %v", results, err)
 	}
@@ -165,10 +166,19 @@ func TestFileErrorsAndAuth(t *testing.T) {
 			t.Fatalf("%+v", r)
 		}
 	}
+	// ${VAR} is filled in from the environment, as agents do; unset, the check
+	// says so instead of reporting an authentication failure.
+	data = `{"mcpServers":{"api":{"url":"https://mcp.invalid/${HUTCH_TEST_UNSET_VAR}"}}}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if results, err := CheckFile(t.Context(), path, "mcpServers", agents.MCPFields{}, time.Second); err != nil || len(results) != 1 || !strings.Contains(results[0].Detail, "HUTCH_TEST_UNSET_VAR") {
+		t.Fatalf("unset variable: %+v %v", results, err)
+	}
 	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := CheckFile(t.Context(), path, "mcpServers", time.Second); err == nil {
+	if _, err := CheckFile(t.Context(), path, "mcpServers", agents.MCPFields{Enabled: "enabled"}, time.Second); err == nil {
 		t.Fatal("malformed config treated as empty")
 	}
 }

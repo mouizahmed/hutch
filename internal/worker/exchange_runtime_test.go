@@ -25,6 +25,13 @@ func exchangeWorker(t *testing.T) *Worker {
 	if os.Geteuid() != 0 {
 		t.Fatal("runtime exchange requires root")
 	}
+	entries, err := os.ReadDir("/var/lib/hutch/boxes")
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatal("snapshot exchange requires an empty disposable machine")
+	}
 	version := os.Getenv("HUTCH_TEST_FC")
 	if version == "" {
 		version = "v1.17.0"
@@ -61,9 +68,12 @@ func TestSnapshotExport(t *testing.T) {
 		t.Fatal("HUTCH_TEST_EXCHANGE must be absolute")
 	}
 	id := "exchange-source"
-	t.Cleanup(func() { _ = w.Remove(id) })
 	st := &Store{Project: "synthetic", Prefix: "fixture"}
-	if _, err := w.Boot(t.Context(), id, "base", 1, 1024, 0, Idle{}, nil, st); err != nil {
+	b, err := w.Boot(t.Context(), id, "base", 1, 1024, 0, Idle{}, nil, st)
+	if b != nil {
+		t.Cleanup(func() { _ = w.Remove(id) })
+	}
+	if err != nil {
 		t.Fatal(err)
 	}
 	exchangeExec(t, w, id, `printf snapshot-exchange > /workspace/exchange-marker
@@ -72,7 +82,7 @@ i=0; until ss -ltn | grep -q ':19557'; do i=$((i+1)); test "$i" -lt 100; sleep 0
 	if exchangeExec(t, w, id, `node -e 'let s=require("net").connect(19557,"127.0.0.1",()=>s.write("ping"));s.on("data",b=>process.stdout.write(b))'`) != "1" {
 		t.Fatal("source process did not initialize")
 	}
-	b, err := w.Sleep(t.Context(), id)
+	b, err = w.Sleep(t.Context(), id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,8 +175,8 @@ func TestSnapshotImport(t *testing.T) {
 				t.Fatal(err)
 			}
 			id := "exchange-target"
-			t.Cleanup(func() { _ = w.Remove(id) })
 			if _, err := w.Restore(t.Context(), id, &f.Store, f.Gen, s, f.Key); err == nil {
+				t.Cleanup(func() { _ = w.Remove(id) })
 				t.Fatal("corrupt ciphertext restored successfully")
 			}
 			for _, name := range []string{id, ".restore-" + id} {
@@ -189,8 +199,10 @@ func TestSnapshotImport(t *testing.T) {
 					t.Fatal(err)
 				}
 				const cpuID = "exchange-cpu-check"
-				t.Cleanup(func() { _ = w.Remove(cpuID) })
 				cold, err := w.Restore(t.Context(), cpuID, &other, f.Gen, s, f.Key)
+				if err == nil {
+					t.Cleanup(func() { _ = w.Remove(cpuID) })
+				}
 				if err != nil || cold.State != Archived {
 					t.Fatalf("missing CPU feature did not force a cold import: %v", err)
 				}
@@ -209,6 +221,7 @@ func TestSnapshotImport(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			t.Cleanup(func() { _ = w.Remove(id) })
 			warm, err := w.restoresWarm(m.Box)
 			if err != nil {
 				t.Fatal(err)

@@ -6,6 +6,7 @@ package mcp
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -32,17 +33,59 @@ type Result struct {
 	Detail string `json:"detail"`
 }
 
+// spec is a server's settings: command, args, env and url are common to agents;
+// the rest are named by the adapter (agents.MCPFields).
 type spec struct {
-	Command  string            `json:"command"`
-	Args     []string          `json:"args"`
-	Env      map[string]string `json:"env"`
-	URL      string            `json:"url"`
-	Headers  map[string]string `json:"headers"`
-	HTTP     map[string]string `json:"http_headers"`
-	Bearer   string            `json:"bearer_token_env_var"`
-	Type     string            `json:"type"`
-	Enabled  *bool             `json:"enabled"`
-	Disabled bool              `json:"disabled"`
+	Command string
+	Args    []string
+	Env     map[string]string
+	URL     string
+	Headers map[string]string
+	Bearer  string
+	Type    string
+	Enabled *bool
+}
+
+func specOf(server map[string]any, fields agents.MCPFields) (spec, error) {
+	var s spec
+	var common struct {
+		Command string            `json:"command"`
+		Args    []string          `json:"args"`
+		Env     map[string]string `json:"env"`
+		URL     string            `json:"url"`
+	}
+	data, _ := json.Marshal(server)
+	if err := json.Unmarshal(data, &common); err != nil {
+		return s, err
+	}
+	s.Command, s.Args, s.Env, s.URL = common.Command, common.Args, common.Env, common.URL
+	field := func(name string, into any) error {
+		if v, ok := server[name]; ok && name != "" {
+			b, _ := json.Marshal(v)
+			return json.Unmarshal(b, into)
+		}
+		return nil
+	}
+	for _, err := range []error{field(fields.Headers, &s.Headers), field(fields.BearerEnv, &s.Bearer), field(fields.Type, &s.Type), field(fields.Enabled, &s.Enabled)} {
+		if err != nil {
+			return s, err
+		}
+	}
+	return s, nil
+}
+
+// expand fills in ${VAR} from the environment, as agents do; it names a variable
+// that isn't set.
+func expand(v string) (string, string) {
+	missing := ""
+	out := os.Expand(v, func(name string) string {
+		value, ok := os.LookupEnv(name)
+		if !ok && missing == "" {
+			missing = name
+		}
+		return value
+	})
+	return out, missing
 }
 
 type request struct {
@@ -69,7 +112,7 @@ var errNative = errors.New("server-initiated HTTP requests need a native client 
 // CheckFile reads only the adapter-declared user scope. It never prints config,
 // token values, server payloads, or subprocess stderr. OAuth managed by a native
 // client and legacy SSE/WebSocket transports are reported as unverified.
-func CheckFile(ctx context.Context, path, key string, timeout time.Duration) ([]Result, error) {
+func CheckFile(ctx context.Context, path, key string, fields agents.MCPFields, timeout time.Duration) ([]Result, error) {
 	if strings.HasPrefix(path, "~/") {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -108,11 +151,25 @@ func CheckFile(ctx context.Context, path, key string, timeout time.Duration) ([]
 			continue
 		}
 		r := Result{Name: name, Status: "ok"}
-		data, _ := json.Marshal(servers[name])
-		var s spec
-		if err := json.Unmarshal(data, &s); err != nil {
+		s, err := specOf(servers[name], fields)
+		missing := ""
+		if err == nil {
+			for _, m := range []map[string]string{s.Env, s.Headers} {
+				for k, v := range m {
+					var gone string
+					m[k], gone = expand(v)
+					missing = cmp.Or(missing, gone)
+				}
+			}
+			var gone string
+			s.URL, gone = expand(s.URL)
+			missing = cmp.Or(missing, gone)
+		}
+		if err != nil {
 			r.Status, r.Detail = "fail", "invalid command, args, environment, or headers"
-		} else if s.Disabled || s.Enabled != nil && !*s.Enabled {
+		} else if missing != "" {
+			r.Status, r.Detail = "warn", "uses ${"+missing+"}, which isn't set here; check it where the agent runs"
+		} else if s.Enabled != nil && !*s.Enabled {
 			r.Status, r.Detail = "warn", "disabled in config"
 		} else if s.Type == "sse" || s.Type == "websocket" {
 			r.Status, r.Detail = "warn", "legacy SSE/WebSocket transport needs a native client check"
@@ -180,7 +237,8 @@ func check(ctx context.Context, s spec) (int, error) {
 			if r.ID == 0 {
 				return nil, nil
 			}
-			for i := 0; i < 64 && scan.Scan(); i++ {
+			// Notifications before the reply are skipped; the deadline bounds them.
+			for scan.Scan() {
 				var reply response
 				if err := json.Unmarshal(scan.Bytes(), &reply); err != nil || reply.JSONRPC != "2.0" {
 					return nil, errors.New("MCP command wrote invalid protocol output")
@@ -214,11 +272,11 @@ func check(ctx context.Context, s spec) (int, error) {
 		return 0, err
 	}
 	var initialized struct {
-		Protocol string                         `json:"protocolVersion"`
-		Caps     map[string]json.RawMessage     `json:"capabilities"`
-		Server   struct{ Name, Version string } `json:"serverInfo"`
+		Protocol string                     `json:"protocolVersion"`
+		Caps     map[string]json.RawMessage `json:"capabilities"`
+		Server   struct{ Name string }      `json:"serverInfo"`
 	}
-	if json.Unmarshal(init, &initialized) != nil || initialized.Protocol == "" || initialized.Caps == nil || initialized.Server.Name == "" || initialized.Server.Version == "" {
+	if json.Unmarshal(init, &initialized) != nil || initialized.Protocol == "" || initialized.Caps == nil || initialized.Server.Name == "" {
 		return 0, errors.New("invalid MCP initialize result")
 	}
 	if initialized.Protocol != "2025-06-18" && initialized.Protocol != "2025-03-26" && initialized.Protocol != "2024-11-05" {
@@ -276,9 +334,6 @@ type httpExchange struct {
 
 func (h *httpExchange) headers(req *http.Request) error {
 	for k, v := range h.spec.Headers {
-		req.Header.Set(k, v)
-	}
-	for k, v := range h.spec.HTTP {
 		req.Header.Set(k, v)
 	}
 	if h.spec.Bearer != "" {
@@ -367,9 +422,7 @@ func (h *httpExchange) close() {
 	if h.session == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	r, err := http.NewRequestWithContext(ctx, http.MethodDelete, h.spec.URL, nil)
+	r, err := http.NewRequestWithContext(h.ctx, http.MethodDelete, h.spec.URL, nil)
 	if err != nil {
 		return
 	}

@@ -204,6 +204,12 @@ type ConfigPutResult struct {
 	Conflict bool      `json:"conflict,omitempty"`
 }
 
+// DoctorParams carries the default agent of the project doctor runs in, which
+// the machine's settings don't know.
+type DoctorParams struct {
+	DefaultAgent string `json:"default_agent,omitempty"`
+}
+
 type KeysRefreshedParams struct {
 	Adapter string        `json:"adapter"`
 	Changes []keys.Change `json:"changes"`

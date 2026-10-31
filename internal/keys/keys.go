@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -38,6 +39,9 @@ type Table struct {
 	CAKey  []byte              `json:"ca_key"`
 	// Reuse: a refresh this soon after the last one is answered from it.
 	Reuse time.Duration `json:"reuse"`
+	// RefreshTimeout bounds a refresh upstream and storing its result, which
+	// carry on when the box stops waiting.
+	RefreshTimeout time.Duration `json:"refresh_timeout"`
 	// Identity is opt-in by exact host; the seed stays on the machine.
 	IdentitySeed  []byte            `json:"identity_seed,omitempty"`
 	IdentityHosts []string          `json:"identity_hosts,omitempty"`
@@ -52,10 +56,57 @@ type Login struct {
 	Adapter string   `json:"adapter"`
 	Hosts   []string `json:"hosts"`
 	Secrets []Secret `json:"secrets"`
+	// TokenURL is where the login refreshes its tokens (OAuth 2); empty for one
+	// that doesn't.
+	TokenURL string `json:"token_url,omitempty"`
+	// Headers are the request headers its placeholders are swapped in, besides
+	// AuthHeaders: an MCP server's own key headers.
+	Headers []string `json:"headers,omitempty"`
 }
 
-// Refreshes reports whether the login is an agent's, which refreshes its tokens.
-func (l Login) Refreshes() bool { return l.Name == l.Adapter }
+// AuthHeaders are the headers every login's placeholders are swapped in.
+var AuthHeaders = []string{"Authorization", "X-Api-Key"}
+
+// Refreshes reports whether the login refreshes its tokens through the proxy.
+func (l Login) Refreshes() bool { return l.TokenURL != "" }
+
+// refreshSecret is the login's refresh token, if it has one.
+func (l Login) refreshSecret() (Secret, bool) {
+	for _, s := range l.Secrets {
+		if s.Key == Norm("refresh_token") {
+			return s, true
+		}
+	}
+	return Secret{}, false
+}
+
+// ApplyChanges updates secrets with a refresh's changes. Every placeholder a
+// secret had keeps standing for it, so copies boxes hold stay valid.
+func ApplyChanges(secrets []Secret, changes []Change) []Secret {
+	secrets = slices.Clone(secrets)
+	for _, c := range changes {
+		i := slices.IndexFunc(secrets, func(x Secret) bool { return x.Key == c.Key && x.Real == c.Old })
+		if i < 0 {
+			// An acknowledgement can be lost after a successful store. A retry
+			// adds any missing alias, without duplicating or reverting a token.
+			i = slices.IndexFunc(secrets, func(x Secret) bool { return x.Key == c.Key && x.Real == c.New })
+		}
+		if i < 0 {
+			if slices.ContainsFunc(secrets, func(x Secret) bool { return x.Key == c.Key }) {
+				continue // This change belongs to an older login or refresh.
+			}
+			secrets = append(secrets, Secret{Key: c.Key, Real: c.New, Placeholders: []string{c.Placeholder}})
+			continue
+		}
+		sec := secrets[i]
+		sec.Real = c.New
+		if !slices.Contains(sec.Placeholders, c.Placeholder) {
+			sec.Placeholders = append([]string{c.Placeholder}, sec.Placeholders...)
+		}
+		secrets[i] = sec
+	}
+	return secrets
+}
 
 // Secret is one value in a login's files. Every placeholder it was ever given
 // stands for its current real value; the first is the newest.

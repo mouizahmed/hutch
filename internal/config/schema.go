@@ -130,6 +130,18 @@ var Keys = []*Key{
 		Doc: "how long a connection to a sleeping box's port waits for it to wake"},
 	{Path: "ports.parked_max", Kind: Int, Default: int64(100), Min: "1", Max: "100000", Layers: machine,
 		Doc: "connections waiting for boxes to wake, at most, on a machine"},
+	{Path: "doctor.cleanup_timeout", Kind: Duration, Default: "1m", Min: "5s", Max: "1h", Layers: machine,
+		Doc: "how long doctor --template may take to remove each of its test boxes"},
+	{Path: "doctor.fingerprint_timeout", Kind: Duration, Default: "5m", Min: "10s", Max: "1h", Layers: machine,
+		Doc: "how long doctor --template may take to fingerprint a test build"},
+	{Path: "doctor.mcp_timeout", Kind: Duration, Default: "5m", Min: "10s", Max: "1h", Layers: machine,
+		Doc: "how long doctor --template may take to check every MCP server"},
+	{Path: "mcp.start_timeout", Kind: Duration, Default: "1m", Min: "1s", Max: "30m", Layers: machineUser,
+		Doc: "how long one MCP server may take to start and answer doctor's check (npx downloads count)"},
+	{Path: "keys.refresh_timeout", Kind: Duration, Default: "1m", Min: "5s", Max: "10m", Layers: machine,
+		Doc: "how long a login refresh upstream, and storing its result, may take; it carries on when the box stops waiting"},
+	{Path: "keys.placeholders_kept", Kind: Int, Default: int64(20), Min: "1", Max: "1000", Layers: machine,
+		Doc: "a refreshed JWT's newest placeholders that stay valid; older ones go, as boxes are written the newest when they wake"},
 	{Path: "keys.refresh_reuse", Kind: Duration, Default: "1m", Min: "0s", Max: "1h", Layers: machine,
 		Doc: "a box's login refresh this soon after another box's is answered with that one, not refreshed again"},
 	{Path: "keys.identity_hosts", Kind: List, Layers: user,
@@ -221,9 +233,6 @@ func (k *Key) Parse(raw any) (any, error) {
 	v, err := k.parse(raw)
 	if err != nil {
 		return nil, err
-	}
-	if (k.Path == "network.egress" || strings.HasSuffix(k.Path, ".network.egress")) && v == "allowlist" {
-		return nil, fmt.Errorf("domain-restricted egress is not implemented; refusing allowlist mode rather than starting with open egress")
 	}
 	if k.Min != "" && k.compare(v, k.Min) < 0 {
 		return nil, fmt.Errorf("below the minimum %s", k.Min)

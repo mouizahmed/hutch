@@ -69,10 +69,6 @@ func TestMachine(t *testing.T) {
 			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
-				case "/v0.1.0/checksums.txt":
-					if !tt.noSum {
-						fmt.Fprintf(w, "%s  hutch-machine_v0.1.0_linux_amd64.tar.gz\n", sum)
-					}
 				case "/v0.1.0/hutch-machine_v0.1.0_linux_amd64.tar.gz":
 					w.Write(data)
 				default:
@@ -81,7 +77,10 @@ func TestMachine(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			c := Client{BaseURL: server.URL, HTTP: server.Client()}
+			c := Client{BaseURL: server.URL, HTTP: server.Client(), Sums: map[string]string{}}
+			if !tt.noSum {
+				c.Sums["amd64"] = sum
+			}
 			dir, err := c.Machine(context.Background(), "v0.1.0", "amd64")
 			if tt.wantFail != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantFail) || dir != "" {
@@ -100,15 +99,6 @@ func TestMachine(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestChecksum(t *testing.T) {
-	sum := strings.Repeat("a", 64)
-	for _, text := range []string{"", "garbage  asset\n", sum + "  asset\n" + sum + "  asset\n"} {
-		if _, err := checksum(strings.NewReader(text), "asset"); err == nil {
-			t.Fatalf("accepted %q", text)
-		}
 	}
 }
 

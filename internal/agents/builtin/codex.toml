@@ -11,8 +11,9 @@ login       = "codex login"
 sessions    = "~/.codex/sessions/**/*.jsonl"
 credentials = [{ file = "~/.codex/auth.json", secrets = ["access_token", "refresh_token", "id_token", "OPENAI_API_KEY"] }]
 hosts       = ["chatgpt.com", "openai.com"]
+token_url   = "https://auth.openai.com/oauth/token"
 config      = ["~/.codex/config.toml", "~/.codex/AGENTS.md"]
-mcp         = { file = "~/.codex/config.toml", key = "mcp_servers", format = "codex", secrets = ["env", "http_headers"], raw_secrets = ["oauth.client_secret"] }
+mcp         = { file = "~/.codex/config.toml", key = "mcp_servers", format = "codex", secrets = ["env", "http_headers"], raw_secrets = ["oauth.client_secret"], fields = { headers = "http_headers", bearer_env = "bearer_token_env_var", enabled = "enabled" } }
 transcript  = "codex"
 
 [[seed]]

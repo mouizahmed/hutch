@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -68,6 +69,12 @@ func (w *Worker) gvisorCPUFeatures(version string) ([]string, error) {
 	return slices.Compact(features), nil
 }
 
+func union(a, b []string) []string {
+	out := slices.Concat(a, b)
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
 func supportsFeatures(available, required []string) bool {
 	if len(required) == 0 {
 		return false // Older imported checkpoints have unknown requirements.
@@ -96,7 +103,8 @@ func (w *Worker) restoresWarm(info *durable.BoxInfo) (bool, error) {
 	}
 	available, err := w.gvisorCPUFeatures(info.GVisor)
 	if err != nil {
-		return false, err
+		log.Printf("restore cold: %v", err)
+		return false, nil
 	}
 	return supportsFeatures(available, info.GVisorFeatures), nil
 }
@@ -369,7 +377,13 @@ func (w *Worker) sandboxPID(b *Box) (int, error) {
 func (w *Worker) killSandbox(b *Box) {
 	exists := true
 	if b.RunscID == "" {
-		exists, _ = w.legacySandboxExists(b)
+		var err error
+		if exists, err = w.legacySandboxExists(b); err != nil {
+			// Killing by its exact ID is safe even if it's gone; leaving it
+			// running while its box is removed isn't.
+			log.Printf("%s: list sandboxes: %v; killing it anyway", b.ID, err)
+			exists = true
+		}
 	}
 	if exists {
 		w.runsc(b.GVisor, "kill", b.sandboxID(), "KILL")
@@ -392,14 +406,14 @@ func (w *Worker) killSandbox(b *Box) {
 // disk is unmounted before it's copied; otherwise the sandbox resumes. On failure
 // the sandbox is left running.
 func (w *Worker) checkpointSandbox(ctx context.Context, b *Box, gen string, leaveRunning bool) error {
-	if len(b.GVisorFeatures) == 0 {
-		// A running legacy sandbox already works on this host. Its host feature
-		// set is a conservative bound even if a prior restore exposed fewer.
-		features, err := w.gvisorCPUFeatures(b.GVisor)
-		if err != nil {
-			return err
-		}
-		b.GVisorFeatures = features
+	// Processes may have started on any host the box ran on, and gVisor can't
+	// always hide a host's extra features from them: the snapshot needs every
+	// feature of each. Unknown, it imports cold elsewhere.
+	if features, err := w.gvisorCPUFeatures(b.GVisor); err == nil {
+		b.GVisorFeatures = union(b.GVisorFeatures, features)
+	} else {
+		log.Printf("%s: snapshot without CPU features, so it restores cold on other machines: %v", b.ID, err)
+		b.GVisorFeatures = nil
 	}
 	w.syncGuest(ctx, b)
 	if _, err := w.runsc(b.GVisor, "pause", b.sandboxID()); err != nil {

@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: runtime-${{ github.ref }}
+  group: runtime-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -201,6 +201,16 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Only artifacts this workflow built, never a pull request's
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPLAY_RUN: ${{ inputs.replay_run }}
+        run: |
+          [[ $REPLAY_RUN =~ ^[0-9]+$ ]] || exit 1
+          read -r path event < <(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$REPLAY_RUN" --jq '[.path, .event] | @tsv')
+          [[ $path == .github/workflows/runtime.yml && $event != pull_request* ]] || exit 1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod

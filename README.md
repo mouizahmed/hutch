@@ -11,7 +11,7 @@ The CLI and TUI run on Linux, macOS, and Windows. A project has reusable templat
 Once a release is published, install the CLI on Linux or macOS with:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mouizahmed/hutch/main/install.sh | sh
+curl -fsSL https://github.com/mouizahmed/hutch/releases/latest/download/install.sh | sh
 ```
 
 The script verifies the archive's SHA-256 checksum and installs into `~/.local/bin` without sudo. Add that directory to your `PATH` if needed. Set `HUTCH_VERSION=v0.1.0` to select a published version, or `HUTCH_INSTALL_DIR` to choose a directory. Before the first release, [build from source](CONTRIBUTING.md).

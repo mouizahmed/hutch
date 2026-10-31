@@ -3,7 +3,6 @@ package release
 
 import (
 	"archive/tar"
-	"bufio"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -28,14 +27,28 @@ func IsVersion(v string) bool {
 	return tag.MatchString(v) && !strings.HasSuffix(v, "-dirty") && !describe.MatchString(v)
 }
 
+// MachineSHA256 is the SHA-256 of this release's machine bundles, by
+// architecture ("amd64=<hex>,…"), built into the CLI by the release workflow. A
+// bundle is trusted through the binary already installed, not through a
+// checksum file downloaded beside it.
+var MachineSHA256 = ""
+
 // Client permits a different source in tests; production uses GitHub over TLS.
 type Client struct {
 	BaseURL string
 	HTTP    *http.Client
+	// Sums are the machine bundles' SHA-256 by architecture.
+	Sums map[string]string
 }
 
 func NewClient() *Client {
-	return &Client{BaseURL: BaseURL, HTTP: &http.Client{Timeout: 15 * time.Minute,
+	sums := map[string]string{}
+	for _, kv := range strings.Split(MachineSHA256, ",") {
+		if arch, sum, ok := strings.Cut(kv, "="); ok {
+			sums[arch] = strings.ToLower(sum)
+		}
+	}
+	return &Client{BaseURL: BaseURL, Sums: sums, HTTP: &http.Client{Timeout: 15 * time.Minute,
 		CheckRedirect: func(r *http.Request, via []*http.Request) error {
 			if r.URL.Scheme != "https" || len(via) >= 10 {
 				return fmt.Errorf("refusing insecure or excessive release redirects")
@@ -70,14 +83,9 @@ func (c *Client) Machine(ctx context.Context, version, arch string) (dir string,
 	}
 	asset := "hutch-machine_" + version + "_linux_" + arch + ".tar.gz"
 	base := strings.TrimRight(c.BaseURL, "/") + "/" + version + "/"
-	body, err := c.get(ctx, base+"checksums.txt")
-	if err != nil {
-		return "", err
-	}
-	sum, err := checksum(io.LimitReader(body, 1<<20), asset)
-	body.Close()
-	if err != nil {
-		return "", err
+	sum := c.Sums[arch]
+	if b, err := hex.DecodeString(sum); err != nil || len(b) != sha256.Size {
+		return "", fmt.Errorf("this hutch has no checksum built in for %s; install hutch from a release, or pass --hutchd and --images from a build", asset)
 	}
 	dir, err = os.MkdirTemp("", "hutch-release-*")
 	if err != nil {
@@ -94,7 +102,7 @@ func (c *Client) Machine(ctx context.Context, version, arch string) (dir string,
 		return dir, err
 	}
 	defer f.Close()
-	body, err = c.get(ctx, base+asset)
+	body, err := c.get(ctx, base+asset)
 	if err != nil {
 		return dir, err
 	}
@@ -153,27 +161,4 @@ func (c *Client) Machine(ctx context.Context, version, arch string) (dir string,
 		}
 	}
 	return dir, nil
-}
-
-func checksum(r io.Reader, asset string) (string, error) {
-	s := bufio.NewScanner(r)
-	var sum string
-	for s.Scan() {
-		f := strings.Fields(s.Text())
-		if len(f) != 2 || strings.TrimPrefix(f[1], "*") != asset {
-			continue
-		}
-		b, err := hex.DecodeString(f[0])
-		if err != nil || len(b) != sha256.Size || sum != "" {
-			return "", fmt.Errorf("invalid checksum for %s", asset)
-		}
-		sum = strings.ToLower(f[0])
-	}
-	if err := s.Err(); err != nil {
-		return "", err
-	}
-	if sum == "" {
-		return "", fmt.Errorf("checksums.txt has no checksum for %s", asset)
-	}
-	return sum, nil
 }

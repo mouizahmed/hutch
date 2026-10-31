@@ -87,7 +87,7 @@ func (s *Server) doctorUser(defaultAgent string) []api.Check {
 		}
 		for _, f := range layer.Files[a.Name] {
 			if f.Path == a.MCP.File && len(agents.MCPServers(f.Path, f.Data, a.MCP.Key)) > 0 {
-				add("MCP readiness", "warn", "configured servers have not been started by this offline check; native-client OAuth is not validated", "hutch doctor --template for runtime and transport checks; verify authentication in the native client")
+				add("MCP readiness", "ok", "servers configured; hutch doctor --template starts them and checks they answer", "")
 				return checks
 			}
 		}

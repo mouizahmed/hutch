@@ -64,6 +64,9 @@ func templateParams(repo *config.Repo, cfg *config.Config, needCommit bool) (api
 	if strings.HasPrefix(repo.ID, "local:") {
 		return api.TemplateParams{}, errors.New("the repository needs an origin remote: template VMs clone it from there")
 	}
+	if err := cfg.Unsupported(); err != nil {
+		return api.TemplateParams{}, err
+	}
 	p := api.TemplateParams{
 		Project:      repo.ID,
 		CloneURL:     "https://" + repo.ID + ".git",

@@ -97,6 +97,19 @@ func anyList(l []string) []any {
 	return out
 }
 
+// ErrAllowlist refuses a box whose egress would be allowlist: that mode isn't
+// built yet, and a box must not start with open egress instead. A stored value
+// still loads, so the rest of the config keeps working.
+var ErrAllowlist = errors.New(`network.egress = "allowlist" is not built yet; refusing rather than starting with open egress: set it to "open"`)
+
+// Unsupported reports settings boxes can't start with.
+func (c *Config) Unsupported() error {
+	if c.String("network.egress") == "allowlist" {
+		return ErrAllowlist
+	}
+	return nil
+}
+
 // Withheld lists the project's requests that its grants don't cover.
 func (c *Config) Withheld() []Setting {
 	var out []Setting

@@ -178,20 +178,20 @@ func placeholderedBy(files []guestproto.File, swaps map[string]string) ([]guestp
 }
 
 // proxied reports whether a box can use its keys proxy: its hutch-guest gives
-// every process the machine's environment. Older ones, in boxes from templates
-// built before, get real logins until the template is rebuilt.
+// every process the machine's environment. The answer comes from the box, so it
+// only decides whether placeholders are written; a box never gets real logins.
 func (s *Server) proxied(ctx context.Context, w *workerConn, box string) bool {
 	var v int
 	if err := rpc.Call(ctx, w.sess, api.BoxGuestVersion, api.IDParams{ID: box}, &v); err != nil || v < 3 {
-		log.Printf("keys: %s's hutch-guest predates the keys proxy, so it holds real logins; boxes from a rebuilt template don't", box)
+		log.Printf("keys: %s's hutch-guest predates the keys proxy, so it gets no logins; a box from a rebuilt template does", box)
 		return false
 	}
 	return true
 }
 
-// boxFiles returns the stored credential files a box granted creds gets: logins
-// and MCP keys as placeholders when it's proxied.
-func (s *Server) boxFiles(creds []string, proxied bool) ([]guestproto.File, error) {
+// boxFiles returns the stored credential files a box granted creds gets, with
+// logins and MCP keys as placeholders.
+func (s *Server) boxFiles(creds []string) ([]guestproto.File, error) {
 	stored, err := s.credentials()
 	if err != nil {
 		return nil, err
@@ -199,6 +199,11 @@ func (s *Server) boxFiles(creds []string, proxied bool) ([]guestproto.File, erro
 	set, err := s.adapters()
 	if err != nil {
 		return nil, err
+	}
+	if changed, err := s.resyncMCP(set); err != nil {
+		return nil, err
+	} else if changed {
+		s.pushKeys(context.Background(), nil)
 	}
 	mcpLogins, real, err := s.mcpLogins(set)
 	if err != nil {
@@ -217,9 +222,6 @@ func (s *Server) boxFiles(creds []string, proxied bool) ([]guestproto.File, erro
 			}
 		}
 		switch {
-		case !proxied:
-			files = append(files, c.Files...)
-			continue
 		case mcp != "":
 			part, err := mcpFiles(a, c.Files, mcpLogins, real)
 			if err != nil {
@@ -260,18 +262,16 @@ func (s *Server) keysTable() (keys.Table, error) {
 	if err != nil {
 		return keys.Table{}, err
 	}
-	reuse := time.Minute
-	if c, err := s.settings(); err == nil {
-		reuse = c.Duration("keys.refresh_reuse")
+	c, err := s.settings()
+	if err != nil {
+		return keys.Table{}, err
 	}
 	stored, err := s.credentials()
 	if err != nil {
 		return keys.Table{}, err
 	}
-	t := keys.Table{Grants: grants, CACert: cert, CAKey: key, Reuse: reuse}
-	if cfg, err := s.settings(); err == nil {
-		t.IdentityHosts = cfg.List("keys.identity_hosts")
-	}
+	t := keys.Table{Grants: grants, CACert: cert, CAKey: key, Reuse: c.Duration("keys.refresh_reuse"),
+		RefreshTimeout: c.Duration("keys.refresh_timeout"), IdentityHosts: c.List("keys.identity_hosts")}
 	t.IdentitySeed = s.identitySeed()
 	t.Projects = map[string]string{}
 	boxes, err := s.store.boxes()
@@ -311,19 +311,11 @@ func (s *Server) keysTable() (keys.Table, error) {
 			})
 		}
 		if len(secrets) > 0 {
-			t.Logins = append(t.Logins, keys.Login{Name: a.Name, Adapter: a.Name, Hosts: a.Hosts, Secrets: secrets})
+			t.Logins = append(t.Logins, keys.Login{Name: a.Name, Adapter: a.Name, Hosts: a.Hosts, TokenURL: a.TokenURL, Secrets: secrets})
 		}
 	}
-	// MCP keys synced before the keys proxy get their placeholders now.
-	for _, c := range stored {
-		name, isMCP := strings.CutSuffix(c.Part, "/mcp")
-		if a := set[name]; isMCP && a != nil {
-			if have, err := s.mcpSecrets(name); err == nil && have == nil {
-				if err := s.syncMCP(a, c.Files); err != nil {
-					return t, err
-				}
-			}
-		}
+	if _, err := s.resyncMCP(set); err != nil {
+		return t, err
 	}
 	mcp, _, err := s.mcpLogins(set)
 	if err != nil {
@@ -366,9 +358,10 @@ func (s *Server) keysRefreshed(ctx context.Context, p api.KeysRefreshedParams) e
 	if err := s.storeRefresh(p); err != nil {
 		return err
 	}
-	s.pushKeys(ctx, nil)
-	// Boxes from older templates hold the real login, which this refresh replaced.
-	go s.pushLogin(context.WithoutCancel(ctx), p.Adapter)
+	// The rotated token must reach every worker even if the call that brought it
+	// is cancelled. Boxes' placeholders still stand for the login, so their files
+	// aren't rewritten.
+	s.pushKeys(context.WithoutCancel(ctx), nil)
 	return nil
 }
 
@@ -381,18 +374,19 @@ func (s *Server) storeRefresh(p api.KeysRefreshedParams) error {
 	}
 	swaps := map[string]string{}
 	for _, c := range p.Changes {
-		i := slices.IndexFunc(secrets, func(x keys.Secret) bool { return x.Key == c.Key && (c.Old == "" || x.Real == c.Old) })
-		if i < 0 {
-			secrets = append(secrets, keys.Secret{Key: c.Key, Real: c.New, Placeholders: []string{c.Placeholder}})
-			continue
-		}
 		if c.Old != "" {
 			swaps[c.Old] = c.New
 		}
-		secrets[i].Real = c.New
-		if !slices.Contains(secrets[i].Placeholders, c.Placeholder) {
-			secrets[i].Placeholders = append([]string{c.Placeholder}, secrets[i].Placeholders...)
-		}
+	}
+	keep := 20
+	if cfg, err := s.settings(); err == nil {
+		keep = int(cfg.Int("keys.placeholders_kept"))
+	}
+	// Each refresh of a JWT adds a placeholder carrying its claims. Boxes are
+	// written the newest on waking, so only recent ones are still in use.
+	secrets = keys.ApplyChanges(secrets, p.Changes)
+	for i := range secrets {
+		secrets[i].Placeholders = secrets[i].Placeholders[:min(len(secrets[i].Placeholders), keep)]
 	}
 	part := credentialsPrefix + p.Adapter
 	cur, err := s.store.layerPart(part)
@@ -410,10 +404,8 @@ func (s *Server) storeRefresh(p api.KeysRefreshedParams) error {
 		}
 	}
 	data, _ := json.Marshal(files)
-	if _, _, err := s.store.putLayerPart(part, -1, data); err != nil {
-		return err
-	}
-	return s.putLoginSecrets(p.Adapter, secrets)
+	secretData, _ := json.Marshal(secrets)
+	return s.store.putLayerParts(map[string][]byte{part: data, keysPrefix + p.Adapter: secretData})
 }
 
 // boxKeys points a box at its keys proxy: the machine's CA in its trust store,

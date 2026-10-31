@@ -18,12 +18,18 @@ func TestBackupWarning(t *testing.T) {
 		want              string
 	}{
 		{"unchanged", 3, 3, time.Time{}, ""},
+		// Right after hutchd starts, the first backup isn't due yet.
+		{"just started", 3, 0, time.Time{}, ""},
 		{"never backed up", 3, 0, time.Time{}, "no successful backup"},
 		{"recent", 3, 2, now.Add(-time.Minute), ""},
 		{"stale", 3, 2, now.Add(-10 * time.Minute), "changes since the last backup"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got := backupWarning(tt.changes, tt.backedUp, tt.at, now, 5*time.Minute)
+			started := now.Add(-time.Hour)
+			if tt.name == "just started" {
+				started = now.Add(-time.Minute)
+			}
+			got := backupWarning(tt.changes, tt.backedUp, tt.at, started, now, 5*time.Minute)
 			if tt.want == "" && got != "" || tt.want != "" && !strings.Contains(got, tt.want) {
 				t.Fatalf("got %q; want %q", got, tt.want)
 			}

@@ -1,10 +1,12 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/mouizahmed/hutch/internal/api"
@@ -26,7 +28,13 @@ func (s *Server) hello(ctx context.Context, params json.RawMessage, _ *rpc.Out) 
 
 // doctor checks the server, its bucket, every worker, and the boxes,
 // each failure with a fix.
-func (s *Server) doctor(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any, error) {
+func (s *Server) doctor(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+	var p api.DoctorParams
+	if len(params) > 0 {
+		if err := rpc.Decode(params, &p); err != nil {
+			return nil, err
+		}
+	}
 	r := api.DoctorResult{Version: version.String()}
 	check := func(area, name string, err error, detail, fix string) {
 		c := api.Check{Area: area, Name: name, Status: "ok", Detail: detail}
@@ -44,7 +52,8 @@ func (s *Server) doctor(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any
 	if err != nil {
 		return r, nil
 	}
-	r.Checks = append(r.Checks, s.doctorUser(cfg.String("default_agent"))...)
+	check("config", "egress", cfg.Unsupported(), cfg.String("network.egress"), `hutch config set network.egress open (in the layer that sets it)`)
+	r.Checks = append(r.Checks, s.doctorUser(cmp.Or(p.DefaultAgent, cfg.String("default_agent")))...)
 
 	if v := s.vault.Load(); v == nil {
 		warn("machine", "bucket", "none: losing the machine loses its boxes", "hutch machine bucket")
@@ -55,7 +64,7 @@ func (s *Server) doctor(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any
 		s.backupMu.Unlock()
 		if n, err := s.store.changes(); err != nil {
 			check("machine", "backup", err, "", "see journalctl -u hutchd on the machine")
-		} else if detail := backupWarning(n, last, at, time.Now(), cfg.Duration("backup.warn_after")); detail != "" {
+		} else if detail := backupWarning(n, last, at, s.started, time.Now(), cfg.Duration("backup.warn_after")); detail != "" {
 			warn("machine", "backup", detail, "see journalctl -u hutchd on the machine for backup errors")
 		} else {
 			check("machine", "backup", nil, "current", "")
@@ -103,6 +112,27 @@ func (s *Server) doctor(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any
 		return nil, err
 	}
 	sort.Slice(boxes, func(i, j int) bool { return boxes[i].ID < boxes[j].ID })
+	// A box from before the keys proxy holds real logins and refreshes them
+	// itself, which retires the refresh token every other box uses.
+	var legacy []string
+	for _, b := range boxes {
+		creds, _ := s.store.boxCredentials(b.ID)
+		if b.State != "running" || len(creds) == 0 {
+			continue
+		}
+		if w, err := s.worker(b.Worker); err == nil {
+			var v int
+			cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			if rpc.Call(cctx, w.sess, api.BoxGuestVersion, api.IDParams{ID: b.ID}, &v) == nil && v < 3 {
+				legacy = append(legacy, b.ID)
+			}
+			cancel()
+		}
+	}
+	if len(legacy) > 0 {
+		warn("logins", "real logins in boxes", strings.Join(legacy, ", ")+" predate the keys proxy: their agents refresh logins themselves, which logs every other box out",
+			"move their work to new boxes and remove them, then hutch login again")
+	}
 	stranded := 0
 	for _, b := range boxes {
 		if b.Kind != "" {
@@ -119,12 +149,15 @@ func (s *Server) doctor(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any
 	return r, nil
 }
 
-func backupWarning(changes, backedUp int64, at, now time.Time, after time.Duration) string {
+func backupWarning(changes, backedUp int64, at, started, now time.Time, after time.Duration) string {
 	if changes == backedUp {
 		return ""
 	}
 	if at.IsZero() {
-		return "no successful backup recorded yet"
+		if now.Sub(started) <= after {
+			return ""
+		}
+		return fmt.Sprintf("no successful backup since hutchd started, %s ago", now.Sub(started).Round(time.Second))
 	}
 	if now.Sub(at) > after {
 		return fmt.Sprintf("changes since the last backup, %s ago", now.Sub(at).Round(time.Second))

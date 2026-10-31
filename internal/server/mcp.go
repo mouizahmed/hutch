@@ -1,9 +1,12 @@
 package server
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"slices"
+	"strings"
 
 	"github.com/mouizahmed/hutch/internal/agents"
 	"github.com/mouizahmed/hutch/internal/guestproto"
@@ -60,8 +63,47 @@ func (s *Server) syncMCP(a *agents.Adapter, files []guestproto.File) error {
 		}
 	}
 	data, _ := json.Marshal(out)
-	_, _, err = s.store.putLayerPart(keysPrefix+a.Name+"/mcp", -1, data)
+	if _, _, err = s.store.putLayerPart(keysPrefix+a.Name+"/mcp", -1, data); err != nil {
+		return err
+	}
+	// Last, so a sync cut short is found stale and run again.
+	_, _, err = s.store.putLayerPart(keysPrefix+a.Name+"/mcp-source", -1, []byte(filesDigest(files)))
 	return err
+}
+
+func filesDigest(files []guestproto.File) string {
+	data, _ := json.Marshal(files)
+	return fmt.Sprintf("%x", sha256.Sum256(data))
+}
+
+// resyncMCP re-reads MCP keys whose record doesn't match the stored secret
+// files, as after a sync cut short: otherwise new keys would go into boxes
+// real. It reports whether any changed.
+func (s *Server) resyncMCP(set agents.Set) (bool, error) {
+	stored, err := s.credentials()
+	if err != nil {
+		return false, err
+	}
+	changed := false
+	for _, c := range stored {
+		name, isMCP := strings.CutSuffix(c.Part, "/mcp")
+		a := set[name]
+		if !isMCP || a == nil {
+			continue
+		}
+		src, err := s.store.layerPart(keysPrefix + name + "/mcp-source")
+		if err != nil {
+			return changed, err
+		}
+		if string(src.content) == filesDigest(c.Files) {
+			continue
+		}
+		if err := s.syncMCP(a, c.Files); err != nil {
+			return changed, err
+		}
+		changed = true
+	}
+	return changed, nil
 }
 
 // mcpLogins returns the MCP servers whose keys the proxy swaps, as logins, and
@@ -125,7 +167,13 @@ func (s *Server) mcpLogins(set agents.Set) ([]keys.Login, map[string]bool, error
 				}
 				continue
 			}
-			logins = append(logins, keys.Login{Name: a.Name + "/mcp/" + name, Adapter: a.Name, Hosts: hosts, Secrets: secrets[name]})
+			var headers []string
+			for _, sec := range secrets[name] {
+				if _, header, ok := strings.Cut(sec.Key, "."); ok {
+					headers = append(headers, header)
+				}
+			}
+			logins = append(logins, keys.Login{Name: a.Name + "/mcp/" + name, Adapter: a.Name, Hosts: hosts, Headers: headers, Secrets: secrets[name]})
 		}
 	}
 	return logins, real, nil

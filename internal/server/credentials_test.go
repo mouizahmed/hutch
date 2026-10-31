@@ -169,14 +169,12 @@ func TestLegacyClaudeCaptureScopesLoginAndProxy(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for _, proxied := range []bool{false, true} {
-		got, err := s.boxFiles([]string{a.Name}, proxied)
-		if err != nil || len(got) != 1 {
-			t.Fatalf("login files: %v, %v", got, err)
-		}
-		if !got[0].Merge || strings.Contains(string(got[0].Data), "mcpOAuth") || strings.Contains(string(got[0].Data), mcp) {
-			t.Fatal("legacy capture would overwrite or distribute a box's native MCP session")
-		}
+	got, err := s.boxFiles([]string{a.Name})
+	if err != nil || len(got) != 1 {
+		t.Fatalf("login files: %v, %v", got, err)
+	}
+	if !got[0].Merge || strings.Contains(string(got[0].Data), "mcpOAuth") || strings.Contains(string(got[0].Data), mcp) {
+		t.Fatal("legacy capture would overwrite or distribute a box's native MCP session")
 	}
 	table, err := s.keysTable()
 	if err != nil {

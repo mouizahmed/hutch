@@ -13,6 +13,7 @@ credentials = [
   { file = "~/.claude.json", keys = ["oauthAccount", "userID"] },
 ]
 hosts       = ["anthropic.com", "claude.com", "claude.ai"]
+token_url   = "https://platform.claude.com/v1/oauth/token"
 config = [
   "~/.claude/CLAUDE.md",
   "~/.claude/settings.json",
@@ -24,7 +25,7 @@ config = [
   "~/.claude/plugins/cache/",
   { file = "~/.claude.json", keys = ["mcpServers"] },
 ]
-mcp        = { file = "~/.claude.json", key = "mcpServers", format = "claude", secrets = ["env", "headers"], raw_secrets = ["oauth.clientSecret"] }
+mcp        = { file = "~/.claude.json", key = "mcpServers", format = "claude", secrets = ["env", "headers"], raw_secrets = ["oauth.clientSecret"], scoped = "projects", project = ".mcp.json", fields = { headers = "headers", type = "type" } }
 transcript = "claude"
 
 # First-run prompts a box would otherwise stop at, and the bell Hutch alerts on.

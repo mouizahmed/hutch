@@ -8,7 +8,9 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 
@@ -33,7 +35,10 @@ type Adapter struct {
 	Credentials []Source `toml:"credentials"`
 	// Hosts are where its logins are used (and their subdomains): the only hosts the
 	// keys proxy swaps their placeholders for real values toward.
-	Hosts      []string `toml:"hosts"`
+	Hosts []string `toml:"hosts"`
+	// TokenURL is where its login refreshes (OAuth 2, grant_type=refresh_token);
+	// the keys proxy handles refreshes there, and only there.
+	TokenURL   string   `toml:"token_url"`
 	Config     []Source `toml:"config"`
 	MCP        *MCP     `toml:"mcp"`
 	Transcript string   `toml:"transcript"`
@@ -162,6 +167,25 @@ type MCP struct {
 	// OAuth client secret sent in a token request body. They are grant-gated but
 	// cannot be replaced by this proxy. Fields may use dotted object paths.
 	RawSecrets []string `toml:"raw_secrets"`
+	// Scoped is a top-level map of the same file whose entries (one per project)
+	// hold their own servers under Key; Hutch doesn't transfer those.
+	Scoped string `toml:"scoped"`
+	// Project is the file in a repository that declares project servers, with
+	// its servers under Key.
+	Project string `toml:"project"`
+	// Fields name a server's settings the readiness check needs beyond the
+	// common command, args, env, and url.
+	Fields MCPFields `toml:"fields"`
+}
+
+// MCPFields are the names an agent uses for a server's HTTP headers, the
+// environment variable holding a bearer token, whether it's enabled, and its
+// transport type; empty when it has none.
+type MCPFields struct {
+	Headers   string `toml:"headers" json:"headers,omitempty"`
+	BearerEnv string `toml:"bearer_env" json:"bearer_env,omitempty"`
+	Enabled   string `toml:"enabled" json:"enabled,omitempty"`
+	Type      string `toml:"type" json:"type,omitempty"`
 }
 
 // Seed is merged into a box's file after the user layer, to get past first-run prompts.
@@ -226,6 +250,11 @@ func Parse(source string, data []byte) (*Adapter, error) {
 			secrets = secrets || len(c.Secrets) > 0
 		}
 		// Without them, a login's real values would go into boxes as they are.
+		if u, err := url.Parse(a.TokenURL); a.TokenURL != "" && (err != nil || u.Scheme != "https" || !slices.ContainsFunc(a.Hosts, func(h string) bool {
+			return strings.EqualFold(u.Hostname(), h) || strings.HasSuffix(strings.ToLower(u.Hostname()), "."+strings.ToLower(h))
+		})) {
+			return nil, fmt.Errorf("%s: token_url must be an https URL on one of its hosts", source)
+		}
 		if !secrets || len(a.Hosts) == 0 {
 			return nil, fmt.Errorf("%s: credentials need secrets (the keys holding tokens, like { file = \"~/.x/auth.json\", secrets = [\"access_token\"] }) and hosts (where they're used)", source)
 		}

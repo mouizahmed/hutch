@@ -20,7 +20,10 @@ case $(uname -s) in
   Darwin) os=darwin ;;
   *) fail 'install.sh supports Linux and macOS; on Windows use the release archive or WSL' ;;
 esac
-case $(uname -m) in
+machine=$(uname -m)
+# A shell under Rosetta reports x86_64 on an Apple Silicon Mac.
+if [ "$os" = darwin ] && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = 1 ]; then machine=arm64; fi
+case $machine in
   x86_64|amd64) arch=amd64 ;;
   aarch64|arm64) arch=arm64 ;;
   *) fail 'Hutch supports x86_64 and arm64' ;;

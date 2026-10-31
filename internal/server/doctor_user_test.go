@@ -85,8 +85,10 @@ func TestDoctorUserMissingLoginAndMCPReadiness(t *testing.T) {
 		t.Fatal(err)
 	}
 	checks = s.doctorUser("claude")
-	if find(checks, "MCP keys").Status != "warn" || find(checks, "MCP readiness").Status != "warn" {
-		t.Fatal("unsupported key targets or unverified runtime were not reported")
+	// Real keys are a warning; servers this offline check can't start aren't,
+	// or doctor could never be all green.
+	if find(checks, "MCP keys").Status != "warn" || find(checks, "MCP readiness").Status != "ok" {
+		t.Fatal("unsupported key targets not reported, or readiness a permanent warning")
 	}
 	output, _ := json.Marshal(checks)
 	if strings.Contains(string(output), real) {

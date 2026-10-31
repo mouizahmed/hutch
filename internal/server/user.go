@@ -194,21 +194,20 @@ func (s *Server) applyUserLayer(ctx context.Context, w *workerConn, box string, 
 		return err
 	}
 	s.pushKeys(ctx, nil)
-	proxied := s.proxied(ctx, w, box)
-	if proxied {
-		if err := s.boxKeys(ctx, w, box); err != nil {
-			return fmt.Errorf("point %s at its keys proxy: %w", box, err)
-		}
-	}
 	var files []guestproto.File
 	for _, a := range set.Sorted() {
 		files = append(files, l.Files[a.Name]...)
 	}
-	logins, err := s.boxFiles(creds, proxied)
-	if err != nil {
-		return err
+	if s.proxied(ctx, w, box) {
+		if err := s.boxKeys(ctx, w, box); err != nil {
+			return fmt.Errorf("point %s at its keys proxy: %w", box, err)
+		}
+		logins, err := s.boxFiles(creds)
+		if err != nil {
+			return err
+		}
+		files = append(files, logins...)
 	}
-	files = append(files, logins...)
 	ghLogin, err := s.loginSecrets("gh")
 	if err != nil {
 		return err
@@ -493,7 +492,10 @@ func (s *Server) pushLogin(ctx context.Context, adapter string) {
 		if err != nil {
 			continue
 		}
-		files, err := s.boxFiles([]string{adapter}, s.proxied(ctx, w, b.ID))
+		if !s.proxied(ctx, w, b.ID) {
+			continue
+		}
+		files, err := s.boxFiles([]string{adapter})
 		if err != nil || len(files) == 0 {
 			continue
 		}
@@ -504,19 +506,19 @@ func (s *Server) pushLogin(ctx context.Context, adapter string) {
 }
 
 // refreshCredentials points a box that just woke at its keys proxy and writes its
-// granted logins: a snapshot from before either may lack them, or hold real values.
+// granted logins: a snapshot from before either may lack them.
 func (s *Server) refreshCredentials(ctx context.Context, w *workerConn, box string) {
 	creds, err := s.store.boxCredentials(box)
 	if err != nil || len(creds) == 0 {
 		return
 	}
-	proxied := s.proxied(ctx, w, box)
-	if proxied {
-		if err := s.boxKeys(ctx, w, box); err != nil {
-			log.Printf("keys: %s after wake: %v", box, err)
-		}
+	if !s.proxied(ctx, w, box) {
+		return
 	}
-	files, err := s.boxFiles(creds, proxied)
+	if err := s.boxKeys(ctx, w, box); err != nil {
+		log.Printf("keys: %s after wake: %v", box, err)
+	}
+	files, err := s.boxFiles(creds)
 	if err != nil || len(files) == 0 {
 		return
 	}

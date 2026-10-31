@@ -111,26 +111,25 @@ func collectLayer() (collected, error) {
 	return c, nil
 }
 
-// Claude's default local scope lives under projects[path], separately from its
-// user-scoped MCP map. Do not silently imply those uncollected servers synced.
+// scopedMCPWarning says when the adapter's file has per-project servers (its
+// mcp.scoped map), which sync doesn't transfer, so they aren't thought synced.
 func scopedMCPWarning(home string, a *agents.Adapter) string {
-	if a.MCP == nil || a.MCP.Format != "claude" {
+	if a.MCP == nil || a.MCP.Scoped == "" {
 		return ""
 	}
-	data, err := os.ReadFile(filepath.Join(home, strings.TrimPrefix(a.MCP.File, "~/")))
+	path := filepath.Join(home, strings.TrimPrefix(a.MCP.File, "~/"))
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
-	var doc struct {
-		Projects map[string]map[string]json.RawMessage `json:"projects"`
-	}
-	if json.Unmarshal(data, &doc) != nil {
-		return ""
-	}
-	for _, project := range doc.Projects {
-		var servers map[string]json.RawMessage
-		if json.Unmarshal(project[a.MCP.Key], &servers) == nil && len(servers) > 0 {
-			return a.MCP.File + " contains project-local MCP servers that this adapter does not transfer; use user-scoped MCP configuration or a project .mcp.json in Git"
+	projects := agents.MCPServers(path, data, a.MCP.Scoped)
+	for _, project := range projects {
+		if servers, ok := project[a.MCP.Key].(map[string]any); ok && len(servers) > 0 {
+			fix := "use user-scoped MCP configuration"
+			if a.MCP.Project != "" {
+				fix += " or a project " + a.MCP.Project + " in Git"
+			}
+			return a.MCP.File + " contains project-local MCP servers that this adapter does not transfer; " + fix
 		}
 	}
 	return ""

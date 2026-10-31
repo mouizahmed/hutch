@@ -10,6 +10,11 @@ import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { promisify } from 'node:util';
 import assert from 'node:assert/strict';
+import { adapter } from './adapters.mjs';
+
+// Configs use the header field each adapter declares, so an agent that renames it fails here.
+const codexHeaders = (await adapter('codex')).headers, claudeHeaders = (await adapter('claude')).headers;
+assert(codexHeaders && claudeHeaders, 'adapters declare no MCP header field');
 
 function reply(request) {
   if (request.id === undefined) return null;
@@ -84,7 +89,7 @@ try {
   for (const [name, server] of Object.entries(servers)) {
     config += `[mcp_servers.${name}]\nstartup_timeout_sec = 10\n`;
     if (server.command) config += `command = ${JSON.stringify(server.command)}\nargs = ${JSON.stringify(server.args)}\n`;
-    else config += `url = ${JSON.stringify(server.url)}\nhttp_headers = { Authorization = ${JSON.stringify(server.headers.Authorization)} }\n`;
+    else config += `url = ${JSON.stringify(server.url)}\n${codexHeaders} = { Authorization = ${JSON.stringify(server.headers.Authorization)} }\n`;
   }
   await writeFile(join(env.CODEX_HOME, 'config.toml'), config);
   child = spawn('codex', ['app-server', '--stdio'], { cwd: home, env, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -120,7 +125,8 @@ try {
   assert(calls > 0, 'HTTP MCP tool was never called');
   console.log('Codex: stdio + authenticated HTTP discovery/calls passed; bad auth/path/command rejected.');
 
-  await writeFile(join(home, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true, mcpServers: servers }));
+  const claudeServers = Object.fromEntries(Object.entries(servers).map(([name, { headers, ...s }]) => [name, headers ? { ...s, [claudeHeaders]: headers } : s]));
+  await writeFile(join(home, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true, mcpServers: claudeServers }));
   const { stdout } = await promisify(execFile)('claude', ['mcp', 'list'], { cwd: home, env, timeout: 90000 });
   for (const name of ['hutch_stdio', 'hutch_http']) {
     assert(stdout.split('\n').some(line => line.includes(name) && line.includes('Connected')), `${name} Claude health check failed`);

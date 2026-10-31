@@ -46,7 +46,11 @@ func doctorCommandFor(target string) *cobra.Command {
 			var r api.DoctorResult
 			if err == nil {
 				defer sess.Close()
-				if err := rpc.Call(cmd.Context(), sess, api.Doctor, struct{}{}, &r); err != nil {
+				var p api.DoctorParams
+				if cfg, err := loadConfig(cmd.Context(), sess); err == nil {
+					p.DefaultAgent = cfg.String("default_agent")
+				}
+				if err := rpc.Call(cmd.Context(), sess, api.Doctor, p, &r); err != nil {
 					return err
 				}
 				if r.Version != version.String() {

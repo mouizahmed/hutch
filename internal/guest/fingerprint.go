@@ -44,7 +44,9 @@ func Fingerprint(ctx context.Context, root string) (map[string]string, error) {
 		out["packages"] = digest([]byte(strings.Join(lines, "\n")))
 		break
 	}
-	for _, name := range []string{"go", "node", "npm", "python3", "rustc", "cargo", "claude", "codex", "gh"} {
+	// Toolchains a project pins. Agent CLIs install unpinned on every build, so
+	// they'd make two fresh builds differ for no fault of the recipe.
+	for _, name := range []string{"go", "node", "npm", "python3", "rustc", "cargo"} {
 		if _, err := exec.LookPath(name); err != nil {
 			continue
 		}
@@ -88,8 +90,6 @@ func (b *fingerprintBuffer) Write(p []byte) (int, error) {
 }
 
 func fingerprintCommand(ctx context.Context, root string, limit int, name string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "LC_ALL=C")

@@ -56,6 +56,9 @@ func loadConfig(ctx context.Context, sess *yamux.Session) (*config.Config, error
 // applyGrants asks about project requests beyond the user's grants. Declined or
 // unattended, the box gets the granted subset and the user is told what was withheld.
 func applyGrants(ctx context.Context, sess *yamux.Session, c *config.Config) (*config.Config, error) {
+	if err := c.Unsupported(); err != nil {
+		return nil, err
+	}
 	withheld := c.Withheld()
 	if len(withheld) == 0 {
 		return c, nil
@@ -442,6 +445,9 @@ func configCommands() *cobra.Command {
 				defer sess.Close()
 				return syncUserConfig(cmd.Context(), sess, machineTarget(), "mine")
 			}
+			if path, err := config.SplitPath(args[0]); err == nil && len(path) >= 2 && path[len(path)-2] == "network" && path[len(path)-1] == "egress" && args[1] == "allowlist" {
+				return config.ErrAllowlist
+			}
 			return setOnServer(cmd, args)
 		},
 	}
@@ -535,7 +541,7 @@ func configCommands() *cobra.Command {
 					fmt.Printf("%-8s ok  %s\n", l, d.Source)
 				}
 			}
-			return nil
+			return c.Unsupported()
 		}),
 	}
 

@@ -4,19 +4,13 @@
 import { spawn, execFile } from "node:child_process";
 import { createServer } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
-import {
-  mkdtemp,
-  mkdir,
-  writeFile,
-  readFile,
-  readdir,
-  rm,
-} from "node:fs/promises";
-import { join, relative } from "node:path";
+import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 import assert from "node:assert/strict";
+import { adapter, loginValues } from "./adapters.mjs";
 
 const run = promisify(execFile),
   home = await mkdtemp(join(tmpdir(), "hutch-oauth-"));
@@ -36,6 +30,7 @@ for (const k of Object.keys(env))
     )
   )
     delete env[k];
+const issued = [];
 const codes = new Map(),
   refreshes = new Map(),
   access = new Map();
@@ -123,6 +118,7 @@ const server = createServer(async (req, res) => {
       } else return send(res, 400, { error: "unsupported_grant_type" });
       const at = secret(),
         rt = secret();
+      issued.push(at, rt);
       access.set(at, Date.now() + 2000);
       refreshes.set(rt, true);
       return send(res, 200, {
@@ -332,26 +328,14 @@ async function codexDiscovery() {
     child = undefined;
   }
 }
-async function storeShape(path) {
-  const result = [];
-  async function visit(dir) {
-    for (const entry of await readdir(dir, { withFileTypes: true })) {
-      const file = join(dir, entry.name);
-      if (
-        entry.isDirectory() &&
-        !["logs", "log", "sessions"].includes(entry.name)
-      )
-        await visit(file);
-      else if (entry.isFile() && entry.name.endsWith(".json")) {
-        try {
-          const data = JSON.parse(await readFile(file, "utf8"));
-          result.push({ file: relative(path, file), keys: Object.keys(data) });
-        } catch {}
-      }
-    }
+// Hutch keeps native MCP OAuth in the box and captures only what an adapter
+// declares as its login: an MCP token there would go to every box.
+async function assertLoginsExcludeMCP() {
+  for (const name of ["claude", "codex"]) {
+    const values = await loginValues(await adapter(name), home, env.CODEX_HOME);
+    for (const token of issued)
+      assert(!values.includes(token), `${name}'s declared login holds an MCP OAuth token; update its adapter`);
   }
-  await visit(path);
-  return result;
 }
 try {
   await mkdir(env.CODEX_HOME, { recursive: true });
@@ -401,7 +385,8 @@ try {
   console.log(
     "Claude native OAuth: PKCE login, cached credentials, expiration and rotating refresh passed.",
   );
-  const result = { stats, stores: await storeShape(home), completed: true };
+  await assertLoginsExcludeMCP();
+  const result = { stats, completed: true };
   if (process.env.HUTCH_TEST_OAUTH_REPORT)
     await writeFile(
       process.env.HUTCH_TEST_OAUTH_REPORT,

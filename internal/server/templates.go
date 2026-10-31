@@ -122,11 +122,6 @@ func (s *Server) buildBox(ctx context.Context, proj api.Project, p api.TemplateP
 		}
 		return b, fmt.Errorf("%w\n  the template box is left running: hutch template shell", err)
 	}
-	if diagnostic {
-		if err := s.store.putMeta(id, boxMeta{project: proj.ID}); err != nil {
-			return fail(err)
-		}
-	}
 
 	step(stdout, "checkout %.12s", p.Commit)
 	if err := s.run(ctx, w, id, api.ExecParams{Dir: workspace, Argv: []string{"git", "checkout", "-q", "--detach", p.Commit}}, stdout, stderr); err != nil {
@@ -236,7 +231,12 @@ func (s *Server) bootTemplateBuild(ctx context.Context, proj api.Project, p api.
 		s.store.putBox(api.Box{ID: id, Worker: w.id, State: "failed", Image: img, VCPUs: p.VCPUs, MemMiB: p.MemMiB, Created: time.Now().UTC()})
 		return b, w, err
 	}
-	if err := s.store.putMeta(id, boxMeta{project: proj.ID, kind: api.BoxTemplate}); err != nil {
+	// A diagnostic build is never the project's template box, even while it builds.
+	meta := boxMeta{project: proj.ID, kind: api.BoxTemplate}
+	if diagnostic {
+		meta.kind = ""
+	}
+	if err := s.store.putMeta(id, meta); err != nil {
 		return b, nil, err
 	}
 	if err := s.store.setImage(id, from); err != nil {

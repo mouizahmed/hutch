@@ -11,7 +11,6 @@ import (
 	"maps"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/mcp"
@@ -84,6 +83,10 @@ func (s *Server) doctorTemplate(ctx context.Context, params json.RawMessage, out
 	if err != nil {
 		return nil, err
 	}
+	cfg, err := s.settings()
+	if err != nil {
+		return nil, err
+	}
 	stdout, stderr := out.Writers()
 	var checks []api.Check
 	add := func(name, status, detail, fix string) {
@@ -92,7 +95,6 @@ func (s *Server) doctorTemplate(ctx context.Context, params json.RawMessage, out
 	if p.Recipe["verify.sh"] == nil {
 		add("verification", "warn", "no .hutch/verify.sh; project behavior is not checked", "add a deterministic .hutch/verify.sh")
 	}
-	add("scope", "warn", "Dockerfile steps run twice without layer reuse; fingerprints cover package/tool versions and non-ignored project files, not entire disks or native-client OAuth", "use .hutch/fingerprint.sh for extra deterministic checks; verify native-client authentication separately")
 	var first map[string]string
 	for n := 1; n <= 2; n++ {
 		nonce := make([]byte, 8)
@@ -107,7 +109,7 @@ func (s *Server) doctorTemplate(ctx context.Context, params json.RawMessage, out
 		fmt.Fprintf(stdout, "\nDiagnostic build %d of 2 (%.12s)\n", n, p.Commit)
 		buildErr := func() error {
 			defer func() {
-				cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				cleanup, cancel := context.WithTimeout(context.Background(), cfg.Duration("doctor.cleanup_timeout"))
 				defer cancel()
 				if _, err := s.store.box(id); err == nil {
 					if err := s.removeBox(cleanup, id); err != nil {
@@ -123,6 +125,7 @@ func (s *Server) doctorTemplate(ctx context.Context, params json.RawMessage, out
 					add("image cleanup "+id, "warn", "could not enumerate workers", "check the machine's diagnostic image directory")
 					return
 				}
+				var missed []string
 				for _, worker := range workers {
 					if worker.Gone {
 						continue
@@ -132,8 +135,11 @@ func (s *Server) doctorTemplate(ctx context.Context, params json.RawMessage, out
 						err = rpc.Call(cleanup, w.sess, api.ImageRemoveDiagnostic, api.IDParams{ID: id}, nil)
 					}
 					if err != nil {
-						add("image cleanup "+id, "warn", "diagnostic image cleanup could not reach a worker", "check the machine's diagnostic image directory")
+						missed = append(missed, worker.ID)
 					}
+				}
+				if len(missed) > 0 {
+					add("image cleanup "+id, "warn", "diagnostic image cleanup could not reach "+strings.Join(missed, ", "), "check the machine's diagnostic image directory")
 				}
 			}()
 			if _, err := s.buildBox(ctx, proj, p, id, stdout, stderr, true); err != nil {
@@ -143,9 +149,10 @@ func (s *Server) doctorTemplate(ctx context.Context, params json.RawMessage, out
 			if err != nil {
 				return err
 			}
-			cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			timeout := cfg.Duration("doctor.fingerprint_timeout")
+			cctx, cancel := context.WithTimeout(ctx, 2*timeout)
 			defer cancel()
-			manifest, err := s.diagnosticOutput(cctx, w, id, []string{"/usr/local/bin/hutch-guest", "fingerprint"}, 64<<10)
+			manifest, err := s.diagnosticOutput(cctx, w, id, []string{"/usr/local/bin/hutch-guest", "fingerprint", "--timeout", timeout.String()}, 64<<10)
 			if err != nil {
 				return fmt.Errorf("fingerprint: %w", err)
 			}
@@ -167,29 +174,43 @@ func (s *Server) doctorTemplate(ctx context.Context, params json.RawMessage, out
 			} else {
 				add("reproducibility", "ok", "two builds passed; package/tool versions and working-file fingerprints match", "")
 			}
-			// MCP commands run in the diagnostic box as dev. Only initialization
-			// and inventory are requested; no model turn or tool is executed.
+			// MCP servers are checked once, in the first build: the user's and the
+			// repository's, as dev. Only initialization and inventory are
+			// requested; no model turn or tool is executed.
+			if n > 1 {
+				return nil
+			}
+			mcpTimeout := cfg.Duration("doctor.mcp_timeout")
 			for _, a := range set.Sorted() {
 				if a.MCP == nil {
 					continue
 				}
-				probe, cancel := context.WithTimeout(ctx, 130*time.Second)
-				data, err := s.diagnosticOutput(probe, w, id, []string{"/usr/local/bin/hutch-guest", "mcp-check", "--file", a.MCP.File, "--key", a.MCP.Key}, 1<<20)
-				cancel()
-				if err != nil {
-					add(fmt.Sprintf("build %d %s MCP", n, a.Name), "fail", "MCP config could not be checked", "check its config and commands in a box")
-					continue
-				}
-				var results []mcp.Result
-				if err := json.Unmarshal(data, &results); err != nil {
-					return fmt.Errorf("invalid MCP diagnostic result")
-				}
-				for _, r := range results {
-					fix := ""
-					if r.Status != "ok" {
-						fix = "check this server with the agent's native MCP client"
+				for _, file := range []string{a.MCP.File, a.MCP.Project} {
+					if file == "" {
+						continue
 					}
-					add(fmt.Sprintf("build %d %s MCP %s", n, a.Name, r.Name), r.Status, r.Detail, fix)
+					f := a.MCP.Fields
+					argv := []string{"/usr/local/bin/hutch-guest", "mcp-check", "--file", file, "--key", a.MCP.Key,
+						"--headers", f.Headers, "--bearer-env", f.BearerEnv, "--enabled", f.Enabled, "--type", f.Type,
+						"--timeout", mcpTimeout.String(), "--server-timeout", cfg.Duration("mcp.start_timeout").String()}
+					probe, cancel := context.WithTimeout(ctx, 2*mcpTimeout)
+					data, err := s.diagnosticOutput(probe, w, id, argv, 1<<20)
+					cancel()
+					if err != nil {
+						add(a.Name+" MCP "+file, "fail", "MCP config could not be checked", "check its config and commands in a box")
+						continue
+					}
+					var results []mcp.Result
+					if err := json.Unmarshal(data, &results); err != nil {
+						return fmt.Errorf("invalid MCP diagnostic result")
+					}
+					for _, r := range results {
+						fix := ""
+						if r.Status != "ok" {
+							fix = "check this server with the agent's native MCP client"
+						}
+						add(a.Name+" MCP "+r.Name, r.Status, r.Detail, fix)
+					}
 				}
 			}
 			return nil
@@ -198,10 +219,6 @@ func (s *Server) doctorTemplate(ctx context.Context, params json.RawMessage, out
 			add(fmt.Sprintf("build %d", n), "fail", buildErr.Error(), "fix the recipe, verification, or missing tools, then rerun hutch doctor --template")
 			break
 		}
-	}
-	// Surface no secrets, fingerprint content, or provider error payloads.
-	for i := range checks {
-		checks[i].Detail = strings.TrimSpace(checks[i].Detail)
 	}
 	return api.DoctorResult{Checks: checks}, nil
 }

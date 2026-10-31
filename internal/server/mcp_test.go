@@ -117,11 +117,11 @@ func TestOAuthClientSecretGrantAndBodySemantics(t *testing.T) {
 	if err := s.syncMCP(a, []guestproto.File{file}); err != nil {
 		t.Fatal(err)
 	}
-	denied, err := s.boxFiles([]string{}, true)
+	denied, err := s.boxFiles([]string{})
 	if err != nil || len(denied) != 0 {
 		t.Fatal("confidential OAuth configuration reached an ungranted box")
 	}
-	allowed, err := s.boxFiles([]string{a.Name}, true)
+	allowed, err := s.boxFiles([]string{a.Name})
 	if err != nil || len(allowed) != 1 || strings.Count(string(allowed[0].Data), secret) != 2 {
 		t.Fatal("body credential became an unusable placeholder, including its shared header value")
 	}
@@ -132,4 +132,41 @@ func TestOAuthClientSecretGrantAndBodySemantics(t *testing.T) {
 		}
 	}
 	t.Fatal("native OAuth client secret was not reported as remaining real")
+}
+
+// A sync cut short between storing the MCP secret files and recording their
+// keys must not send the new keys into boxes real.
+func TestMCPSyncCutShort(t *testing.T) {
+	st, err := openStore(filepath.Join(t.TempDir(), "test.db"), durable.NewKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.db.Close()
+	s := &Server{store: st, workers: map[string]*workerConn{}}
+	a := agents.Builtin()["claude"]
+	file := func(v string) []guestproto.File {
+		return []guestproto.File{{Path: a.MCP.File, Data: []byte(`{"mcpServers":{"api":{"headers":{"Authorization":"Bearer ` + v + `"}}}}`), Merge: true}}
+	}
+	layer := api.UserLayer{Files: map[string][]guestproto.File{a.Name: {{Path: a.MCP.File, Data: []byte(`{"mcpServers":{"api":{"url":"https://mcp.example/mcp"}}}`)}}}}
+	data, _ := json.Marshal(layer)
+	if _, _, err := st.putLayerPart("config", 0, data); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.syncMCP(a, file("old_synthetic_key_0123456789")); err != nil {
+		t.Fatal(err)
+	}
+	// The new secret files are stored, but syncMCP never ran for them.
+	data, _ = json.Marshal(file("new_synthetic_key_0123456789"))
+	if _, _, err := st.putLayerPart(credentialsPrefix+a.Name+"/mcp", -1, data); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.boxFiles([]string{a.Name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range got {
+		if strings.Contains(string(f.Data), "new_synthetic_key") {
+			t.Fatalf("a new MCP key went into the box real: %s", f.Data)
+		}
+	}
 }

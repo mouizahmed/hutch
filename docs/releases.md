@@ -9,19 +9,23 @@ The release workflow builds static CLI binaries for Linux, macOS, and Windows, e
 Run a build rehearsal with the release workflow's manual dispatch and an explicit version. It uploads workflow artifacts without creating a release. Local build commands are:
 
 ```sh
-scripts/release-clients.sh v0.1.0-rc.1 dist/release
 scripts/release-machine.sh v0.1.0-rc.1 amd64 dist/release
+MACHINE_SHA256=amd64=$(sha256sum dist/release/hutch-machine_v0.1.0-rc.1_linux_amd64.tar.gz | cut -d' ' -f1) \
+  scripts/release-clients.sh v0.1.0-rc.1 dist/release
 ```
+
+The CLI carries its machine bundle's SHA-256, so setup trusts the bundle through the CLI you installed rather than a checksum file downloaded beside it.
 
 Machine builds require Docker on x86_64 Linux.
 
-When a maintainer later pushes a version tag, the workflow checks the code, builds all artifacts, produces `checksums.txt`, signs build provenance with GitHub artifact attestations, and creates a **draft** release. Review and validate that draft before publishing. The installer uses the latest published release; drafts do not become its install target.
+When a maintainer later pushes a version tag, the workflow checks the code, builds all artifacts, produces `checksums.txt`, signs build provenance with GitHub artifact attestations, and creates a **draft** release, marked pre-release for versions with a `-`. Rehearsals aren't signed, so a signature always means a tagged release. Review and validate that draft before publishing. The installer uses the latest published release; drafts and pre-releases do not become its install target.
 
 To check provenance using GitHub CLI after downloading an archive:
 
 ```sh
 gh attestation verify hutch_v0.1.0_linux_amd64.tar.gz --repo mouizahmed/hutch \
-  --signer-workflow mouizahmed/hutch/.github/workflows/release.yml
+  --signer-workflow mouizahmed/hutch/.github/workflows/release.yml \
+  --source-ref refs/tags/v0.1.0
 ```
 
 This is separate from the automatic SHA-256 checks in `install.sh` and setup. GitHub documents [artifact attestation verification](https://cli.github.com/manual/gh_attestation_verify).

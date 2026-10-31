@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -652,11 +653,11 @@ func (w *Worker) coldStart(ctx context.Context, b *Box) error {
 	b.BaseMem, b.Class, b.FCVersion, b.GVisor = "", w.Class(), w.FCVersion, w.GVisor
 	b.GVisorFeatures = nil
 	if b.GVisor != "" {
-		features, err := w.gvisorCPUFeatures(b.GVisor)
-		if err != nil {
-			return err
+		if features, err := w.gvisorCPUFeatures(b.GVisor); err == nil {
+			b.GVisorFeatures = features
+		} else {
+			log.Printf("%s: boots without CPU features, so its snapshots restore cold on other machines: %v", b.ID, err)
 		}
-		b.GVisorFeatures = features
 		if b.Token == "" {
 			b.Token = newToken()
 		}

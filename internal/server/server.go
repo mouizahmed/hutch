@@ -41,6 +41,7 @@ type Server struct {
 	// The last backup's time and the changes it covered; guarded by backupMu.
 	lastBackup time.Time
 	backedUp   int64
+	started    time.Time // when this hutchd started, which no backup can predate
 	gcMu       sync.Mutex
 	moving     sync.Map // box ID → *sync.Mutex, held while a box moves off a lost worker
 	copying    sync.Map // "<version>@<worker>" → *sync.Mutex, held while a template copies there
@@ -98,7 +99,7 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, store: st, master: master, workers: map[string]*workerConn{}, pending: map[string]int{}, wakes: map[string]*wakeCall{}, peaks: map[string]int{}, relieving: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{},
+	s := &Server{started: time.Now(), cfg: cfg, store: st, master: master, workers: map[string]*workerConn{}, pending: map[string]int{}, wakes: map[string]*wakeCall{}, peaks: map[string]int{}, relieving: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{},
 		gitStates: map[string]guestproto.GitStatus{}, events: newHub()}
 	st.onChange = s.changed
 	go s.publish()

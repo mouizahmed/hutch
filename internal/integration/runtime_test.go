@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -102,10 +103,26 @@ func remote(t *testing.T, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// emptyAtStart is whether the machine had no boxes when the first test began:
+// these tests fill its disk and kill hutchd, so they never run beside real work.
+var emptyAtStart = sync.OnceValue(func() error {
+	var boxes []api.Box
+	if err := call(context.Background(), api.BoxList, struct{}{}, &boxes); err != nil {
+		return err
+	}
+	if len(boxes) > 0 {
+		return fmt.Errorf("the machine has %d boxes; these tests need a fresh, disposable one", len(boxes))
+	}
+	return nil
+})
+
 func disposableRuntime(t *testing.T) {
 	t.Helper()
-	if os.Getenv("HUTCH_TEST_DISPOSABLE") != "1" {
-		t.Skip("requires an explicitly disposable machine")
+	if os.Getenv("HUTCH_TEST_DISPOSABLE") != "1" || os.Getenv("GITHUB_ACTIONS") != "true" {
+		t.Skip("requires an explicitly disposable CI machine")
+	}
+	if err := emptyAtStart(); err != nil {
+		t.Fatal(err)
 	}
 	backend := os.Getenv("HUTCH_TEST_BACKEND")
 	if backend != "firecracker" && backend != "gvisor" {

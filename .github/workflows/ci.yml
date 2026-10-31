@@ -62,9 +62,7 @@ jobs:
           node-version: '24'
       - name: Install tested native CLIs
         run: |
-          npm install --global @openai/codex@0.166.0
-          curl -fsSL --retry 3 https://claude.ai/install.sh | bash -s -- 2.1.314
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          npm install --global @openai/codex@0.166.0 @anthropic-ai/claude-code@2.1.314
       - name: Native MCP discovery and calls without model turns
         run: |
           codex --version

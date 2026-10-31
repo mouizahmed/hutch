@@ -25,18 +25,19 @@ hutch config validate
 | `autonomy` | user or project request | `full` | `ask` or `full` |
 | `credentials` | user or project request | `["*"]` | Agent login grants |
 | `network.allow` | project request | empty | Explicit private `host:port` targets |
-| `network.egress` | user or project request | `open` | Public internet; `allowlist` is refused until implemented |
+| `network.egress` | user or project request | `open` | Public internet; `allowlist` isn't implemented, so boxes refuse to start with it (doctor and `hutch config validate` report it) |
 | `mcp_hosts.<server>` | user | empty | HTTPS hosts a stdio MCP uses its keys toward |
 | `keys.identity_hosts` | user | empty | Exact HTTPS hosts receiving a signed box identity |
 | `ports.wake_wait` | machine | `30s` | Forwarded connection's wake deadline |
 | `ports.parked_max` | machine | `100` | Maximum connections waiting for wake |
+| `mcp.start_timeout` | machine or user | `1m` | How long one MCP server may take to start in `doctor --template` |
 | `notify.command` | user | empty | Optional event handler command |
 
 Use `hutch config explain` for the full reference generated from the running version's schema. The per-project grants in your user config bound requests from a repository; a project cannot grant itself more access.
 
 ## Agents and MCPs
 
-Built-in adapters describe Claude Code, Codex, and GitHub CLI. Custom adapters live in `~/.config/hutch/agents/*.toml` and travel with `hutch user sync`. An adapter declares its native start, resume, install and login commands, supported files, secret fields, and credential hosts. Start commands are argument lists split on whitespace; use an executable wrapper for shell syntax. Custom agents can launch without Hutch parsing their provider-specific transcripts; session discovery and handoff depend on supported formats.
+Built-in adapters describe Claude Code, Codex, and GitHub CLI. Custom adapters live in `~/.config/hutch/agents/*.toml` and travel with `hutch user sync`. An adapter declares its native start, resume, install and login commands, supported files, secret fields, credential hosts, and the token URL its login refreshes at. Start commands are argument lists split on whitespace; use an executable wrapper for shell syntax. Custom agents can launch without Hutch parsing their provider-specific transcripts; session discovery and handoff depend on supported formats.
 
 `hutch user sync` previews changes before applying them. Ordinary config, MCP secret fields, and agent credentials have different handling. Review path warnings: a laptop path or executable is not automatically available inside a Linux box.
 

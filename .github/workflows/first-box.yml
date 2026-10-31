@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: 'Run containing the signed release rehearsal artifact'
+        description: 'release.yml run containing the release or rehearsal artifact'
         required: true
         type: string
       source_sha:
@@ -49,8 +49,11 @@ jobs:
           [[ $CANDIDATE_VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] || exit 1
           [[ $CANDIDATE_SHA =~ ^[0-9a-f]{40}$ ]] || exit 1
           [[ $ARTIFACT_RUN =~ ^[0-9]+$ ]] || exit 1
-          artifact_sha=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACT_RUN" --jq .head_sha)
+          # Only artifacts the release workflow built, never a pull request's.
+          read -r artifact_sha path event < <(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACT_RUN" --jq '[.head_sha, .path, .event] | @tsv')
           [[ $artifact_sha == "$CANDIDATE_SHA" ]] || exit 1
+          [[ $path == .github/workflows/release.yml ]] || exit 1
+          [[ $event == push || $event == workflow_dispatch ]] || exit 1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release
@@ -64,10 +67,14 @@ jobs:
         run: |
           cd dist/release
           sha256sum -c checksums.txt
-          gh attestation verify "hutch_${CANDIDATE_VERSION}_linux_amd64.tar.gz" \
-            --repo "$GITHUB_REPOSITORY" \
-            --bundle attestation.sigstore.json \
-            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
+          # Tagged releases are signed; rehearsals aren't, and rest on the run checks above.
+          if [ -f attestation.sigstore.json ]; then
+            for f in *.tar.gz install.sh; do
+              gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" --bundle attestation.sigstore.json \
+                --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+                --source-ref "refs/tags/$CANDIDATE_VERSION"
+            done
+          fi
       - name: Fresh OS account install and first box recording
         env:
           HUTCH_VERSION: ${{ inputs.version }}

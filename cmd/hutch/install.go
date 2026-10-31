@@ -501,6 +501,7 @@ type installFlags struct {
 	images       string
 	imageSize    int64
 	noBucket     bool
+	force        bool
 }
 
 func (f *installFlags) register(c *cobra.Command, setup bool) {
@@ -509,6 +510,7 @@ func (f *installFlags) register(c *cobra.Command, setup bool) {
 	c.Flags().Int64Var(&f.imageSize, "image-size", 0, "size in GB of /var/lib/hutch.img when there's no blank disk (default: 80% of free space)")
 	c.Flags().StringVar(&f.hutchd, "hutchd", "", "local hutchd binary for the machine (default: download the matching release, or use build output)")
 	c.Flags().StringVar(&f.images, "images", "", "local directory with vmlinux-<arch>, tmux-<arch> and terminfo.tar")
+	c.Flags().BoolVar(&f.force, "force", false, "install even when the machine runs this or a newer hutchd")
 	if setup {
 		c.Flags().BoolVar(&f.noBucket, "no-bucket", false, "no bucket for now (add one later with hutch machine bucket)")
 	}
@@ -521,6 +523,9 @@ func prepare(ctx context.Context, host string, f installFlags) (remote, probe, a
 	p, err := r.probe()
 	if err != nil {
 		return r, p, artifacts{}, storagePlan{}, fmt.Errorf("%w\n  fix: make ssh %s work without a password prompt (a key in ~/.ssh, or a Host entry in ~/.ssh/config)", err, host)
+	}
+	if err := checkDowngrade(p.get("hutchd"), f.force); err != nil {
+		return r, p, artifacts{}, storagePlan{}, err
 	}
 	if err := checkMachine(p); err != nil {
 		return r, p, artifacts{}, storagePlan{}, err
@@ -612,9 +617,17 @@ func offerBucket(cmd *cobra.Command, sess *yamux.Session) error {
 	return nil
 }
 
+// checkDowngrade refuses to install this hutchd over a newer one: its state may
+// be newer than this version reads.
+func checkDowngrade(machine string, force bool) error {
+	if !force && version.Older(version.String(), machine) {
+		return fmt.Errorf("the machine runs hutchd %s, newer than this hutch (%s): upgrade hutch on this computer, or pass --force", machine, version.String())
+	}
+	return nil
+}
+
 func upgradeCommand() *cobra.Command {
 	var f installFlags
-	var force bool
 	c := &cobra.Command{
 		Use:   "upgrade",
 		Short: "Install this version of hutchd on the machine and restart it",
@@ -631,7 +644,10 @@ func upgradeCommand() *cobra.Command {
 			}
 			have, want := p.get("hutchd"), version.String()
 			// A build with uncommitted changes isn't identified by its version.
-			if have == want && want != "dev" && !strings.HasSuffix(want, "-dirty") && !force {
+			if err := checkDowngrade(have, f.force); err != nil {
+				return err
+			}
+			if have == want && want != "dev" && !strings.HasSuffix(want, "-dirty") && !f.force {
 				// The file may have been uploaded by an interrupted upgrade while
 				// the old process is still running. Ask the actual daemon as well.
 				if running, err := daemonVersion(cmd.Context(), host); err == nil && running == want {
@@ -658,7 +674,6 @@ func upgradeCommand() *cobra.Command {
 		},
 	}
 	f.register(c, false)
-	c.Flags().BoolVar(&force, "force", false, "reinstall even when the machine runs this version")
 	return c
 }
 

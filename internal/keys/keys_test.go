@@ -77,8 +77,8 @@ func TestFind(t *testing.T) {
 	}
 }
 
-// Placeholders become real values only for the logins given, including inside
-// git's Basic auth.
+// Placeholders become real values only for the logins given, in auth headers
+// only, including inside git's Basic auth.
 func TestSwapHeaders(t *testing.T) {
 	gh := Login{Name: "gh", Adapter: "gh", Secrets: []Secret{{Key: "oauthtoken", Real: "gho_REAL", Placeholders: []string{"gho_PH"}}}}
 	h := http.Header{
@@ -87,7 +87,7 @@ func TestSwapHeaders(t *testing.T) {
 	}
 	swapHeaders(h, []Login{gh})
 	raw, _ := base64.StdEncoding.DecodeString(strings.TrimPrefix(h.Get("Authorization"), "Basic "))
-	if string(raw) != "x-access-token:gho_REAL" || h.Get("X-Other") != "token gho_REAL" {
+	if string(raw) != "x-access-token:gho_REAL" || h.Get("X-Other") != "token gho_PH" {
 		t.Errorf("swapped: %s, %s", raw, h.Get("X-Other"))
 	}
 	h = http.Header{"Authorization": {"token gho_PH"}}
