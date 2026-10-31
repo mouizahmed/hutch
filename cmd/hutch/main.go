@@ -70,16 +70,11 @@ func main() {
 	}
 }
 
-// machineTarget is the machine's SSH target: $HUTCH_MACHINE, else hutchd on this
-// computer (empty), else the user config's machine key. The user config syncs
-// between computers, so on the machine itself its machine key names it from
-// elsewhere.
+// machineTarget uses the explicit environment or saved SSH target, otherwise
+// this computer's daemon (empty). The machine key stays local and is never synced.
 func machineTarget() string {
 	if t := os.Getenv("HUTCH_MACHINE"); t != "" {
 		return t
-	}
-	if _, err := os.Stat(client.Socket); err == nil {
-		return ""
 	}
 	d, err := config.ReadFile(config.User, config.UserPath())
 	if err != nil {
