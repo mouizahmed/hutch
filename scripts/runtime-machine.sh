@@ -27,6 +27,7 @@ ci_ssh_dir="$RUNNER_TEMP/hutch-ssh"
 mkdir -p "$ci_ssh_dir" "$HOME/.ssh"
 chmod 700 "$ci_ssh_dir" "$HOME/.ssh"
 ssh-keygen -q -t ed25519 -N '' -f "$ci_ssh_dir/id_ed25519"
+chmod 600 "$ci_ssh_dir/id_ed25519"
 cat "$ci_ssh_dir/id_ed25519.pub" >> "$HOME/.ssh/authorized_keys"
 chmod 600 "$HOME/.ssh/authorized_keys"
 cat >> "$HOME/.ssh/config" <<SSH
