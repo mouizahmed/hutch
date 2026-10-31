@@ -152,6 +152,13 @@ echo "root_free_kb=$(df -Pk / | awk 'NR==2{print $4}')"
 echo "hutch_fs=$(findmnt -n -o FSTYPE /var/lib/hutch 2>/dev/null || true)"
 lsblk -nrpbo NAME,TYPE,FSTYPE,SIZE,PKNAME 2>/dev/null | sed 's/^/blk=/' || true
 echo "hutchd=$(hutchd version 2>/dev/null | awk '{print $2}' || true)"
+# An interrupted upload can leave a different binary on disk. Query the running
+# executable directly, even if its API protocol is newer than this client.
+daemon_pid=$(systemctl show hutchd -p MainPID --value 2>/dev/null || true)
+case "$daemon_pid" in
+  ''|0|*[!0-9]*) ;;
+  *) echo "hutchd_running=$(sudo -n /proc/"$daemon_pid"/exe version 2>/dev/null | awk '{print $2}' || true)" ;;
+esac
 if [ -f /var/lib/hutch/images/base/image.json ]; then echo base=yes; fi
 for f in kernel/vmlinux layer/hutch-guest layer/tmux-$(uname -m) layer/terminfo.tar; do echo "sum_$(basename $f)=$(sudo -n sha256sum /var/lib/hutch/$f 2>/dev/null | cut -c1-64)"; done
 if [ -n "$(sudo -n ls /var/lib/hutch/state/hutch.db 2>/dev/null)" ]; then echo state=yes; fi
@@ -524,7 +531,7 @@ func prepare(ctx context.Context, host string, f installFlags) (remote, probe, a
 	if err != nil {
 		return r, p, artifacts{}, storagePlan{}, fmt.Errorf("%w\n  fix: make ssh %s work without a password prompt (a key in ~/.ssh, or a Host entry in ~/.ssh/config)", err, host)
 	}
-	if err := checkDowngrade(p.get("hutchd"), f.force); err != nil {
+	if err := checkDowngrade(p, f.force); err != nil {
 		return r, p, artifacts{}, storagePlan{}, err
 	}
 	if err := checkMachine(p); err != nil {
@@ -619,9 +626,11 @@ func offerBucket(cmd *cobra.Command, sess *yamux.Session) error {
 
 // checkDowngrade refuses to install this hutchd over a newer one: its state may
 // be newer than this version reads.
-func checkDowngrade(machine string, force bool) error {
-	if !force && version.Older(version.String(), machine) {
-		return fmt.Errorf("the machine runs hutchd %s, newer than this hutch (%s): upgrade hutch on this computer, or pass --force", machine, version.String())
+func checkDowngrade(p probe, force bool) error {
+	for _, machine := range []string{p.get("hutchd"), p.get("hutchd_running")} {
+		if !force && version.Older(version.String(), machine) {
+			return fmt.Errorf("the machine has hutchd %s, newer than this hutch (%s): upgrade hutch on this computer, or pass --force", machine, version.String())
+		}
 	}
 	return nil
 }
@@ -644,7 +653,7 @@ func upgradeCommand() *cobra.Command {
 			}
 			have, want := p.get("hutchd"), version.String()
 			// A build with uncommitted changes isn't identified by its version.
-			if err := checkDowngrade(have, f.force); err != nil {
+			if err := checkDowngrade(p, f.force); err != nil {
 				return err
 			}
 			if have == want && want != "dev" && !strings.HasSuffix(want, "-dirty") && !f.force {
