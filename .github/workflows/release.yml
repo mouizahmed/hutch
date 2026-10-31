@@ -148,12 +148,16 @@ jobs:
           sudo useradd --create-home --shell /bin/bash hutch-first
           echo 'hutch-first ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/hutch-first >/dev/null
           sudo mkdir -p /home/hutch-first/work /home/hutch-first/tmp
+          sudo mkdir -p /home/hutch-first/fixture/scripts
+          sudo cp scripts/first-box.sh scripts/record-terminal.py scripts/runtime-machine.sh \
+            /home/hutch-first/fixture/scripts/
+          sudo cp -r dist/release /home/hutch-first/fixture/release
           sudo chown -R hutch-first:hutch-first /home/hutch-first
           sudo -u hutch-first env HOME=/home/hutch-first PATH="$PATH" \
             GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_TEMP=/home/hutch-first/tmp \
             HUTCH_TEST_BACKEND=firecracker HUTCH_TEST_COMMIT="$GITHUB_SHA" \
-            HUTCH_VERSION="$HUTCH_VERSION" HUTCH_TEST_ASSETS="$GITHUB_WORKSPACE/dist/release" \
-            HUTCH_TEST_SOURCE="$GITHUB_WORKSPACE" \
+            HUTCH_VERSION="$HUTCH_VERSION" HUTCH_TEST_ASSETS=/home/hutch-first/fixture/release \
+            HUTCH_TEST_SOURCE=/home/hutch-first/fixture \
             bash -c 'cd /home/hutch-first/work && python3 "$HUTCH_TEST_SOURCE/scripts/record-terminal.py" \
               first-box.cast bash "$HUTCH_TEST_SOURCE/scripts/first-box.sh"'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
