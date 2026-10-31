@@ -187,6 +187,12 @@ func TestSnapshotImport(t *testing.T) {
 			}
 			b, err = w.Wake(t.Context(), id)
 			if err != nil {
+				if console, readErr := os.ReadFile(w.ConsolePath(id)); readErr == nil {
+					if len(console) > 32768 {
+						console = console[len(console)-32768:]
+					}
+					t.Logf("synthetic restore console:\n%s", console)
+				}
 				t.Fatal(err)
 			}
 			if exchangeExec(t, w, id, "cat /workspace/exchange-marker") != "snapshot-exchange" {

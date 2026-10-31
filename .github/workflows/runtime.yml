@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      replay_run:
+        description: 'Optional run whose synthetic snapshots should be replayed without rebuilding'
+        required: false
+        type: string
   schedule:
     - cron: '37 7 * * *'
 
@@ -17,6 +22,7 @@ concurrency:
 
 jobs:
   files:
+    if: github.event_name != 'workflow_dispatch' || inputs.replay_run == ''
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -185,3 +191,42 @@ jobs:
           sudo env GITHUB_ACTIONS=true HUTCH_TEST_DISPOSABLE=1 \
             HUTCH_TEST_EXCHANGE="$GITHUB_WORKSPACE/dist/exchange" \
             "$RUNNER_TEMP/exchange.test" -test.v -test.timeout=10m -test.run='^TestSnapshotImport$'
+
+  snapshot-replay:
+    if: github.event_name == 'workflow_dispatch' && inputs.replay_run != ''
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: runtime-files
+          path: dist/runtime
+          run-id: ${{ inputs.replay_run }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: snapshot-*
+          path: dist/exchange
+          run-id: ${{ inputs.replay_run }}
+          github-token: ${{ github.token }}
+      - name: Set up a disposable receiving machine
+        env:
+          HUTCH_TEST_BACKEND: gvisor
+        run: scripts/runtime-machine.sh
+      - name: Replay the real imported snapshots
+        run: |
+          sudo systemctl stop hutchd
+          go test -tags runtime -c -o "$RUNNER_TEMP/exchange.test" ./internal/worker
+          for attempt in 1 2 3; do
+            echo "Snapshot replay $attempt"
+            sudo env GITHUB_ACTIONS=true HUTCH_TEST_DISPOSABLE=1 \
+              HUTCH_TEST_EXCHANGE="$GITHUB_WORKSPACE/dist/exchange" \
+              "$RUNNER_TEMP/exchange.test" -test.v -test.timeout=10m -test.run='^TestSnapshotImport$'
+          done
