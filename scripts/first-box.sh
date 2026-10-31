@@ -65,7 +65,7 @@ hutch sleep first-box
 printf '\n$ hutch wake first-box\n'
 hutch wake first-box
 [[ $(hutch exec first-box -- cat /workspace/first-box) == hello-from-a-fresh-install ]]
-printf '\n$ hutch rm first-box --yes\n'
-hutch rm first-box --yes
+printf '\n$ hutch rm first-box\n'
+hutch rm first-box
 printf '{"first_box_seconds":%s,"fresh_os_account":true,"rehearsal_transport":true,"completed":true}\n' \
   "$first_box_elapsed" > first-box-result.json
