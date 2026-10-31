@@ -177,11 +177,42 @@ func TestSnapshotImport(t *testing.T) {
 			if err := mem.Put(t.Context(), chunk, original, false); err != nil {
 				t.Fatal(err)
 			}
+			if m.Box.GVisor != "" && w.GVisor != "" && w.warm(m.Box.Class) {
+				// A matching family must still honor stricter CPU requirements.
+				// Keep the real encrypted disk/state, changing only our own manifest.
+				incompatible, info := *m, *m.Box
+				info.GVisorFeatures = append(append([]string(nil), info.GVisorFeatures...), "hutch_unavailable_cpu_feature")
+				incompatible.Box = &info
+				other := f.Store
+				other.Prefix += "-cpu-check"
+				if err := s.PutManifest(t.Context(), f.Key, ManifestName(&other, f.Gen), &incompatible); err != nil {
+					t.Fatal(err)
+				}
+				const cpuID = "exchange-cpu-check"
+				t.Cleanup(func() { _ = w.Remove(cpuID) })
+				cold, err := w.Restore(t.Context(), cpuID, &other, f.Gen, s, f.Key)
+				if err != nil || cold.State != Archived {
+					t.Fatalf("missing CPU feature did not force a cold import: %v", err)
+				}
+				if _, err := w.Wake(t.Context(), cpuID); err != nil {
+					t.Fatal(err)
+				}
+				if exchangeExec(t, w, cpuID, "cat /workspace/exchange-marker") != "snapshot-exchange" ||
+					exchangeExec(t, w, cpuID, "if ss -ltn | grep -q ':19557'; then echo warm; else echo cold; fi") != "cold" {
+					t.Fatal("CPU-incompatible cold boot lost disk state or retained the process")
+				}
+				if err := w.Remove(cpuID); err != nil {
+					t.Fatal(err)
+				}
+			}
 			b, err := w.Restore(t.Context(), id, &f.Store, f.Gen, s, f.Key)
 			if err != nil {
 				t.Fatal(err)
 			}
-			warm := w.warm(f.Class)
+			warm, err := w.restoresWarm(m.Box)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if (b.State == Asleep) != warm || (b.State == Archived) == warm {
 				t.Fatalf("incorrect warm/cold state for %s -> %s: %s", f.Class, w.Class(), b.State)
 			}

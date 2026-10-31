@@ -54,11 +54,12 @@ type Manifest struct {
 
 // BoxInfo describes the VM a box manifest restores.
 type BoxInfo struct {
-	Image     string `json:"image"`
-	VCPUs     int    `json:"vcpus"`
-	MemMiB    int    `json:"mem_mib"`
-	FCVersion string `json:"fc_version"`
-	GVisor    string `json:"gvisor,omitempty"`
+	Image          string   `json:"image"`
+	VCPUs          int      `json:"vcpus"`
+	MemMiB         int      `json:"mem_mib"`
+	FCVersion      string   `json:"fc_version"`
+	GVisor         string   `json:"gvisor,omitempty"`
+	GVisorFeatures []string `json:"gvisor_features,omitempty"`
 	// GuestToken is a gVisor box's hutch-guest token, held in its memory snapshot.
 	GuestToken string `json:"guest_token,omitempty"`
 	Class      string `json:"snapshot_class"`

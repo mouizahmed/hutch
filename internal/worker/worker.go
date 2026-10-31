@@ -75,6 +75,9 @@ type Box struct {
 	Store *Store `json:"store,omitempty"`
 	// GVisor is the gVisor version a gVisor box runs (FCVersion is empty then).
 	GVisor string `json:"gvisor,omitempty"`
+	// GVisorFeatures bounds the CPU features exposed to this snapshot. A shared
+	// vendor/runtime class alone cannot establish cross-machine compatibility.
+	GVisorFeatures []string `json:"gvisor_features,omitempty"`
 	// RunscID is the internal OCI ID. New sandboxes use fixed-length uppercase
 	// IDs, so runsc's abbreviation lookup cannot confuse human box-name prefixes.
 	// Empty identifies older running sandboxes that still use the box name.
@@ -137,8 +140,8 @@ func (w *Worker) Class() string {
 	return firecracker.SnapshotClass(w.vendor, w.FCVersion)
 }
 
-// Classes lists every snapshot class the worker restores warm: one per installed
-// Firecracker or gVisor version, kept side by side so old snapshots outlive upgrades.
+// Classes lists candidate runtime families, one per installed version kept side
+// by side. Imported gVisor snapshots also require compatible CPU features.
 func (w *Worker) Classes() []string {
 	var out []string
 	if w.GVisor != "" {
@@ -165,7 +168,7 @@ func (w *Worker) versions() []string {
 	return out
 }
 
-// warm reports whether the worker can restore a snapshot of class c.
+// warm checks the runtime family. Imports also check the manifest's CPU features.
 func (w *Worker) warm(c string) bool { return slices.Contains(w.Classes(), c) }
 
 // fcBin is a Firecracker binary of a version ("" for the newest).

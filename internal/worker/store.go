@@ -65,7 +65,7 @@ func (w *Worker) Upload(ctx context.Context, id string, s *durable.Store, k dura
 		}
 	}
 	m := &durable.Manifest{Created: time.Now().UTC(), Files: map[string]*durable.File{},
-		Box: &durable.BoxInfo{Image: b.Image, VCPUs: b.VCPUs, MemMiB: b.MemMiB, FCVersion: b.FCVersion, GVisor: b.GVisor, GuestToken: b.Token, Class: b.Class,
+		Box: &durable.BoxInfo{Image: b.Image, VCPUs: b.VCPUs, MemMiB: b.MemMiB, FCVersion: b.FCVersion, GVisor: b.GVisor, GVisorFeatures: b.GVisorFeatures, GuestToken: b.Token, Class: b.Class,
 			IdleTimeout: b.Idle.Timeout, CPUThreshold: b.Idle.CPUThreshold, Allow: b.Allow}}
 	for _, name := range snapshotFiles {
 		f, err := os.Open(filepath.Join(work, name))
@@ -190,7 +190,10 @@ func (w *Worker) Restore(ctx context.Context, id string, store *Store, gen int, 
 	if m.Box == nil || m.Files["rootfs.ext4"] == nil {
 		return nil, fmt.Errorf("%s is not a box snapshot", name)
 	}
-	warm := !m.Box.Archived && w.warm(m.Box.Class)
+	warm, err := w.restoresWarm(m.Box)
+	if err != nil {
+		return nil, err
+	}
 	tmp := filepath.Join(w.Root, "boxes", ".restore-"+id)
 	os.RemoveAll(tmp)
 	ok := false
@@ -242,7 +245,7 @@ func (w *Worker) Restore(ctx context.Context, id string, store *Store, gen int, 
 		return nil, err
 	}
 	ok = true
-	b := &Box{ID: id, Image: m.Box.Image, VCPUs: m.Box.VCPUs, MemMiB: m.Box.MemMiB, FCVersion: m.Box.FCVersion, GVisor: m.Box.GVisor, Token: m.Box.GuestToken, Class: m.Box.Class,
+	b := &Box{ID: id, Image: m.Box.Image, VCPUs: m.Box.VCPUs, MemMiB: m.Box.MemMiB, FCVersion: m.Box.FCVersion, GVisor: m.Box.GVisor, GVisorFeatures: m.Box.GVisorFeatures, Token: m.Box.GuestToken, Class: m.Box.Class,
 		State: Asleep, Generation: gen, Uploaded: gen, Created: time.Now().UTC(), Store: store,
 		Idle: Idle{Timeout: m.Box.IdleTimeout, CPUThreshold: m.Box.CPUThreshold}, Allow: m.Box.Allow}
 	if !warm {

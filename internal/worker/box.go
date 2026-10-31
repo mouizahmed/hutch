@@ -202,7 +202,7 @@ func (w *Worker) copyFromSnapshot(srcID, id string) (*Box, error) {
 			os.RemoveAll(w.refDir(id))
 		}
 	}
-	b := &Box{ID: id, Image: src.Image, VCPUs: src.VCPUs, MemMiB: src.MemMiB, FCVersion: src.FCVersion, GVisor: src.GVisor, Class: src.Class,
+	b := &Box{ID: id, Image: src.Image, VCPUs: src.VCPUs, MemMiB: src.MemMiB, FCVersion: src.FCVersion, GVisor: src.GVisor, GVisorFeatures: append([]string(nil), src.GVisorFeatures...), Class: src.Class,
 		Token: src.Token, Created: time.Now().UTC()}
 	if src.GVisor == "" {
 		b.BaseMem = filepath.Join(dir, "base.mem")
@@ -650,7 +650,13 @@ func (w *Worker) stop(b *Box) {
 // coldStart boots a box from its disk alone, on this worker's backend.
 func (w *Worker) coldStart(ctx context.Context, b *Box) error {
 	b.BaseMem, b.Class, b.FCVersion, b.GVisor = "", w.Class(), w.FCVersion, w.GVisor
+	b.GVisorFeatures = nil
 	if b.GVisor != "" {
+		features, err := w.gvisorCPUFeatures(b.GVisor)
+		if err != nil {
+			return err
+		}
+		b.GVisorFeatures = features
 		if b.Token == "" {
 			b.Token = newToken()
 		}

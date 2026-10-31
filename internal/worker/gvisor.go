@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/mouizahmed/hutch/internal/durable"
 	"github.com/mouizahmed/hutch/internal/guestproto"
 )
 
@@ -51,6 +53,52 @@ const specVersion = 2
 func gvisorClass(vendor, version string) string {
 	arch := map[string]string{"amd64": "x86_64", "arm64": "aarch64"}[runtime.GOARCH]
 	return fmt.Sprintf("%s-%s/gvisor-%s-s%d", arch, vendor, version, specVersion)
+}
+
+func (w *Worker) gvisorCPUFeatures(version string) ([]string, error) {
+	data, err := w.runsc(version, "cpu-features")
+	if err != nil {
+		return nil, fmt.Errorf("query gVisor CPU compatibility: %w", err)
+	}
+	features := strings.FieldsFunc(string(data), func(r rune) bool { return r == ',' || r == ' ' || r == '\n' || r == '\r' || r == '\t' })
+	if len(features) == 0 {
+		return nil, fmt.Errorf("gVisor reported no CPU features")
+	}
+	slices.Sort(features)
+	return slices.Compact(features), nil
+}
+
+func supportsFeatures(available, required []string) bool {
+	if len(required) == 0 {
+		return false // Older imported checkpoints have unknown requirements.
+	}
+	for _, feature := range required {
+		if !slices.Contains(available, feature) {
+			return false
+		}
+	}
+	return true
+}
+
+// Local sleep/wake and forks remain on their original host. Imports need an
+// additional feature check: two AMD (or Intel) hosts can have different SIMD.
+// Unknown older imports keep their disk and cold boot; local legacy boxes keep
+// their existing warm behavior.
+func (w *Worker) restoresWarm(info *durable.BoxInfo) (bool, error) {
+	if info.Archived || !w.warm(info.Class) {
+		return false, nil
+	}
+	if info.GVisor == "" {
+		return true, nil
+	}
+	if len(info.GVisorFeatures) == 0 {
+		return false, nil
+	}
+	available, err := w.gvisorCPUFeatures(info.GVisor)
+	if err != nil {
+		return false, err
+	}
+	return supportsFeatures(available, info.GVisorFeatures), nil
 }
 
 // gvisorVersions lists the installed gVisor versions, oldest first.
@@ -344,6 +392,15 @@ func (w *Worker) killSandbox(b *Box) {
 // disk is unmounted before it's copied; otherwise the sandbox resumes. On failure
 // the sandbox is left running.
 func (w *Worker) checkpointSandbox(ctx context.Context, b *Box, gen string, leaveRunning bool) error {
+	if len(b.GVisorFeatures) == 0 {
+		// A running legacy sandbox already works on this host. Its host feature
+		// set is a conservative bound even if a prior restore exposed fewer.
+		features, err := w.gvisorCPUFeatures(b.GVisor)
+		if err != nil {
+			return err
+		}
+		b.GVisorFeatures = features
+	}
 	w.syncGuest(ctx, b)
 	if _, err := w.runsc(b.GVisor, "pause", b.sandboxID()); err != nil {
 		return err

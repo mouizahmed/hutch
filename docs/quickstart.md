@@ -75,6 +75,8 @@ hutch diff <box>
 
 Each box is an independent working environment. Terminals in one box share files, dependencies, and services. A terminal is a process session; the agent's conversation is managed by the agent itself. Cold boots leave saved agent terminals ready to resume through the agent's picker.
 
+Restoring a gVisor snapshot on another machine also checks its recorded CPU features. A matching CPU vendor and runtime version alone do not guarantee a warm restore. Missing features, or an older imported snapshot without feature metadata, cause a cold boot that preserves files. Existing local sleep/wake keeps its warm behavior.
+
 For a service listening on port 3000 in a box:
 
 ```sh
