@@ -1,0 +1,106 @@
+name: first-box
+
+on:
+  workflow_call:
+    inputs:
+      run_id:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Run containing the signed release rehearsal artifact'
+        required: true
+        type: string
+      source_sha:
+        description: 'Full candidate commit used to build that artifact'
+        required: true
+        type: string
+      version:
+        description: 'Artifact version, for example v0.0.0-rehearsal.5'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  walkthrough:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate candidate inputs
+        env:
+          CANDIDATE_VERSION: ${{ inputs.version }}
+          CANDIDATE_SHA: ${{ inputs.source_sha }}
+          ARTIFACT_RUN: ${{ inputs.run_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ $CANDIDATE_VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] || exit 1
+          [[ $CANDIDATE_SHA =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ $ARTIFACT_RUN =~ ^[0-9]+$ ]] || exit 1
+          artifact_sha=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACT_RUN" --jq .head_sha)
+          [[ $artifact_sha == "$CANDIDATE_SHA" ]] || exit 1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist/release
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Check actual signed rehearsal artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_VERSION: ${{ inputs.version }}
+        run: |
+          cd dist/release
+          sha256sum -c checksums.txt
+          gh attestation verify "hutch_${CANDIDATE_VERSION}_linux_amd64.tar.gz" \
+            --repo "$GITHUB_REPOSITORY" \
+            --bundle attestation.sigstore.json \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
+      - name: Fresh OS account install and first box recording
+        env:
+          HUTCH_VERSION: ${{ inputs.version }}
+          CANDIDATE_SHA: ${{ inputs.source_sha }}
+        run: |
+          sudo useradd --create-home --shell /bin/bash hutch-first
+          echo 'hutch-first ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/hutch-first >/dev/null
+          sudo mkdir -p /home/hutch-first/work /home/hutch-first/tmp
+          sudo mkdir -p /home/hutch-first/fixture/scripts
+          sudo cp scripts/first-box.sh scripts/record-terminal.py scripts/runtime-machine.sh \
+            /home/hutch-first/fixture/scripts/
+          sudo cp -r dist/release /home/hutch-first/fixture/release
+          sudo chown -R hutch-first:hutch-first /home/hutch-first
+          sudo -u hutch-first env HOME=/home/hutch-first PATH="$PATH" \
+            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_TEMP=/home/hutch-first/tmp \
+            HUTCH_TEST_BACKEND=firecracker HUTCH_TEST_COMMIT="$CANDIDATE_SHA" \
+            HUTCH_VERSION="$HUTCH_VERSION" HUTCH_TEST_ASSETS=/home/hutch-first/fixture/release \
+            HUTCH_TEST_SOURCE=/home/hutch-first/fixture \
+            bash -c 'cd /home/hutch-first/work && python3 "$HUTCH_TEST_SOURCE/scripts/record-terminal.py" \
+              first-box.cast bash "$HUTCH_TEST_SOURCE/scripts/first-box.sh"'
+      - name: Collect the public walkthrough output
+        if: always()
+        run: |
+          mkdir -p dist/first-box
+          for file in first-box.cast first-box-result.json; do
+            if sudo test -f "/home/hutch-first/work/$file"; then
+              sudo cp "/home/hutch-first/work/$file" "dist/first-box/$file"
+            fi
+          done
+          sudo chown -R "$(id -u):$(id -g)" dist/first-box
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: first-box-recording
+          path: dist/first-box
+          if-no-files-found: warn

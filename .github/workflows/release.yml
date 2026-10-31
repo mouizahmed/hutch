@@ -123,48 +123,11 @@ jobs:
 
   first-box:
     needs: [check, publish]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: release
-          path: dist/release
-      - name: Check actual signed rehearsal artifacts
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cd dist/release
-          sha256sum -c checksums.txt
-          gh attestation verify "hutch_${{ needs.check.outputs.version }}_linux_amd64.tar.gz" \
-            --repo "$GITHUB_REPOSITORY" \
-            --bundle attestation.sigstore.json \
-            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
-      - name: Fresh OS account install and first box recording
-        env:
-          HUTCH_VERSION: ${{ needs.check.outputs.version }}
-        run: |
-          sudo useradd --create-home --shell /bin/bash hutch-first
-          echo 'hutch-first ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/hutch-first >/dev/null
-          sudo mkdir -p /home/hutch-first/work /home/hutch-first/tmp
-          sudo mkdir -p /home/hutch-first/fixture/scripts
-          sudo cp scripts/first-box.sh scripts/record-terminal.py scripts/runtime-machine.sh \
-            /home/hutch-first/fixture/scripts/
-          sudo cp -r dist/release /home/hutch-first/fixture/release
-          sudo chown -R hutch-first:hutch-first /home/hutch-first
-          sudo -u hutch-first env HOME=/home/hutch-first PATH="$PATH" \
-            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_TEMP=/home/hutch-first/tmp \
-            HUTCH_TEST_BACKEND=firecracker HUTCH_TEST_COMMIT="$GITHUB_SHA" \
-            HUTCH_VERSION="$HUTCH_VERSION" HUTCH_TEST_ASSETS=/home/hutch-first/fixture/release \
-            HUTCH_TEST_SOURCE=/home/hutch-first/fixture \
-            bash -c 'cd /home/hutch-first/work && python3 "$HUTCH_TEST_SOURCE/scripts/record-terminal.py" \
-              first-box.cast bash "$HUTCH_TEST_SOURCE/scripts/first-box.sh"'
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
-        with:
-          name: first-box-recording
-          path: |
-            /home/hutch-first/work/first-box.cast
-            /home/hutch-first/work/first-box-result.json
-          if-no-files-found: warn
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/first-box.yml
+    with:
+      run_id: ${{ format('{0}', github.run_id) }}
+      source_sha: ${{ github.sha }}
+      version: ${{ needs.check.outputs.version }}
