@@ -71,6 +71,9 @@ func (s *Server) userGet(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (an
 		return nil, err
 	}
 	for i := range creds {
+		if strings.HasSuffix(creds[i].Part, "/mcp") {
+			creds[i].Digest = api.SecretsDigest(creds[i].Files)
+		}
 		for j := range creds[i].Files {
 			creds[i].Files[j].Data = nil
 		}
@@ -424,23 +427,18 @@ func (s *Server) userCapture(ctx context.Context, params json.RawMessage, _ *rpc
 // would replace the working host login for every box. Metadata alone likewise
 // does not establish that an adapter left a usable login in its declared files.
 func checkCapturedLogin(a *agents.Adapter, files []guestproto.File, known []keys.Secret) error {
-	found := false
-	for _, source := range a.Credentials {
-		for _, f := range files {
-			if f.Path != source.File {
-				continue
-			}
-			for value := range keys.Find(f.Path, f.Data, source.Secrets) {
-				found = true
-				for _, secret := range known {
-					if slices.Contains(secret.Placeholders, value) {
-						return fmt.Errorf("%s's files already use a managed login; run hutch login %s to log in again instead of capturing its placeholders", a.Name, a.Name)
-					}
-				}
+	found, err := loginValues(a, files)
+	if err != nil {
+		return err
+	}
+	for value := range found {
+		for _, secret := range known {
+			if slices.Contains(secret.Placeholders, value) {
+				return fmt.Errorf("%s's files already use a managed login; run hutch login %s to log in again instead of capturing its placeholders", a.Name, a.Name)
 			}
 		}
 	}
-	if !found {
+	if len(found) == 0 {
 		return fmt.Errorf("%s left no token fields in its declared credential files; did the login finish?", a.Name)
 	}
 	return nil

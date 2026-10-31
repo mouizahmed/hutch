@@ -41,34 +41,21 @@ func (s *Server) syncMCP(a *agents.Adapter, files []guestproto.File) error {
 			continue
 		}
 		for name, server := range agents.MCPServers(f.Path, f.Data, a.MCP.Key) {
-			for _, field := range a.MCP.Secrets {
-				values := map[string]string{}
-				switch v := server[field].(type) {
-				case string:
-					values[field] = v
-				case map[string]any:
-					for k, x := range v {
-						if s, ok := x.(string); ok {
-							values[field+"."+k] = s
-						}
+			for k, v := range agents.MCPSecretValues(server, a.MCP.Secrets) {
+				if !keys.LooksSecret(v) {
+					continue
+				}
+				sec := keys.Secret{Key: k, Real: v}
+				if i := slices.IndexFunc(old[name], func(o keys.Secret) bool { return o.Key == k }); i >= 0 {
+					sec.Placeholders = slices.Clone(old[name][i].Placeholders)
+					if old[name][i].Real != v && keys.IsJWT(v) {
+						sec.Placeholders = append([]string{keys.Placeholder(v)}, sec.Placeholders...)
 					}
 				}
-				for k, v := range values {
-					if !keys.LooksSecret(v) {
-						continue
-					}
-					sec := keys.Secret{Key: k, Real: v}
-					if i := slices.IndexFunc(old[name], func(o keys.Secret) bool { return o.Key == k }); i >= 0 {
-						sec.Placeholders = slices.Clone(old[name][i].Placeholders)
-						if old[name][i].Real != v && keys.IsJWT(v) {
-							sec.Placeholders = append([]string{keys.Placeholder(v)}, sec.Placeholders...)
-						}
-					}
-					if len(sec.Placeholders) == 0 {
-						sec.Placeholders = []string{keys.Placeholder(v)}
-					}
-					out[name] = append(out[name], sec)
+				if len(sec.Placeholders) == 0 {
+					sec.Placeholders = []string{keys.Placeholder(v)}
 				}
+				out[name] = append(out[name], sec)
 			}
 		}
 	}
@@ -95,6 +82,28 @@ func (s *Server) mcpLogins(set agents.Set) ([]keys.Login, map[string]bool, error
 	for _, a := range set.Sorted() {
 		if a.MCP == nil {
 			continue
+		}
+		if len(a.MCP.RawSecrets) > 0 {
+			part, err := s.store.layerPart(credentialsPrefix + a.Name + "/mcp")
+			if err != nil {
+				return nil, nil, err
+			}
+			if len(part.content) > 0 {
+				var files []guestproto.File
+				if err := json.Unmarshal(part.content, &files); err != nil {
+					return nil, nil, err
+				}
+				for _, f := range files {
+					if f.Path != a.MCP.File {
+						continue
+					}
+					for _, server := range agents.MCPServers(f.Path, f.Data, a.MCP.Key) {
+						for _, value := range agents.MCPSecretValues(server, a.MCP.RawSecrets) {
+							real[value] = true
+						}
+					}
+				}
+			}
 		}
 		secrets, err := s.mcpSecrets(a.Name)
 		if err != nil {

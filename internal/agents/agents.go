@@ -49,6 +49,74 @@ type Source struct {
 	Secrets []string `toml:"secrets"`
 }
 
+func (m MCP) SecretFields() []string {
+	return append(append([]string{}, m.Secrets...), m.RawSecrets...)
+}
+
+// MCPField reads a dotted path inside one server's configuration.
+func MCPField(server map[string]any, path string) (any, bool) {
+	parts := strings.Split(path, ".")
+	for _, part := range parts[:len(parts)-1] {
+		var ok bool
+		server, ok = server[part].(map[string]any)
+		if !ok {
+			return nil, false
+		}
+	}
+	v, ok := server[parts[len(parts)-1]]
+	return v, ok
+}
+
+func TakeMCPField(server map[string]any, path string) (any, bool) {
+	parts := strings.Split(path, ".")
+	for _, part := range parts[:len(parts)-1] {
+		var ok bool
+		server, ok = server[part].(map[string]any)
+		if !ok {
+			return nil, false
+		}
+	}
+	key := parts[len(parts)-1]
+	v, ok := server[key]
+	if ok && v != nil {
+		delete(server, key)
+	}
+	return v, ok && v != nil
+}
+
+func SetMCPField(server map[string]any, path string, value any) {
+	parts := strings.Split(path, ".")
+	for _, part := range parts[:len(parts)-1] {
+		next, ok := server[part].(map[string]any)
+		if !ok {
+			next = map[string]any{}
+			server[part] = next
+		}
+		server = next
+	}
+	server[parts[len(parts)-1]] = value
+}
+
+func MCPSecretValues(server map[string]any, fields []string) map[string]string {
+	out := map[string]string{}
+	for _, field := range fields {
+		value, _ := MCPField(server, field)
+		switch value := value.(type) {
+		case string:
+			if value != "" {
+				out[field] = value
+			}
+		case map[string]any:
+			for key, v := range value {
+				if s, ok := v.(string); ok && s != "" {
+					out[field+"."+key] = s
+				}
+			}
+		}
+	}
+	return out
+}
+
 func (s *Source) UnmarshalTOML(v any) error {
 	switch v := v.(type) {
 	case string:
@@ -90,6 +158,10 @@ type MCP struct {
 	Key     string   `toml:"key"`
 	Format  string   `toml:"format"`
 	Secrets []string `toml:"secrets"`
+	// RawSecrets are credential fields used outside HTTPS headers, such as an
+	// OAuth client secret sent in a token request body. They are grant-gated but
+	// cannot be replaced by this proxy. Fields may use dotted object paths.
+	RawSecrets []string `toml:"raw_secrets"`
 }
 
 // Seed is merged into a box's file after the user layer, to get past first-run prompts.
@@ -158,7 +230,7 @@ func Parse(source string, data []byte) (*Adapter, error) {
 			return nil, fmt.Errorf("%s: credentials need secrets (the keys holding tokens, like { file = \"~/.x/auth.json\", secrets = [\"access_token\"] }) and hosts (where they're used)", source)
 		}
 	}
-	if a.MCP != nil && len(a.MCP.Secrets) == 0 {
+	if a.MCP != nil && len(a.MCP.Secrets) == 0 && len(a.MCP.RawSecrets) == 0 {
 		return nil, fmt.Errorf("%s: mcp needs secrets, the server fields that hold keys, like [\"env\"]", source)
 	}
 	for mode := range a.Autonomy {

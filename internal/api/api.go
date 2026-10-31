@@ -382,6 +382,7 @@ type Credentials struct {
 	Version int64             `json:"version"`
 	Files   []guestproto.File `json:"files,omitempty"`
 	Updated time.Time         `json:"updated"`
+	Digest  string            `json:"digest,omitempty"` // MCP change detection without returning file contents
 }
 
 type UserState struct {

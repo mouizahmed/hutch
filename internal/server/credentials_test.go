@@ -143,3 +143,55 @@ func TestCaptureRefusesManagedPlaceholdersAndMetadata(t *testing.T) {
 		})
 	}
 }
+
+// Older captures included every section of Claude's credentials file. A managed
+// login update must neither distribute its MCP session nor replace one in a box.
+func TestLegacyClaudeCaptureScopesLoginAndProxy(t *testing.T) {
+	st, err := openStore(filepath.Join(t.TempDir(), "scope.db"), durable.NewKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.db.Close()
+	s := &Server{store: st, master: durable.NewKey()}
+	a := agents.Builtin()["claude"]
+	const login = "synthetic-agent-access-token"
+	const mcp = "synthetic-native-mcp-access-token"
+	files := []guestproto.File{{Path: a.Credentials[0].File, Data: []byte(`{"claudeAiOauth":{"accessToken":"` + login + `"},"mcpOAuth":{"fixture":{"accessToken":"` + mcp + `"}}}`)}}
+	data, _ := json.Marshal(files)
+	if _, _, err := st.putLayerPart(credentialsPrefix+a.Name, 0, data); err != nil {
+		t.Fatal(err)
+	}
+	// Model a pre-upgrade proxy table, which also discovered the native MCP token.
+	if err := s.putLoginSecrets(a.Name, []keys.Secret{
+		{Key: "accesstoken", Real: login, Placeholders: []string{"agent-placeholder"}},
+		{Key: "accesstoken", Real: mcp, Placeholders: []string{"mcp-placeholder"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, proxied := range []bool{false, true} {
+		got, err := s.boxFiles([]string{a.Name}, proxied)
+		if err != nil || len(got) != 1 {
+			t.Fatalf("login files: %v, %v", got, err)
+		}
+		if !got[0].Merge || strings.Contains(string(got[0].Data), "mcpOAuth") || strings.Contains(string(got[0].Data), mcp) {
+			t.Fatal("legacy capture would overwrite or distribute a box's native MCP session")
+		}
+	}
+	table, err := s.keysTable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(table.Logins) != 1 || len(table.Logins[0].Secrets) != 1 || table.Logins[0].Secrets[0].Real != login {
+		t.Fatal("native MCP token was exposed to the agent provider's proxy targets")
+	}
+	if err := s.syncSecrets(a, files); err != nil {
+		t.Fatal(err)
+	}
+	secrets, err := s.loginSecrets(a.Name)
+	if err != nil || len(secrets) != 1 || secrets[0].Real != login {
+		t.Fatal("new login capture included native MCP credentials")
+	}
+	if checkCapturedLogin(a, []guestproto.File{{Path: a.Credentials[0].File, Data: []byte(`{"mcpOAuth":{"fixture":{"accessToken":"` + mcp + `"}}}`)}}, nil) == nil {
+		t.Fatal("an MCP session was accepted as the agent's login")
+	}
+}

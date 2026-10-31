@@ -49,7 +49,7 @@ func TestCredentialIsolation(t *testing.T) {
 	})
 	layer := api.UserLayer{
 		Adapters: map[string]string{
-			"claude.toml": "name=\"claude\"\nstart=\"true\"\n",
+			"claude.toml": "name=\"claude\"\nstart=\"true\"\nlogin=\"true\"\nhosts=[\"credential.invalid\"]\ncredentials=[{file=\"~/.claude/.credentials.json\",keys=[\"claudeAiOauth\"],secrets=[\"accessToken\",\"refreshToken\"]}]\n",
 			"codex.toml":  "name=\"codex\"\nstart=\"true\"\n",
 			"phase9.toml": "name=\"phase9\"\nstart=\"sh\"\nconfig=[\"~/.phase9.json\"]\n[mcp]\nfile=\"~/.phase9.json\"\nkey=\"mcpServers\"\nsecrets=[\"env\"]\n",
 		},
@@ -154,4 +154,27 @@ for name in sys.argv[3:]:
 	mustCall(t, api.BoxWake, api.IDParams{ID: granted}, nil)
 	inspect(granted, true)
 	t.Log("custom-adapter MCP grants used placeholders; raw synthetic keys absent from guest files, environment and snapshot bytes; narrowing refused; rotation/wake preserved isolation")
+
+	// Use Claude's actual shared-file shape without a provider/model request.
+	// Capturing and refreshing its managed login must preserve box-local MCP OAuth.
+	claude := fmt.Sprintf("credential-oauth-%d", time.Now().Unix())
+	cleanupRuntimeBox(t, claude)
+	mustCall(t, api.BoxFork, api.ForkParams{Source: source.ID, ID: claude, Credentials: []string{"claude"}}, nil)
+	login, native := marker(), marker()
+	inBox(t, claude, `mkdir -p ~/.claude
+node -e 'require("fs").writeFileSync(process.env.HOME+"/.claude/.credentials.json",JSON.stringify({claudeAiOauth:{accessToken:process.argv[1]},mcpOAuth:{fixture:{accessToken:process.argv[2]}}}))' "$1" "$2"`, login, native)
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			login = marker()
+			inBox(t, claude, `node -e 'const f=process.env.HOME+"/.claude/.credentials.json",fs=require("fs"),d=JSON.parse(fs.readFileSync(f));d.claudeAiOauth.accessToken=process.argv[1];fs.writeFileSync(f,JSON.stringify(d))' "$1"`, login)
+		}
+		mustCall(t, api.UserCapture, api.CaptureParams{Box: claude, Adapter: "claude"}, nil)
+		mustCall(t, api.BoxSleep, api.IDParams{ID: claude}, nil)
+		mustCall(t, api.BoxWake, api.IDParams{ID: claude}, nil)
+		got := inBox(t, claude, "cat ~/.claude/.credentials.json")
+		if strings.Contains(got, login) || !strings.Contains(got, native) || !strings.Contains(got, "hutch") {
+			t.Fatal("managed login capture or wake lost native MCP OAuth or exposed the raw agent login")
+		}
+	}
+	t.Log("Claude-format MCP OAuth survived two managed login captures and warm sleep/wake cycles")
 }

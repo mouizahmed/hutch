@@ -77,7 +77,7 @@ func (s *Server) doctorUser(defaultAgent string) []api.Check {
 	if err != nil {
 		add("MCP keys", "fail", "stored MCP credentials could not be read", "hutch user sync")
 	} else if len(real) > 0 {
-		add("MCP keys", "warn", fmt.Sprintf("%d token value(s) lack supported HTTPS proxy targets and remain real in granted boxes", len(real)), "declare mcp_hosts.<server> for HTTPS targets and hutch user sync; plain HTTP needs HTTPS for substitution")
+		add("MCP keys", "warn", fmt.Sprintf("%d credential value(s) cannot use HTTPS header substitution and remain real in granted boxes", len(real)), "declare mcp_hosts.<server> for header tokens; plain HTTP and native OAuth client secrets require native authentication")
 	} else if len(proxied) > 0 {
 		add("MCP keys", "ok", fmt.Sprintf("%d server(s) have HTTPS targets for token substitution", len(proxied)), "")
 	}
@@ -97,17 +97,8 @@ func (s *Server) doctorUser(defaultAgent string) []api.Check {
 
 func capturedLoginCheck(a *agents.Adapter, files []guestproto.File, secrets []keys.Secret) api.Check {
 	c := api.Check{Area: "user", Name: "login " + a.Name, Status: "ok", Detail: "captured token fields and proxy placeholders match; provider validity not checked"}
-	found := map[string]string{}
-	for _, source := range a.Credentials {
-		for _, f := range files {
-			if f.Path == source.File {
-				for real, key := range keys.Find(f.Path, f.Data, source.Secrets) {
-					found[real] = key
-				}
-			}
-		}
-	}
-	if len(found) == 0 {
+	found, err := loginValues(a, files)
+	if err != nil || len(found) == 0 {
 		c.Status, c.Detail, c.Fix = "warn", "captured files contain none of the adapter's declared token fields", "hutch login "+a.Name
 		return c
 	}

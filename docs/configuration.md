@@ -53,6 +53,12 @@ The proxy can replace supported token values in HTTPS headers toward configured 
 
 The MCP server's HTTP client must honor `HTTPS_PROXY` and the machine CA. Hutch enables Node 24's environment proxy support and sets the system CA bundle for common Python clients. Older Node versions and libraries that ignore proxy settings need a proxy-aware client or wrapper. Claude's default project-local servers in `~/.claude.json` are outside the built-in adapter's transferred user scope; use user-scoped MCP configuration or a project `.mcp.json` in Git.
 
+Native MCP OAuth sessions are separate from the managed agent login. Sign in using the native client inside the box; neither laptop keychains nor native MCP token caches are transferred automatically. Claude's MCP session is preserved when Hutch updates its managed Claude login. Native refresh tokens remain in the box and its snapshots. Cloning a signed-in box can duplicate a rotating refresh token; use separate MCP sign-ins for independent boxes.
+
+Adapter MCP `secrets` fields describe header/environment tokens the proxy can substitute. `raw_secrets` names confidential fields used outside headers, such as Codex's `oauth.client_secret`; dotted paths select nested fields. These are kept in the encrypted credential layer and sent only to granted boxes, but remain real there, so sync and doctor warn. A changed or removed MCP secret is included in the sync preview even when ordinary configuration is unchanged.
+
+AWS's stdio `mcp-proxy-for-aws` needs its own AWS authentication context and `uvx` installed inside the box. A working laptop AWS profile does not transfer with the MCP command. Do not put long-lived AWS keys in ordinary agent config; choose a native AWS authentication flow and review the resulting box-local credential storage.
+
 `hutch doctor` checks the configured default adapter, captured login fields and their proxy placeholders, and MCP token targets without waking boxes or contacting providers. It warns about missing logins, unsupported token targets, and unverified MCP runtime/authentication. Stored credentials passing this check does not establish that a provider session is still valid. Use `hutch doctor --template` for fresh builds and MCP transport checks, and the native client to verify its authentication.
 
 ## Box identity
@@ -63,5 +69,7 @@ hutch machine identity > hutch-identity.json
 ```
 
 Give the output's issuer and public JWKS to your service. Verify EdDSA signatures and `kid`, pin the issuer, require an exact `aud` matching the service host, validate `exp`/`nbf`, and authorize the `sub` (box) and `project` claims. Tokens last five minutes and have unique `jti` values. A service requiring stronger replay protection must enforce it itself.
+
+The [independent Node verifier example](../examples/identity/README.md) implements these checks with the standard library and an explicit authorization callback.
 
 Hutch adds `X-Hutch-Identity` outside the box, replacing a spoofed header, only for exact configured hosts over HTTPS on port 443. It preserves the service's normal `Authorization`. No extra public machine port is opened. The signing key derives separately from the machine master key and is never written into boxes. Removing a host stops new tokens; already issued tokens remain valid until expiry. Identity proves which box made a request, not that its code or intent is trustworthy.

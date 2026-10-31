@@ -83,7 +83,7 @@ func collectLayer() (collected, error) {
 			for _, f := range files {
 				if a.MCP != nil && a.MCP.File == src.File {
 					var secret *guestproto.File
-					if f, secret, err = splitSecrets(f, a.MCP.Key, a.MCP.Secrets); err != nil {
+					if f, secret, err = splitSecrets(f, a.MCP.Key, a.MCP.SecretFields()); err != nil {
 						return c, fmt.Errorf("%s: %w", src.File, err)
 					}
 					if secret != nil {
@@ -181,7 +181,8 @@ func realMCPKeys(c collected, cfg *config.Config) []string {
 		for _, f := range files {
 			for name, server := range agents.MCPServers(f.Path, f.Data, a.MCP.Key) {
 				configured, _ := hosts[name].Value.([]string)
-				if len(keys.MCPHosts(urls[name], configured)) > 0 || seen[name] || !hasKey(server, a.MCP.Secrets) {
+				raw := len(agents.MCPSecretValues(server, a.MCP.RawSecrets)) > 0
+				if seen[name] || !raw && (len(keys.MCPHosts(urls[name], configured)) > 0 || !hasKey(server, a.MCP.Secrets)) {
 					continue
 				}
 				seen[name] = true
@@ -194,18 +195,9 @@ func realMCPKeys(c collected, cfg *config.Config) []string {
 }
 
 func hasKey(server map[string]any, fields []string) bool {
-	for _, f := range fields {
-		switch v := server[f].(type) {
-		case string:
-			if keys.LooksSecret(v) {
-				return true
-			}
-		case map[string]any:
-			for _, x := range v {
-				if s, ok := x.(string); ok && keys.LooksSecret(s) {
-					return true
-				}
-			}
+	for _, value := range agents.MCPSecretValues(server, fields) {
+		if keys.LooksSecret(value) {
+			return true
 		}
 	}
 	return false
@@ -279,9 +271,8 @@ func splitSecrets(f guestproto.File, key string, fields []string) (guestproto.Fi
 		}
 		secret := map[string]any{}
 		for _, k := range fields {
-			if sm[k] != nil {
-				secret[k] = sm[k]
-				delete(sm, k)
+			if value, ok := agents.TakeMCPField(sm, k); ok {
+				agents.SetMCPField(secret, k, value)
 			}
 		}
 		if len(secret) > 0 {
@@ -369,6 +360,29 @@ func layerDiff(cur, next api.UserLayer) []string {
 	return lines
 }
 
+// MCP rotation can leave ordinary configuration unchanged. Compare the sealed
+// part's digest as well, without displaying or downloading its secret values.
+func userSyncDiff(st api.UserState, next collected) []string {
+	lines := layerDiff(st.Layer, next.layer)
+	old := map[string]string{}
+	for _, c := range st.Credentials {
+		if name, ok := strings.CutSuffix(c.Part, "/mcp"); ok {
+			old[name] = c.Digest
+		}
+	}
+	for name, files := range next.secrets {
+		if digest, exists := old[name]; !exists || digest != api.SecretsDigest(files) {
+			lines = append(lines, "~ MCP credentials for "+name)
+		}
+		delete(old, name)
+	}
+	for name := range old {
+		lines = append(lines, "- MCP credentials for "+name)
+	}
+	sort.Strings(lines)
+	return lines
+}
+
 func userCommands() *cobra.Command {
 	userCmd := &cobra.Command{Use: "user", Short: "Your agent config, MCP servers, and logins for every box", GroupID: "setup"}
 
@@ -389,7 +403,7 @@ func userCommands() *cobra.Command {
 			for _, w := range c.warnings {
 				fmt.Fprintln(os.Stderr, "warning:", w)
 			}
-			diff := layerDiff(st.Layer, c.layer)
+			diff := userSyncDiff(st, c)
 			if len(diff) == 0 && st.Version > 0 {
 				fmt.Println("The user layer is up to date.")
 				return nil
@@ -403,7 +417,7 @@ func userCommands() *cobra.Command {
 			}
 			if cfg, err := loadConfig(ctx, sess); err == nil {
 				for _, server := range realMCPKeys(c, cfg) {
-					fmt.Printf("  MCP server %s has no proxyable HTTPS target, so its keys stay real in the box. For stdio servers: hutch config set mcp_hosts.%s <HTTPS hosts[:port] it uses>. Plain HTTP credentials cannot use the keys proxy.\n", server, server)
+					fmt.Printf("  MCP server %s has credentials that stay real in granted boxes. Header tokens need HTTPS targets: hutch config set mcp_hosts.%s <hosts[:port]>. Plain HTTP and native OAuth client secrets cannot use header substitution.\n", server, server)
 				}
 			}
 			if !yes {

@@ -86,3 +86,42 @@ func TestMCPRotationAndTransport(t *testing.T) {
 		t.Fatal("plain HTTP's key was replaced by an unusable placeholder")
 	}
 }
+
+func TestOAuthClientSecretGrantAndBodySemantics(t *testing.T) {
+	st, err := openStore(filepath.Join(t.TempDir(), "oauth.db"), durable.NewKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.db.Close()
+	s := &Server{store: st}
+	a := agents.Builtin()["codex"]
+	const secret = "synthetic-confidential-client-secret"
+	file := guestproto.File{Path: a.MCP.File, Merge: true, Data: []byte("[mcp_servers.fixture.oauth]\nclient_secret = \"" + secret + "\"\n[mcp_servers.fixture.http_headers]\nX-Shared = \"" + secret + "\"\n")}
+	data, _ := json.Marshal([]guestproto.File{file})
+	if _, _, err := st.putLayerPart(credentialsPrefix+a.Name+"/mcp", 0, data); err != nil {
+		t.Fatal(err)
+	}
+	layer := api.UserLayer{Files: map[string][]guestproto.File{a.Name: {{Path: a.MCP.File, Data: []byte("[mcp_servers.fixture]\nurl=\"https://mcp.example/mcp\"\n")}}}}
+	data, _ = json.Marshal(layer)
+	if _, _, err := st.putLayerPart("config", 0, data); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.syncMCP(a, []guestproto.File{file}); err != nil {
+		t.Fatal(err)
+	}
+	denied, err := s.boxFiles([]string{}, true)
+	if err != nil || len(denied) != 0 {
+		t.Fatal("confidential OAuth configuration reached an ungranted box")
+	}
+	allowed, err := s.boxFiles([]string{a.Name}, true)
+	if err != nil || len(allowed) != 1 || strings.Count(string(allowed[0].Data), secret) != 2 {
+		t.Fatal("body credential became an unusable placeholder, including its shared header value")
+	}
+	checks := s.doctorUser(a.Name)
+	for _, c := range checks {
+		if c.Name == "MCP keys" && c.Status == "warn" {
+			return
+		}
+	}
+	t.Fatal("native OAuth client secret was not reported as remaining real")
+}

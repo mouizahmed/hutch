@@ -70,6 +70,9 @@ jobs:
           codex --version
           claude --version
           node compat/mcp-smoke.mjs
+          node compat/mcp-oauth-smoke.mjs
+      - name: Independent identity verifier
+        run: node --test compat/identity-verifier.test.mjs
 
   compat:
     runs-on: ubuntu-latest

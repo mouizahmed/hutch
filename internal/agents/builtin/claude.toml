@@ -9,7 +9,7 @@ models      = ["fable", "opus", "sonnet", "haiku"]
 login       = "claude auth login"
 sessions    = "~/.claude/projects/**/*.jsonl"
 credentials = [
-  { file = "~/.claude/.credentials.json", secrets = ["accessToken", "refreshToken"] },
+  { file = "~/.claude/.credentials.json", keys = ["claudeAiOauth"], secrets = ["accessToken", "refreshToken"] },
   { file = "~/.claude.json", keys = ["oauthAccount", "userID"] },
 ]
 hosts       = ["anthropic.com", "claude.com", "claude.ai"]
@@ -24,7 +24,7 @@ config = [
   "~/.claude/plugins/cache/",
   { file = "~/.claude.json", keys = ["mcpServers"] },
 ]
-mcp        = { file = "~/.claude.json", key = "mcpServers", format = "claude", secrets = ["env", "headers"] }
+mcp        = { file = "~/.claude.json", key = "mcpServers", format = "claude", secrets = ["env", "headers"], raw_secrets = ["oauth.clientSecret"] }
 transcript = "claude"
 
 # First-run prompts a box would otherwise stop at, and the bell Hutch alerts on.

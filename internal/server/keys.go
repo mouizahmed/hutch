@@ -77,6 +77,48 @@ func (s *Server) putLoginSecrets(adapter string, secrets []keys.Secret) error {
 	return err
 }
 
+// Scope even older captures to the adapter's current declarations. In
+// particular, Claude shares a credentials file between its login and MCP OAuth;
+// only the managed login belongs in other boxes. Merge preserves their own MCPs.
+func loginFiles(a *agents.Adapter, files []guestproto.File) ([]guestproto.File, error) {
+	var out []guestproto.File
+	for _, src := range a.Credentials {
+		for _, f := range files {
+			if f.Path != src.File {
+				continue
+			}
+			if len(src.Keys) > 0 {
+				data, err := agents.JSONKeys(f.Data, src.Keys)
+				if err != nil {
+					return nil, fmt.Errorf("%s's stored login has invalid JSON in %s", a.Name, f.Path)
+				}
+				if data == nil {
+					continue
+				}
+				f.Data, f.Merge = data, true
+			}
+			out = append(out, f)
+		}
+	}
+	return out, nil
+}
+
+func loginValues(a *agents.Adapter, files []guestproto.File) (map[string]string, error) {
+	files, err := loginFiles(a, files)
+	if err != nil {
+		return nil, err
+	}
+	found := map[string]string{}
+	for _, src := range a.Credentials {
+		for _, f := range files {
+			if f.Path == src.File && len(src.Secrets) > 0 {
+				maps.Copy(found, keys.Find(f.Path, f.Data, src.Secrets))
+			}
+		}
+	}
+	return found, nil
+}
+
 // syncSecrets finds a login's secrets in its captured files. A secret that
 // changed (a new login) keeps its placeholders, so the copies boxes have stay
 // valid; a JWT gets a new first one, carrying its new claims.
@@ -85,13 +127,9 @@ func (s *Server) syncSecrets(a *agents.Adapter, files []guestproto.File) error {
 	if err != nil {
 		return err
 	}
-	found := map[string]string{} // real → key
-	for _, src := range a.Credentials {
-		for _, f := range files {
-			if f.Path == src.File && len(src.Secrets) > 0 {
-				maps.Copy(found, keys.Find(f.Path, f.Data, src.Secrets))
-			}
-		}
+	found, err := loginValues(a, files)
+	if err != nil {
+		return err
 	}
 	reals := slices.SortedFunc(maps.Keys(found), func(x, y string) int { return cmp.Or(cmp.Compare(found[x], found[y]), cmp.Compare(x, y)) })
 	taken := map[int]bool{}
@@ -165,9 +203,16 @@ func (s *Server) boxFiles(creds []string, proxied bool) ([]guestproto.File, erro
 	var files []guestproto.File
 	for _, c := range stored {
 		a, mcp, _ := strings.Cut(c.Part, "/")
-		switch {
-		case !granted(creds, a):
+		if !granted(creds, a) || set[a] == nil {
 			continue
+		}
+		if mcp == "" {
+			c.Files, err = loginFiles(set[a], c.Files)
+			if err != nil {
+				return nil, err
+			}
+		}
+		switch {
 		case !proxied:
 			files = append(files, c.Files...)
 			continue
@@ -237,6 +282,21 @@ func (s *Server) keysTable() (keys.Table, error) {
 			if secrets, err = s.loginSecrets(a.Name); err != nil {
 				return t, err
 			}
+		}
+		if len(secrets) > 0 {
+			// A legacy table may contain tokens outside the declared login scope.
+			i := slices.IndexFunc(stored, func(c api.Credentials) bool { return c.Part == a.Name })
+			if i < 0 {
+				continue
+			}
+			found, err := loginValues(a, stored[i].Files)
+			if err != nil {
+				return t, err
+			}
+			secrets = slices.DeleteFunc(slices.Clone(secrets), func(sec keys.Secret) bool {
+				key, ok := found[sec.Real]
+				return !ok || key != keys.Norm(sec.Key)
+			})
 		}
 		if len(secrets) > 0 {
 			t.Logins = append(t.Logins, keys.Login{Name: a.Name, Adapter: a.Name, Hosts: a.Hosts, Secrets: secrets})
