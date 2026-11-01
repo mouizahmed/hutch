@@ -68,6 +68,13 @@ up() {
     fi
   done
   ec2 wait instance-running --instance-ids $(for m in lead w1 w2; do instance "$m"; done)
+  # Workers dial the address the lead had when they enrolled, so it keeps one.
+  local eip
+  eip=$(ec2 describe-addresses --filters Name=tag:Name,Values=hutch-rig-lead --query 'Addresses[0].AllocationId' --output text)
+  if [[ $eip == None ]]; then
+    eip=$(ec2 allocate-address --tag-specifications 'ResourceType=elastic-ip,Tags=[{Key=Name,Value=hutch-rig-lead}]' --query AllocationId --output text)
+  fi
+  ec2 associate-address --allocation-id "$eip" --instance-id "$(instance lead)" >/dev/null
   ssh_config
   if [[ ! -f $dir/bucket ]]; then
     local b
@@ -109,6 +116,8 @@ case ${1:-} in
       ec2 terminate-instances --instance-ids $(ids) >/dev/null
       ec2 wait instance-terminated --instance-ids $(ids)
     fi
+    eip=$(ec2 describe-addresses --filters Name=tag:Name,Values=hutch-rig-lead --query 'Addresses[0].AllocationId' --output text)
+    [[ $eip != None ]] && ec2 release-address --allocation-id "$eip"
     for g in hutch-rig-lead hutch-rig-closed; do
       id=$(ec2 describe-security-groups --filters "Name=group-name,Values=$g" --query 'SecurityGroups[0].GroupId' --output text)
       [[ $id != None ]] && ec2 delete-security-group --group-id "$id"
