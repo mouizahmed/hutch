@@ -58,7 +58,7 @@ func (s *Server) limitInt(key string) int64 {
 }
 
 // placeWait places a box, waiting (queued, with a notification) while a limit is
-// reached or the workers are full. It returns when the box can start, or ctx ends.
+// reached or the workers (or the one requested) are full. It returns when the box can start, or ctx ends.
 func (s *Server) placeWait(ctx context.Context, n need, requested, box string, out io.Writer) (*workerConn, func(), error) {
 	reason := ""
 	for {
@@ -67,7 +67,7 @@ func (s *Server) placeWait(ctx context.Context, n need, requested, box string, o
 			return w, release, nil
 		}
 		var lim *limitError
-		if requested != "" || (!errors.Is(err, errNoRoom) && !errors.As(err, &lim)) {
+		if !errors.Is(err, errNoRoom) && !errors.As(err, &lim) {
 			return nil, nil, err
 		}
 		if err.Error() != reason {
@@ -86,4 +86,4 @@ func (s *Server) placeWait(ctx context.Context, n need, requested, box string, o
 	}
 }
 
-var errNoRoom = errors.New("the machine has no room")
+var errNoRoom = errors.New("no room")

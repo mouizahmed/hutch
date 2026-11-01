@@ -3,9 +3,11 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"maps"
+	"strings"
 	"time"
 
 	"github.com/mouizahmed/hutch/internal/api"
@@ -24,7 +26,36 @@ func (s *Server) configGet(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (
 	if c.User, err = s.store.config("user"); err != nil {
 		return nil, err
 	}
+	ws, err := s.store.workers()
+	if err != nil {
+		return nil, err
+	}
+	c.On = map[string]api.ConfigDoc{}
+	for _, w := range ws {
+		if !w.Gone {
+			if c.On[w.Name], err = s.store.config(machineDoc(w.ID)); err != nil {
+				return nil, err
+			}
+		}
+	}
 	return c, nil
+}
+
+// machineDoc names the config holding one machine's own machine-layer values.
+func machineDoc(workerID string) string { return "machine/" + workerID }
+
+// machineNamed finds a machine by name (or ID).
+func (s *Server) machineNamed(name string) (api.Worker, error) {
+	ws, err := s.store.workers()
+	if err != nil {
+		return api.Worker{}, err
+	}
+	for _, w := range ws {
+		if !w.Gone && (w.Name == name || w.ID == name) {
+			return w, nil
+		}
+	}
+	return api.Worker{}, fmt.Errorf("no machine %q (hutch machine lists them)", name)
 }
 
 func (s *Server) configPut(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
@@ -36,10 +67,27 @@ func (s *Server) configPut(ctx context.Context, params json.RawMessage, _ *rpc.O
 	if !ok {
 		return nil, fmt.Errorf("no config %q", p.Name)
 	}
-	if _, err := config.Parse(layer, p.Name+" config", []byte(p.Content)); err != nil {
+	d, err := config.Parse(layer, p.Name+" config", []byte(p.Content))
+	if err != nil {
 		return nil, err
 	}
-	doc, conflict, err := s.store.putConfig(p.Name, p.BaseVersion, p.Content)
+	name := p.Name
+	if p.On != "" {
+		w, err := s.machineNamed(p.On)
+		if err != nil {
+			return nil, err
+		}
+		if p.Name != "machine" {
+			return nil, errors.New("only machine config is set per machine")
+		}
+		for _, k := range d.Keys() {
+			if !strings.HasPrefix(k, "machine.") {
+				return nil, fmt.Errorf("%s is the same on every machine: set it with --machine, not --on", k)
+			}
+		}
+		name = machineDoc(w.ID)
+	}
+	doc, conflict, err := s.store.putConfig(name, p.BaseVersion, p.Content)
 	if err != nil {
 		return nil, err
 	}
@@ -58,8 +106,18 @@ func (s *Server) configPut(ctx context.Context, params json.RawMessage, _ *rpc.O
 	return api.ConfigPutResult{Doc: doc, Conflict: conflict}, nil
 }
 
-// settings resolves the server and user layers, the config the server acts on.
+// settings resolves the machine and user layers as this machine has them, the
+// config the server acts on.
 func (s *Server) settings() (*config.Config, error) {
+	s.mu.Lock()
+	local := s.local
+	s.mu.Unlock()
+	return s.settingsOn(local)
+}
+
+// settingsOn resolves the config for one machine: its own machine-layer values
+// over every machine's.
+func (s *Server) settingsOn(workerID string) (*config.Config, error) {
 	var docs []*config.Doc
 	for name, layer := range configLayers {
 		d, err := s.store.config(name)
@@ -70,6 +128,16 @@ func (s *Server) settings() (*config.Config, error) {
 		if err != nil {
 			return nil, err
 		}
+		if name == "machine" && workerID != "" {
+			if d, err = s.store.config(machineDoc(workerID)); err != nil {
+				return nil, err
+			}
+			own, err := config.Parse(layer, "its own machine config", []byte(d.Content))
+			if err != nil {
+				return nil, err
+			}
+			doc = config.Overlay(doc, own)
+		}
 		docs = append(docs, doc)
 	}
 	return config.New(docs...), nil
@@ -78,7 +146,7 @@ func (s *Server) settings() (*config.Config, error) {
 // sendWorkerSettings sends a worker the server settings it uses, the bucket, and
 // the keys of the projects whose boxes it hosts.
 func (s *Server) sendWorkerSettings(ctx context.Context, w *workerConn) {
-	c, err := s.settings()
+	c, err := s.settingsOn(w.id)
 	if err != nil {
 		log.Printf("worker %s: settings: %v", w.id, err)
 		return

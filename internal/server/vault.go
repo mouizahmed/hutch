@@ -350,11 +350,13 @@ func Restore(ctx context.Context, dir string, cfg bucket.Config, passphrase stri
 		return time.Time{}, err
 	}
 	// This is a new machine: the old one's boxes restore here from the bucket.
+	// Linked workers keep theirs.
 	db, err := openStore(filepath.Join(dir, "hutch.db"), master.Derive("user-layer"))
 	if err != nil {
 		return time.Time{}, err
 	}
-	_, err = db.db.Exec(`UPDATE workers SET gone = 1; UPDATE boxes SET state = 'asleep' WHERE state = 'running'`)
+	_, err = db.db.Exec(`UPDATE boxes SET state = 'asleep' WHERE state = 'running' AND worker_id IN (SELECT id FROM workers WHERE linked = 0);
+		UPDATE workers SET gone = 1 WHERE linked = 0`)
 	db.db.Close()
 	if err != nil {
 		return time.Time{}, err

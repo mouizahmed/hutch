@@ -214,37 +214,54 @@ func (s *Server) maxAwakeLoop(ctx context.Context) {
 	}
 }
 
-// admitWake waits while limits.awake_boxes is reached, then counts the box as
-// starting until release.
-func (s *Server) admitWake(ctx context.Context, box string) (func(), error) {
+// admitWake waits while limits.awake_boxes, or machine.max_boxes on the box's
+// machine, is reached, then counts the box as starting until release.
+func (s *Server) admitWake(ctx context.Context, b api.Box) (func(), error) {
 	notified := false
 	for {
 		boxes, err := s.store.boxes()
 		if err != nil {
 			return nil, err
 		}
-		running := 0
-		for _, b := range boxes {
-			if b.State == "running" {
+		running, there := 0, 0
+		for _, o := range boxes {
+			if o.State == "running" {
 				running++
+				if o.Worker == b.Worker {
+					there++
+				}
 			}
 		}
 		lim := s.limitInt("limits.awake_boxes")
+		cfg, err := s.settingsOn(b.Worker)
+		if err != nil {
+			return nil, err
+		}
+		max := cfg.Int("machine.max_boxes")
 		s.mu.Lock()
-		if int64(running+s.starting) < lim {
+		reason := ""
+		switch {
+		case int64(running+s.starting) >= lim:
+			reason = fmt.Sprintf("limits.awake_boxes (%d) reached", lim)
+		case max > 0 && int64(there+s.placing[b.Worker]) >= max:
+			reason = fmt.Sprintf("machine.max_boxes (%d) reached on its machine", max)
+		}
+		if reason == "" {
 			s.starting++
+			s.placing[b.Worker]++
 			s.mu.Unlock()
 			return func() {
 				s.mu.Lock()
 				s.starting--
+				s.placing[b.Worker]--
 				s.mu.Unlock()
 			}, nil
 		}
 		s.mu.Unlock()
 		if !notified {
-			msg := fmt.Sprintf("%s is queued: limits.awake_boxes (%d) reached", box, lim)
-			s.notify("queued", box, "Box queued", msg)
-			s.store.event(box, "queued", msg)
+			msg := fmt.Sprintf("%s is queued: %s", b.ID, reason)
+			s.notify("queued", b.ID, "Box queued", msg)
+			s.store.event(b.ID, "queued", msg)
 			notified = true
 		}
 		select {

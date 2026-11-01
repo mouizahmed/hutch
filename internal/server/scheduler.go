@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/mouizahmed/hutch/internal/api"
+	"github.com/mouizahmed/hutch/internal/config"
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
@@ -28,6 +29,8 @@ type need struct {
 	version string
 	// avoid is a worker it mustn't go to: the one it moves off.
 	avoid string
+	// spread prefers the emptiest worker to the fullest (placement.order).
+	spread bool
 }
 
 func (n need) String() string { return fmt.Sprintf("%d vCPU, %s", n.vcpus, mib(n.memMiB)) }
@@ -46,6 +49,7 @@ type candidate struct {
 	// machine (where a box takes memory as it uses it) machine.sandbox_start.
 	admitMiB   int
 	cpus       int
+	full       int      // machine.max_boxes, when its awake boxes reach it
 	diskOK     bool     // free disk above machine.disk_reserve
 	classes    []string // snapshot classes it restores warm
 	hasVersion bool
@@ -54,6 +58,8 @@ type candidate struct {
 // why says why a box doesn't fit a worker, or "" when it does.
 func (c candidate) why(n need) string {
 	switch {
+	case c.full > 0:
+		return fmt.Sprintf("machine.max_boxes (%d) reached", c.full)
 	case c.freeMiB < c.admitMiB:
 		return fmt.Sprintf("%s free", mib(max(c.freeMiB, 0)))
 	case c.cpus < n.vcpus:
@@ -68,7 +74,7 @@ func (c candidate) why(n need) string {
 
 // choose picks a worker for a box: of those it fits, its snapshot class over
 // another, one that has its template, then the fullest, so lightly used workers
-// empty out. It returns -1 if none fits.
+// empty out (or with spread, the emptiest). It returns -1 if none fits.
 func choose(cs []candidate, n need) int {
 	best := -1
 	for i, c := range cs {
@@ -87,7 +93,7 @@ func better(a, b candidate, n need) bool {
 		return a.hasVersion
 	}
 	if a.freeMiB != b.freeMiB {
-		return a.freeMiB < b.freeMiB
+		return a.freeMiB < b.freeMiB != n.spread
 	}
 	return a.id < b.id
 }
@@ -96,41 +102,59 @@ func better(a, b candidate, n need) bool {
 // there until release, so boxes placed at the same time don't all land on the one
 // worker that had room for one of them.
 func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
-	cfg, err := s.settings()
+	ws, err := s.store.workers()
 	if err != nil {
 		return nil, nil, err
 	}
-	margin, reserve := cfg.Percent("machine.memory_margin")/100, cfg.Percent("machine.disk_reserve")/100
-	overcommit, high := cfg.Float("machine.overcommit"), cfg.Percent("machine.memory_high")
-	sandboxStart := int(cfg.Size("machine.sandbox_start") >> 20)
+	draining := map[string]bool{}
+	cfgs := map[string]*config.Config{}
+	machine := requested
+	for _, w := range ws {
+		if w.Gone {
+			continue // a removed machine may share a name with a newer one
+		}
+		draining[w.ID] = w.Draining
+		if requested == w.Name {
+			requested = w.ID
+		} else if requested == w.ID {
+			machine = w.Name
+		}
+		if cfgs[w.ID], err = s.settingsOn(w.ID); err != nil {
+			return nil, nil, err
+		}
+	}
+	shared, err := s.settings()
+	if err != nil {
+		return nil, nil, err
+	}
+	n.spread = shared.String("placement.order") == "spread"
+	on := func(id string) *config.Config {
+		if c := cfgs[id]; c != nil {
+			return c
+		}
+		return shared
+	}
 	boxes, err := s.store.boxes()
 	if err != nil {
 		return nil, nil, err
 	}
 	// reserved is what awake boxes take: their full sizes, or with overcommit their
 	// measured peaks (full size until measured); promised is always full sizes.
-	reserved, promised := map[string]int{}, map[string]int{}
+	reserved, promised, awake := map[string]int{}, map[string]int{}, map[string]int{}
 	s.mu.Lock()
 	for _, b := range boxes {
 		if b.State != "running" {
 			continue
 		}
+		awake[b.Worker]++
 		promised[b.Worker] += b.MemMiB
-		if p := s.peaks[b.ID]; overcommit > 1 && p > 0 {
+		if p := s.peaks[b.ID]; on(b.Worker).Float("machine.overcommit") > 1 && p > 0 {
 			reserved[b.Worker] += min(p, b.MemMiB)
 		} else {
 			reserved[b.Worker] += b.MemMiB
 		}
 	}
 	s.mu.Unlock()
-	ws, err := s.store.workers()
-	if err != nil {
-		return nil, nil, err
-	}
-	draining := map[string]bool{}
-	for _, w := range ws {
-		draining[w.ID] = w.Draining
-	}
 	copies := map[string]bool{}
 	if n.version != "" {
 		ws, err := s.store.versionWorkers(n.version)
@@ -161,6 +185,14 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 		if (requested != "" && id != requested) || id == n.avoid || (requested == "" && draining[id]) {
 			continue
 		}
+		cfg := on(id)
+		margin, reserve := cfg.Percent("machine.memory_margin")/100, cfg.Percent("machine.disk_reserve")/100
+		overcommit, high := cfg.Float("machine.overcommit"), cfg.Percent("machine.memory_high")
+		sandboxStart := int(cfg.Size("machine.sandbox_start") >> 20)
+		full := 0
+		if m := int(cfg.Int("machine.max_boxes")); m > 0 && awake[id]+s.placing[id] >= m {
+			full = m
+		}
 		d := w.info.Disk
 		free := int(float64(w.info.MemMiB)*(1-margin)) - reserved[id]
 		admit := n.memMiB
@@ -185,6 +217,7 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 			freeMiB:    free - s.pending[id],
 			admitMiB:   admit,
 			cpus:       w.info.CPUs,
+			full:       full,
 			diskOK:     d.Total == 0 || float64(d.Free) >= reserve*float64(d.Total),
 			classes:    workerClasses(w.info),
 			hasVersion: copies[id],
@@ -192,12 +225,12 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 		conns = append(conns, w)
 	}
 	if requested != "" && len(cs) == 0 {
-		return nil, nil, fmt.Errorf("worker %s is offline", requested)
+		return nil, nil, fmt.Errorf("machine %s is offline", machine)
 	}
 	i := choose(cs, n)
 	if i < 0 {
 		if len(cs) == 0 {
-			return nil, nil, fmt.Errorf("%w: hutchd's worker isn't connected", errNoRoom)
+			return nil, nil, fmt.Errorf("%w: no machine is connected", errNoRoom)
 		}
 		var reasons []string
 		for i, c := range cs {
@@ -208,10 +241,12 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 	}
 	w, admit := conns[i], cs[i].admitMiB
 	s.pending[w.id] += admit
+	s.placing[w.id]++
 	s.starting++
 	return w, func() {
 		s.mu.Lock()
 		s.pending[w.id] -= admit
+		s.placing[w.id]--
 		s.starting--
 		s.mu.Unlock()
 	}, nil
@@ -220,19 +255,19 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 // checkFits refuses a box size no worker could ever hold, so it fails at once
 // instead of waiting for room that never comes.
 func (s *Server) checkFits(ctx context.Context, n need) error {
-	cfg, err := s.settings()
-	if err != nil {
-		return err
-	}
-	margin := cfg.Percent("machine.memory_margin") / 100
 	ws, err := s.store.workers()
 	if err != nil {
 		return err
 	}
 	var candidates []string
 	known := false
-	fits := func(name, class string, cpus, memMiB int) bool {
+	fits := func(id, name, class string, cpus, memMiB int) bool {
 		known = true
+		cfg, err := s.settingsOn(id)
+		if err != nil {
+			return false
+		}
+		margin := cfg.Percent("machine.memory_margin") / 100
 		usable := int(float64(memMiB) * (1 - margin))
 		if api.GVisorClass(class) {
 			// A gVisor box's size is a cap: up to the machine's memory, in whole GB.
@@ -242,14 +277,14 @@ func (s *Server) checkFits(ctx context.Context, n need) error {
 		return usable >= n.memMiB && cpus >= n.vcpus
 	}
 	for _, w := range ws {
-		if !w.Gone && w.MemMiB > 0 && fits(w.Name, w.Class, w.CPUs, w.MemMiB) {
+		if !w.Gone && w.MemMiB > 0 && fits(w.ID, w.Name, w.Class, w.CPUs, w.MemMiB) {
 			return nil
 		}
 	}
 	if !known {
 		return nil // nothing to judge by until a worker connects
 	}
-	return fmt.Errorf("a %s box doesn't fit the machine (%s); choose a smaller size, or use a bigger machine",
+	return fmt.Errorf("a %s box doesn't fit any machine (%s); choose a smaller size, or add a bigger machine",
 		n, strings.Join(candidates, "; "))
 }
 
@@ -258,8 +293,9 @@ func (s *Server) checkFits(ctx context.Context, n need) error {
 // a build for, copying that build there from the bucket if the worker doesn't have
 // it. When no worker runs any of those classes, it builds the version again for
 // the class of a worker with room: the same recipe commit,
-// since snapshots don't cross classes. release frees the fork's reservation.
-func (s *Server) versionWorker(ctx context.Context, v api.Template, box string, out io.Writer) (*workerConn, func(), string, error) {
+// since snapshots don't cross classes. With requested, only that worker will do.
+// release frees the fork's reservation.
+func (s *Server) versionWorker(ctx context.Context, v api.Template, requested, box string, out io.Writer) (*workerConn, func(), string, error) {
 	n := need{memMiB: v.MemMiB, vcpus: v.VCPUs}
 	if err := s.checkFits(ctx, n); err != nil {
 		return nil, nil, "", err
@@ -272,7 +308,7 @@ func (s *Server) versionWorker(ctx context.Context, v api.Template, box string, 
 		for _, b := range builds {
 			bn := n
 			bn.class, bn.strict, bn.version = b.class, true, b.box
-			if w, release, err := s.place(bn, ""); err == nil {
+			if w, release, err := s.place(bn, requested); err == nil {
 				if err := s.copyVersion(ctx, w, v, b.box); err != nil {
 					release()
 					return nil, nil, "", err
@@ -280,7 +316,7 @@ func (s *Server) versionWorker(ctx context.Context, v api.Template, box string, 
 				return w, release, b.box, nil
 			}
 		}
-		w, release, err := s.placeWait(ctx, n, "", box, out)
+		w, release, err := s.placeWait(ctx, n, requested, box, out)
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -414,7 +450,7 @@ func (s *Server) boxPlan(ctx context.Context, params json.RawMessage, _ *rpc.Out
 		return nil, err
 	}
 	plan.Warnings = s.fitWarnings(ctx, n)
-	w, release, err := s.place(n, "")
+	w, release, err := s.place(n, p.Worker)
 	if err == nil {
 		release()
 		plan.Worker = w.info.Name
@@ -442,13 +478,13 @@ func (s *Server) boxPlan(ctx context.Context, params json.RawMessage, _ *rpc.Out
 
 // fitWarnings warns when a box size fits only one box per worker.
 func (s *Server) fitWarnings(ctx context.Context, n need) []string {
-	cfg, err := s.settings()
-	if err != nil {
-		return nil
-	}
-	margin := cfg.Percent("machine.memory_margin") / 100
 	var out []string
-	check := func(name string, memMiB int) {
+	check := func(id, name string, memMiB int) {
+		cfg, err := s.settingsOn(id)
+		if err != nil {
+			return
+		}
+		margin := cfg.Percent("machine.memory_margin") / 100
 		if per := int(float64(memMiB)*(1-margin)) / n.memMiB; per == 1 {
 			out = append(out, fmt.Sprintf("only one %s box fits on %s", n, name))
 		}
@@ -456,7 +492,7 @@ func (s *Server) fitWarnings(ctx context.Context, n need) []string {
 	ws, _ := s.store.workers()
 	for _, w := range ws {
 		if !w.Gone && w.MemMiB > 0 {
-			check(w.Name, w.MemMiB)
+			check(w.ID, w.Name, w.MemMiB)
 		}
 	}
 	return out

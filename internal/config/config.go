@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -42,6 +43,7 @@ type value struct {
 	key    *Key
 	raw    any
 	parsed any
+	source string // set when it came from another doc than the one holding it
 }
 
 // Parse checks a layer's file: unknown keys, keys that belong to another layer, and
@@ -81,6 +83,22 @@ func Parse(layer Layer, source string, text []byte) (*Doc, error) {
 		return nil, fmt.Errorf("%s:\n  %s", source, strings.Join(errs, "\n  "))
 	}
 	return d, nil
+}
+
+// Overlay is base with over's values in place of its own: one machine's config
+// over every machine's.
+func Overlay(base, over *Doc) *Doc {
+	d := &Doc{Layer: base.Layer, Source: base.Source, Text: base.Text, values: maps.Clone(base.values)}
+	for name, v := range over.values {
+		v.source = over.Source
+		d.values[name] = v
+	}
+	return d
+}
+
+// Keys lists the keys a doc sets.
+func (d *Doc) Keys() []string {
+	return slices.Sorted(maps.Keys(d.values))
 }
 
 // ReadFile parses a layer's file; a missing file is an empty layer.
@@ -241,7 +259,11 @@ func (c *Config) plain(name string, k *Key, top Layer) Setting {
 	for l := top; l > Default; l-- {
 		if d := c.docs[l]; d != nil {
 			if v, ok := d.values[name]; ok {
-				return Setting{Path: name, Key: k, Raw: v.raw, Value: v.parsed, Layer: l, Source: d.Source}
+				src := d.Source
+				if v.source != "" {
+					src = v.source
+				}
+				return Setting{Path: name, Key: k, Raw: v.raw, Value: v.parsed, Layer: l, Source: src}
 			}
 		}
 	}

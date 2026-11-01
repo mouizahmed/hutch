@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -78,7 +79,7 @@ func listBoxes(ctx context.Context, sess *yamux.Session) ([]api.Box, error) {
 }
 
 func boxCommands() []*cobra.Command {
-	var name, from, image string
+	var name, from, image, on string
 	var cpus, memMiB int
 	var dryRun bool
 	var agent agentFlags
@@ -119,13 +120,13 @@ func boxCommands() []*cobra.Command {
 				return fmt.Errorf("--dry-run plans a box from this project's template: run it in a checkout, without --from or --image")
 			}
 			if image != "" {
-				p := api.BootParams{ID: name, Image: image, VCPUs: cpus, MemMiB: memMiB, DiskBytes: cfg.Size("disk.size"), Idle: idle}
+				p := api.BootParams{ID: name, Image: image, VCPUs: cpus, MemMiB: memMiB, DiskBytes: cfg.Size("disk.size"), Idle: idle, Worker: on}
 				if err := rpc.Call(ctx, sess, api.BoxBoot, p, &b); err != nil {
 					return fmt.Errorf("%w\n  hutch console %s", err, name)
 				}
 			} else if from == "" && repo != nil {
 				p := api.ForkParams{Project: repo.ID, Path: laptopPath(repo.Root), Base: cfg.String("base"), ID: name, Idle: idle, Credentials: cfg.List("credentials"),
-					Allow: cfg.List("network.allow")}
+					Allow: cfg.List("network.allow"), Worker: on}
 				if err := checkAllow(p.Allow); err != nil {
 					return err
 				}
@@ -139,7 +140,7 @@ func boxCommands() []*cobra.Command {
 				if from == "" {
 					from = "base"
 				}
-				if err := rpc.Call(ctx, sess, api.BoxFork, api.ForkParams{Source: from, ID: name, Idle: idle, Credentials: cfg.List("credentials")}, &b); err != nil {
+				if err := rpc.Call(ctx, sess, api.BoxFork, api.ForkParams{Source: from, ID: name, Idle: idle, Credentials: cfg.List("credentials"), Worker: on}, &b); err != nil {
 					return err
 				}
 			}
@@ -158,6 +159,7 @@ func boxCommands() []*cobra.Command {
 	newCmd.Flags().StringVar(&image, "image", "", "cold boot from this image on the machine instead of forking")
 	newCmd.Flags().IntVar(&cpus, "cpus", 0, "vCPUs (with --image; default: size.cpu)")
 	newCmd.Flags().IntVar(&memMiB, "mem", 0, "memory in MiB (with --image; default: size.memory)")
+	newCmd.Flags().StringVar(&on, "on", "", "the machine to start it on (hutch machine lists them); it queues there while that machine is full")
 	newCmd.MarkFlagsMutuallyExclusive("from", "image")
 	newCmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what would happen (template, logins, network) and start nothing")
 
@@ -171,8 +173,15 @@ func boxCommands() []*cobra.Command {
 			if err != nil {
 				return err
 			}
+			machines := slices.ContainsFunc(boxes, func(b api.Box) bool { return b.Machine != "" })
+			col := func(s string) string {
+				if machines {
+					return s + "\t"
+				}
+				return ""
+			}
 			tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(tw, "BOX / TERMINAL\tAGENT\tSTATE\tSIZE\tCREATED")
+			fmt.Fprintln(tw, "BOX / TERMINAL\tAGENT\tSTATE\t"+col("MACHINE")+"SIZE\tCREATED")
 			for _, b := range boxes {
 				if b.Kind == api.BoxVersion {
 					continue
@@ -181,9 +190,9 @@ func boxCommands() []*cobra.Command {
 				if g := gitSummary(b); g != "" {
 					name += "  " + g
 				}
-				fmt.Fprintf(tw, "%s\t\t%s\t%d vCPU, %s\t%s\n", name, b.State, b.VCPUs, mib(b.MemMiB), ago(b.Created))
+				fmt.Fprintf(tw, "%s\t\t%s\t%s%d vCPU, %s\t%s\n", name, b.State, col(b.Machine), b.VCPUs, mib(b.MemMiB), ago(b.Created))
 				for _, t := range b.Threads {
-					fmt.Fprintf(tw, "  %d  %s\t%s\t%s\t\t%s\n", t.N, t.Title, threadAgent(t), threadState(b, t), ago(t.Created))
+					fmt.Fprintf(tw, "  %d  %s\t%s\t%s\t%s\t%s\n", t.N, t.Title, threadAgent(t), threadState(b, t), col(""), ago(t.Created))
 				}
 			}
 			return tw.Flush()

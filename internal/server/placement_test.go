@@ -1,0 +1,100 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/mouizahmed/hutch/internal/api"
+)
+
+// Each machine is placed by its own machine config, in placement.order, and a
+// box asked for on a full machine waits for it rather than going elsewhere.
+func TestPlaceAcrossMachines(t *testing.T) {
+	s, err := New(Config{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A removed machine named like a current one.
+	if err := s.store.ensureWorker("w-gone", "third"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.store.setWorkerGone("w-gone"); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []struct {
+		id, name string
+		memMiB   int
+	}{{"w-big", "big", 20480}, {"w-small", "small", 16384}, {"w-third", "third", 16384}} {
+		info := api.Worker{Name: m.name, Class: "intel", CPUs: 8, MemMiB: m.memMiB}
+		if err := s.store.ensureWorker(m.id, m.name); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.store.workerSeen(m.id, info); err != nil {
+			t.Fatal(err)
+		}
+		s.workers[m.id] = &workerConn{id: m.id, info: info, projects: map[string]bool{}}
+	}
+	// third has a box awake, so it's the fullest that fits.
+	if err := s.store.putBox(api.Box{ID: "busy", Worker: "w-third", State: "running", VCPUs: 2, MemMiB: 4096, Created: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	set := func(on, content string) {
+		t.Helper()
+		name := "machine"
+		if on != "" {
+			name = machineDoc(on)
+		}
+		d, err := s.store.config(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := s.store.putConfig(name, d.Version, content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	box := need{memMiB: 4096, vcpus: 2, class: "intel"}
+	placed := func(requested string) (string, error) {
+		t.Helper()
+		w, release, err := s.place(box, requested)
+		if err != nil {
+			return "", err
+		}
+		release()
+		return w.info.Name, nil
+	}
+	expect := func(want string) {
+		t.Helper()
+		if got, err := placed(""); err != nil || got != want {
+			t.Fatalf("placed on %q (%v), want %s", got, err, want)
+		}
+	}
+
+	expect("third")
+	set("", "placement.order = \"spread\"\n")
+	expect("big")
+	// big's own margin leaves it less free than small.
+	set("w-big", "machine.memory_margin = \"30%\"\n")
+	expect("small")
+	set("", "")
+	// third's own cap takes it out, leaving big the fullest.
+	set("w-third", "machine.max_boxes = 1\n")
+	expect("big")
+
+	_, err = placed("third")
+	if !errors.Is(err, errNoRoom) || !strings.Contains(err.Error(), "machine.max_boxes (1) reached") {
+		t.Fatalf("on a full machine by name: %v, want no room there (so it queues)", err)
+	}
+	delete(s.workers, "w-third")
+	if _, err := placed("third"); err == nil || errors.Is(err, errNoRoom) || !strings.Contains(err.Error(), "machine third is offline") {
+		t.Fatalf("on an offline machine: %v", err)
+	}
+
+	p, _ := json.Marshal(api.ConfigPutParams{Name: "machine", On: "small", BaseVersion: 1, Content: "machine.memory_margin = \"40%\"\nplacement.order = \"spread\"\n"})
+	if _, err := s.configPut(context.Background(), p, nil); err == nil || !strings.Contains(err.Error(), "placement.order is the same on every machine") {
+		t.Fatalf("a fleet-wide key set on one machine: %v", err)
+	}
+}

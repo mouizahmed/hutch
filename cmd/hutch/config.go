@@ -25,6 +25,11 @@ import (
 
 // loadConfig resolves every layer for the project in the current directory.
 func loadConfig(ctx context.Context, sess *yamux.Session) (*config.Config, error) {
+	return loadConfigOn(ctx, sess, "")
+}
+
+// loadConfigOn resolves them with one machine's own machine config, when on names one.
+func loadConfigOn(ctx context.Context, sess *yamux.Session, on string) (*config.Config, error) {
 	var docs api.Configs
 	if err := rpc.Call(ctx, sess, api.ConfigGet, struct{}{}, &docs); err != nil {
 		return nil, err
@@ -32,6 +37,17 @@ func loadConfig(ctx context.Context, sess *yamux.Session) (*config.Config, error
 	srv, err := config.Parse(config.Machine, "machine config", []byte(docs.Machine.Content))
 	if err != nil {
 		return nil, err
+	}
+	if on != "" {
+		d, ok := docs.On[on]
+		if !ok {
+			return nil, fmt.Errorf("no machine %q (hutch machine lists them)", on)
+		}
+		own, err := config.Parse(config.Machine, on+"'s machine config", []byte(d.Content))
+		if err != nil {
+			return nil, err
+		}
+		srv = config.Overlay(srv, own)
 	}
 	usr, err := config.ReadFile(config.User, config.UserPath())
 	if err != nil {
@@ -252,13 +268,17 @@ func lineDiff(machine, local string) string {
 	return "  (- machine, + here)\n" + strings.Join(out, "\n")
 }
 
-type layerFlags struct{ project, user, machine bool }
+type layerFlags struct {
+	project, user, machine bool
+	on                     string
+}
 
 func (f *layerFlags) register(c *cobra.Command) {
 	c.Flags().BoolVar(&f.project, "project", false, "the project's .hutch/hutch.toml")
 	c.Flags().BoolVar(&f.user, "user", false, "your config (the default)")
-	c.Flags().BoolVar(&f.machine, "machine", false, "the machine's config")
-	c.MarkFlagsMutuallyExclusive("project", "user", "machine")
+	c.Flags().BoolVar(&f.machine, "machine", false, "the machine config, for every machine")
+	c.Flags().StringVar(&f.on, "on", "", "one machine's own machine config, over every machine's")
+	c.MarkFlagsMutuallyExclusive("project", "user", "machine", "on")
 }
 
 // layer picks the layer to edit: the flag, else user if the key allows it, else the
@@ -267,7 +287,7 @@ func (f *layerFlags) layer(k *config.Key) config.Layer {
 	switch {
 	case f.project:
 		return config.Project
-	case f.machine:
+	case f.machine || f.on != "":
 		return config.Machine
 	case f.user || k == nil:
 		return config.User
@@ -280,20 +300,28 @@ func (f *layerFlags) layer(k *config.Key) config.Layer {
 	return k.Layers[0]
 }
 
-// editLayer reads a layer's text, applies change, checks the result, and saves it.
-func editLayer(ctx context.Context, sess *yamux.Session, layer config.Layer, change func([]byte) ([]byte, error)) error {
+// editLayer reads a layer's text (with on, one machine's own machine config),
+// applies change, checks the result, and saves it.
+func editLayer(ctx context.Context, sess *yamux.Session, layer config.Layer, on string, change func([]byte) ([]byte, error)) error {
 	switch layer {
 	case config.Machine:
 		var docs api.Configs
 		if err := rpc.Call(ctx, sess, api.ConfigGet, struct{}{}, &docs); err != nil {
 			return err
 		}
-		text, err := change([]byte(docs.Machine.Content))
+		doc := docs.Machine
+		if on != "" {
+			var ok bool
+			if doc, ok = docs.On[on]; !ok {
+				return fmt.Errorf("no machine %q (hutch machine lists them)", on)
+			}
+		}
+		text, err := change([]byte(doc.Content))
 		if err != nil {
 			return err
 		}
 		var res api.ConfigPutResult
-		if err := rpc.Call(ctx, sess, api.ConfigPut, api.ConfigPutParams{Name: "machine", BaseVersion: docs.Machine.Version, Content: string(text)}, &res); err != nil {
+		if err := rpc.Call(ctx, sess, api.ConfigPut, api.ConfigPutParams{Name: "machine", On: on, BaseVersion: doc.Version, Content: string(text)}, &res); err != nil {
 			return err
 		}
 		if res.Conflict {
@@ -382,12 +410,13 @@ func editInEditor(text []byte, layer config.Layer, name string) ([]byte, error) 
 func configCommands() *cobra.Command {
 	cfgCmd := &cobra.Command{Use: "config", Short: "Show and change settings", GroupID: "setup"}
 
+	var getOn string
 	get := &cobra.Command{
 		Use:   "get <key>",
 		Short: "Print a setting's effective value and where it comes from",
 		Args:  cobra.ExactArgs(1),
 		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
-			c, err := loadConfig(ctx, sess)
+			c, err := loadConfigOn(ctx, sess, getOn)
 			if err != nil {
 				return err
 			}
@@ -402,6 +431,8 @@ func configCommands() *cobra.Command {
 			return nil
 		}),
 	}
+
+	get.Flags().StringVar(&getOn, "on", "", "as one machine has it")
 
 	var setLayer layerFlags
 	setOnServer := withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
@@ -421,7 +452,10 @@ func configCommands() *cobra.Command {
 			return fmt.Errorf("%s: %w", args[0], err)
 		}
 		layer := setLayer.layer(k)
-		return editLayer(ctx, sess, layer, func(text []byte) ([]byte, error) {
+		if setLayer.on != "" && !strings.HasPrefix(k.Path, "machine.") {
+			return fmt.Errorf("%s is the same on every machine: set it with --machine, not --on", args[0])
+		}
+		return editLayer(ctx, sess, layer, setLayer.on, func(text []byte) ([]byte, error) {
 			return config.Set(withVersion(text), path, raw)
 		})
 	})
@@ -496,7 +530,7 @@ func configCommands() *cobra.Command {
 			if layer == config.User {
 				return nil
 			}
-			return editLayer(cmd.Context(), sess, layer, change)
+			return editLayer(cmd.Context(), sess, layer, editFlags.on, change)
 		},
 	}
 	editFlags.register(edit)
@@ -555,7 +589,7 @@ func configCommands() *cobra.Command {
 				if len(args) == 0 {
 					return errors.New("which project? hutch config grants <project> --revoke")
 				}
-				return editLayer(ctx, sess, config.User, func(text []byte) ([]byte, error) {
+				return editLayer(ctx, sess, config.User, "", func(text []byte) ([]byte, error) {
 					return config.Remove(text, []string{"grants", args[0]})
 				})
 			}

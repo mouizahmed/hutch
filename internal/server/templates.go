@@ -263,7 +263,7 @@ func (s *Server) bootTemplateBuild(ctx context.Context, proj api.Project, p api.
 // published image the project names, or neither, the default image. An image is
 // named after what it's built from, so an unchanged recipe reuses it.
 func (s *Server) buildImage(ctx context.Context, w *workerConn, proj api.Project, p api.TemplateParams, out io.Writer, diagnosticID string) (name, from string, err error) {
-	cfg, err := s.settings()
+	cfg, err := s.settingsOn(w.id)
 	if err != nil {
 		return "", "", err
 	}
@@ -476,7 +476,7 @@ func (s *Server) templateBox(ctx context.Context, params json.RawMessage, out *r
 	if err := s.forkLogins(v.Box, p.Credentials); err != nil {
 		return nil, err
 	}
-	w, release, source, err := s.versionWorker(ctx, v, id, stderr)
+	w, release, source, err := s.versionWorker(ctx, v, p.Worker, id, stderr)
 	if err != nil {
 		return nil, err
 	}
@@ -509,7 +509,7 @@ func (s *Server) forkProject(ctx context.Context, p api.ForkParams, stdout, stde
 	if err := s.forkLogins(v.Box, p.Credentials); err != nil {
 		return api.Box{}, err
 	}
-	w, release, source, err := s.versionWorker(ctx, v, p.ID, stderr)
+	w, release, source, err := s.versionWorker(ctx, v, p.Worker, p.ID, stderr)
 	if err != nil {
 		return api.Box{}, err
 	}

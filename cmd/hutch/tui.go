@@ -1189,6 +1189,9 @@ func (m *tui) rowView(r tuiRow, w int) string {
 		if state != "" {
 			only = append([]string{state}, only...)
 		}
+		if r.box.Machine != "" {
+			only = append([]string{r.box.Machine}, only...)
+		}
 		state = strings.Join(only, " · ")
 		right := styleDim.Render(state)
 		branch := ""

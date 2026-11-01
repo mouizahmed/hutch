@@ -48,6 +48,7 @@ type Server struct {
 	// pending is memory held on each worker for boxes being placed, and starting
 	// the boxes being placed or woken; guarded by mu.
 	pending  map[string]int
+	placing  map[string]int // boxes being placed on each worker
 	starting int
 	// wakes holds each box's wake in progress, which every caller waits on; parked
 	// counts forwarded connections waiting for one. Guarded by mu.
@@ -107,7 +108,7 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{started: time.Now(), cfg: cfg, store: st, master: master, workers: map[string]*workerConn{}, linkWake: make(chan struct{}, 1), backupNow: make(chan struct{}, 1), pending: map[string]int{}, wakes: map[string]*wakeCall{}, peaks: map[string]int{}, relieving: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{},
+	s := &Server{started: time.Now(), cfg: cfg, store: st, master: master, workers: map[string]*workerConn{}, linkWake: make(chan struct{}, 1), backupNow: make(chan struct{}, 1), pending: map[string]int{}, placing: map[string]int{}, wakes: map[string]*wakeCall{}, peaks: map[string]int{}, relieving: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{},
 		gitStates: map[string]guestproto.GitStatus{}, events: newHub()}
 	st.onChange = s.changed
 	st.onLogin = func() {
@@ -344,7 +345,11 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 				go s.recoverCrash(workerID, c)
 			}
 			for _, id := range r.ForceSlept {
-				msg := fmt.Sprintf("%s was put to sleep: the machine's memory passed machine.memory_critical; it wakes when you use it", id)
+				machine := workerID
+				if w != nil {
+					machine = w.info.Name
+				}
+				msg := fmt.Sprintf("%s was put to sleep: %s's memory passed machine.memory_critical; it wakes when you use it", id, machine)
 				s.store.event(id, "force-slept", msg)
 				s.notify("force-slept", id, "Box put to sleep", msg)
 			}

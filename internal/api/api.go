@@ -214,11 +214,14 @@ type ConfigDoc struct {
 type Configs struct {
 	Machine ConfigDoc `json:"machine"`
 	User    ConfigDoc `json:"user"`
+	// On holds each machine's own machine config, by machine name, over Machine.
+	On map[string]ConfigDoc `json:"on,omitempty"`
 }
 
 // ConfigPutParams replaces a document if it is still at BaseVersion.
 type ConfigPutParams struct {
 	Name        string `json:"name"`
+	On          string `json:"on,omitempty"` // with "machine": one machine's own config
 	BaseVersion int64  `json:"base_version"`
 	Content     string `json:"content"`
 }
@@ -299,6 +302,7 @@ type Idle struct {
 type Box struct {
 	ID         string    `json:"id"`
 	Worker     string    `json:"worker,omitempty"`
+	Machine    string    `json:"machine,omitempty"` // its worker's name, once there's more than one
 	State      string    `json:"state"`
 	Image      string    `json:"image"`
 	VCPUs      int       `json:"vcpus"`
@@ -686,6 +690,7 @@ type ForkParams struct {
 	Allow       []string `json:"allow,omitempty"`
 	Store       *Store   `json:"store,omitempty"` // set by the server
 	Path        string   `json:"path,omitempty"`
+	Worker      string   `json:"worker,omitempty"` // the machine to place it on (hutch new --on)
 	// Branch makes the box take over an existing branch at Commit instead of
 	// starting hutch/<id> (hutch cloud), with Delta applied.
 	Branch string `json:"branch,omitempty"`

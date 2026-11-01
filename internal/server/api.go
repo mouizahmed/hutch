@@ -67,9 +67,22 @@ func (s *Server) boxList(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (an
 	if err != nil {
 		return nil, err
 	}
+	ws, err := s.store.workers()
+	if err != nil {
+		return nil, err
+	}
+	names := map[string]string{}
+	for _, w := range ws {
+		if !w.Gone {
+			names[w.ID] = w.Name
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := range boxes {
+		if len(names) > 1 {
+			boxes[i].Machine = names[boxes[i].Worker]
+		}
 		// A sleeping box's threads keep their last titles, without live states.
 		if boxes[i].State != "running" {
 			for j := range boxes[i].Threads {
@@ -176,6 +189,9 @@ func (s *Server) boxFork(ctx context.Context, params json.RawMessage, out *rpc.O
 	w, err := s.worker(src.Worker)
 	if err != nil {
 		return nil, err
+	}
+	if p.Worker != "" && p.Worker != w.id && p.Worker != w.info.Name {
+		return nil, fmt.Errorf("a fork of %s is made where %s is, on %s", src.ID, src.ID, w.info.Name)
 	}
 	b, err := s.callForBox(ctx, w, api.BoxFork, p)
 	if err != nil {
@@ -310,7 +326,7 @@ func (s *Server) awake(ctx context.Context, id string) (*workerConn, error) {
 func (s *Server) wake(ctx context.Context, b api.Box) (*workerConn, error) {
 	id := b.ID
 	if b.State == "asleep" || b.State == "archived" {
-		release, err := s.admitWake(ctx, id)
+		release, err := s.admitWake(ctx, b)
 		if err != nil {
 			return nil, err
 		}
