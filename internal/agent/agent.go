@@ -121,15 +121,19 @@ func toAPI(w *worker.Worker, b *worker.Box) api.Box {
 	if b.State == worker.Running && !w.Alive(b) {
 		state = "crashed"
 	}
-	return api.Box{ID: b.ID, State: state, Image: b.Image, VCPUs: b.VCPUs, MemMiB: b.MemMiB,
+	ab := api.Box{ID: b.ID, State: state, Image: b.Image, VCPUs: b.VCPUs, MemMiB: b.MemMiB,
 		Generation: b.Generation, Uploaded: b.Uploaded, Class: b.Class, ReachIP: b.ReachIP(), Created: b.Created}
+	if b.Store != nil {
+		ab.Owner = b.Store.Owner
+	}
+	return ab
 }
 
 func toStore(s *api.Store) *worker.Store {
 	if s == nil {
 		return nil
 	}
-	return &worker.Store{Project: s.Project, Prefix: s.Prefix}
+	return &worker.Store{Project: s.Project, Prefix: s.Prefix, Owner: s.Owner}
 }
 
 func handlers(w *worker.Worker, name string, m *monitor, u *uploader, kp *keys.Proxy, images *image.Builder, dir link.Dir) rpc.Mux {

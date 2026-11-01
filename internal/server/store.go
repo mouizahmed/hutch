@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -37,6 +39,18 @@ CREATE TABLE IF NOT EXISTS link_tokens (
 	hash    TEXT PRIMARY KEY,
 	expires TIMESTAMP NOT NULL,
 	used    TIMESTAMP
+);
+-- The next ownership number at each term (durable.ManifestName).
+CREATE TABLE IF NOT EXISTS owners (
+	term INTEGER PRIMARY KEY,
+	n    INTEGER NOT NULL
+);
+-- Removed project boxes: their bucket ID and last ownership number, so a copy
+-- reported later is known as stale. Kept for retention.backups.
+CREATE TABLE IF NOT EXISTS deleted_boxes (
+	uid     TEXT PRIMARY KEY,
+	owner   TEXT NOT NULL,
+	deleted TIMESTAMP NOT NULL
 );
 CREATE TABLE IF NOT EXISTS boxes (
 	id         TEXT PRIMARY KEY,
@@ -131,8 +145,9 @@ type store struct {
 	db *sql.DB
 	// userKey seals the user layer, so a copy of the database alone doesn't expose credentials.
 	userKey durable.Key
-	// onChange is called after every write, for events.
-	onChange func()
+	// onChange is called after every write, for events; onLogin after a login's
+	// stored values change.
+	onChange, onLogin func()
 }
 
 func (s *store) exec(query string, args ...any) (sql.Result, error) {
@@ -172,6 +187,8 @@ var migrations = []string{
 	`ALTER TABLE box_meta ADD COLUMN image TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE templates ADD COLUMN image TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE workers ADD COLUMN linked INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE box_meta ADD COLUMN uid TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE box_meta ADD COLUMN owner TEXT NOT NULL DEFAULT ''`,
 }
 
 func openStore(path string, userKey durable.Key) (*store, error) {
@@ -335,9 +352,10 @@ func (s *store) deleteBox(id, why string) error {
 func (s *store) box(id string) (api.Box, error) {
 	var b api.Box
 	err := s.db.QueryRow(`SELECT id, worker_id, state, boxes.image, vcpus, mem_mib, generation, class, reach_ip, created,
-		COALESCE(m.project_id, ''), COALESCE(m.kind, ''), COALESCE(g.branch, ''), COALESCE(g.base, ''), path, threads
+		COALESCE(m.project_id, ''), COALESCE(m.kind, ''), COALESCE(g.branch, ''), COALESCE(g.base, ''), path, threads,
+		COALESCE(m.uid, ''), COALESCE(m.owner, '')
 		FROM boxes LEFT JOIN box_meta m ON m.box_id = boxes.id LEFT JOIN box_git g ON g.box_id = boxes.id WHERE id = ?`, id).
-		Scan(&b.ID, &b.Worker, &b.State, &b.Image, &b.VCPUs, &b.MemMiB, &b.Generation, &b.Class, &b.ReachIP, &b.Created, &b.Project, &b.Kind, &b.Branch, &b.Base, &b.Path, threadsJSON{&b.Threads})
+		Scan(&b.ID, &b.Worker, &b.State, &b.Image, &b.VCPUs, &b.MemMiB, &b.Generation, &b.Class, &b.ReachIP, &b.Created, &b.Project, &b.Kind, &b.Branch, &b.Base, &b.Path, threadsJSON{&b.Threads}, &b.UID, &b.Owner)
 	if errors.Is(err, sql.ErrNoRows) {
 		return b, fmt.Errorf("no box %q", id)
 	}
@@ -346,7 +364,8 @@ func (s *store) box(id string) (api.Box, error) {
 
 func (s *store) boxes() ([]api.Box, error) {
 	rows, err := s.db.Query(`SELECT id, worker_id, state, boxes.image, vcpus, mem_mib, generation, class, reach_ip, created,
-		COALESCE(m.project_id, ''), COALESCE(m.kind, ''), COALESCE(g.branch, ''), COALESCE(g.base, ''), path, threads
+		COALESCE(m.project_id, ''), COALESCE(m.kind, ''), COALESCE(g.branch, ''), COALESCE(g.base, ''), path, threads,
+		COALESCE(m.uid, ''), COALESCE(m.owner, '')
 		FROM boxes LEFT JOIN box_meta m ON m.box_id = boxes.id LEFT JOIN box_git g ON g.box_id = boxes.id ORDER BY created`)
 	if err != nil {
 		return nil, err
@@ -355,7 +374,7 @@ func (s *store) boxes() ([]api.Box, error) {
 	var bs []api.Box
 	for rows.Next() {
 		var b api.Box
-		if err := rows.Scan(&b.ID, &b.Worker, &b.State, &b.Image, &b.VCPUs, &b.MemMiB, &b.Generation, &b.Class, &b.ReachIP, &b.Created, &b.Project, &b.Kind, &b.Branch, &b.Base, &b.Path, threadsJSON{&b.Threads}); err != nil {
+		if err := rows.Scan(&b.ID, &b.Worker, &b.State, &b.Image, &b.VCPUs, &b.MemMiB, &b.Generation, &b.Class, &b.ReachIP, &b.Created, &b.Project, &b.Kind, &b.Branch, &b.Base, &b.Path, threadsJSON{&b.Threads}, &b.UID, &b.Owner); err != nil {
 			return nil, err
 		}
 		bs = append(bs, b)
@@ -487,6 +506,7 @@ func (s *store) putConfig(name string, base int64, content string) (api.ConfigDo
 
 type boxMeta struct {
 	project, kind, commit string
+	uid                   string // the box's name in the bucket; set once
 	verified              bool
 	secrets               string // digest of the project secrets a template box was built with
 	version               int    // the template version a box was forked from
@@ -494,11 +514,54 @@ type boxMeta struct {
 }
 
 func (s *store) putMeta(box string, m boxMeta) error {
-	_, err := s.exec(`INSERT INTO box_meta (box_id, project_id, kind, commit_sha, verified, secrets, version) VALUES (?, ?, ?, ?, ?, ?, ?)
+	_, err := s.exec(`INSERT INTO box_meta (box_id, project_id, kind, commit_sha, verified, secrets, version, uid) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(box_id) DO UPDATE SET project_id = excluded.project_id, kind = excluded.kind,
-			commit_sha = excluded.commit_sha, verified = excluded.verified, secrets = excluded.secrets, version = excluded.version`,
-		box, m.project, m.kind, m.commit, m.verified, m.secrets, m.version)
+			commit_sha = excluded.commit_sha, verified = excluded.verified, secrets = excluded.secrets, version = excluded.version,
+			uid = CASE WHEN box_meta.uid = '' THEN excluded.uid ELSE box_meta.uid END`,
+		box, m.project, m.kind, m.commit, m.verified, m.secrets, m.version, m.uid)
 	return err
+}
+
+// nextOwner hands out a new ownership number at term.
+func (s *store) nextOwner(term int64) (string, error) {
+	var n int64
+	err := s.db.QueryRow(`INSERT INTO owners (term, n) VALUES (?, 1)
+		ON CONFLICT(term) DO UPDATE SET n = owners.n + 1 RETURNING n`, term).Scan(&n)
+	if err != nil {
+		return "", err
+	}
+	s.changed()
+	return durable.Owner(term, n), nil
+}
+
+func (s *store) setOwner(box, owner string) error {
+	_, err := s.exec(`UPDATE box_meta SET owner = ? WHERE box_id = ?`, owner, box)
+	return err
+}
+
+// recordDeleted keeps a removed box's bucket ID and ownership number, and forgets
+// those removed before keep.
+func (s *store) recordDeleted(uid, owner string, keep time.Duration) error {
+	now := time.Now().UTC()
+	if _, err := s.exec(`INSERT INTO deleted_boxes (uid, owner, deleted) VALUES (?, ?, ?)
+		ON CONFLICT(uid) DO UPDATE SET owner = excluded.owner, deleted = excluded.deleted`, uid, owner, now); err != nil {
+		return err
+	}
+	_, err := s.exec(`DELETE FROM deleted_boxes WHERE deleted < ?`, now.Add(-keep))
+	return err
+}
+
+// deleted returns a removed box's last ownership number.
+func (s *store) deleted(uid string) (owner string, ok bool) {
+	err := s.db.QueryRow(`SELECT owner FROM deleted_boxes WHERE uid = ?`, uid).Scan(&owner)
+	return owner, err == nil
+}
+
+// term is the current lead term: the link's, or 0 before there is one.
+func (s *store) term() int64 {
+	var t int64
+	s.db.QueryRow(`SELECT term FROM link WHERE id = 1`).Scan(&t)
+	return t
 }
 
 // setImage records what a template box's image was built from.
@@ -648,7 +711,22 @@ func (s *store) putLayerPart(part string, base int64, content []byte) (int64, bo
 	if err != nil {
 		return 0, false, err
 	}
-	return cur + 1, false, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, false, err
+	}
+	s.loginChanged(part)
+	return cur + 1, false, nil
+}
+
+// loginChanged calls onLogin when part holds a login: refresh tokens rotate, so
+// a backup from before the change would bring back a dead login.
+func (s *store) loginChanged(parts ...string) {
+	for _, p := range parts {
+		if (strings.HasPrefix(p, credentialsPrefix) || strings.HasPrefix(p, keysPrefix)) && s.onLogin != nil {
+			s.onLogin()
+			return
+		}
+	}
 }
 
 func (s *store) deleteLayerPart(part string) error {
@@ -672,7 +750,11 @@ func (s *store) putLayerParts(parts map[string][]byte) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.loginChanged(slices.Collect(maps.Keys(parts))...)
+	return nil
 }
 
 func (s *store) setBoxCredentials(box string, creds []string) error {

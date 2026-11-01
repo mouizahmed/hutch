@@ -83,12 +83,13 @@ func (s *Server) bucketStore() (*durable.Store, error) {
 
 func (s *Server) projectPrefix(project string) string { return s.master.ProjectPrefix(project) }
 
-// boxStore is where a project box's snapshots go; boxes outside projects aren't stored.
-func (s *Server) boxStore(project, box string) *api.Store {
+// boxStore is where a project box's snapshots go, by its bucket ID and ownership
+// number; boxes outside projects aren't stored.
+func (s *Server) boxStore(project, uid, owner string) *api.Store {
 	if project == "" {
 		return nil
 	}
-	return &api.Store{Project: project, Prefix: s.projectPrefix(project) + "/boxes/" + box}
+	return &api.Store{Project: project, Prefix: s.projectPrefix(project) + "/boxes/" + uid, Owner: owner}
 }
 
 func (s *Server) versionStore(project, class string, version int) *api.Store {
@@ -193,6 +194,7 @@ func (s *Server) backupLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-time.After(interval):
+		case <-s.backupNow:
 		}
 		if s.vault.Load() == nil {
 			continue
@@ -451,17 +453,28 @@ func pruneBoxSnapshots(ctx context.Context, b bucket.Bucket, keep int) (int, err
 	if err != nil {
 		return 0, err
 	}
-	byBox := map[string][]string{}
+	type snapshot struct {
+		name, owner string
+		gen         int
+	}
+	byBox := map[string][]snapshot{}
 	for _, o := range objs {
 		if parts := strings.Split(o.Key, "/"); len(parts) == 5 && parts[2] == "boxes" {
+			owner, gen, ok := durable.ParseManifestName(parts[4])
+			if !ok {
+				continue
+			}
 			dir := strings.Join(parts[:4], "/")
-			byBox[dir] = append(byBox[dir], o.Key)
+			byBox[dir] = append(byBox[dir], snapshot{o.Key, owner, gen})
 		}
 	}
 	pruned := 0
-	for _, names := range byBox {
-		sort.Sort(sort.Reverse(sort.StringSlice(names)))
-		for _, n := range names[min(keep, len(names)):] {
+	for _, snaps := range byBox {
+		sort.Slice(snaps, func(i, j int) bool {
+			return durable.Newer(snaps[i].owner, snaps[i].gen, snaps[j].owner, snaps[j].gen)
+		})
+		for _, sn := range snaps[min(keep, len(snaps)):] {
+			n := sn.name
 			if err := b.Delete(ctx, n); err != nil {
 				return pruned, err
 			}
@@ -490,8 +503,31 @@ func (s *Server) deletePrefix(ctx context.Context, prefix string) {
 	}
 }
 
-// latestGeneration returns the newest generation of a store in the bucket.
-func (s *Server) latestGeneration(ctx context.Context, store *api.Store) (int, error) {
+// latestSnapshot returns the newest snapshot of a store in the bucket: the newest
+// generation of the highest ownership number.
+func (s *Server) latestSnapshot(ctx context.Context, store *api.Store) (owner string, gen int, err error) {
+	v := s.vault.Load()
+	if v == nil {
+		return "", 0, errNoBucket
+	}
+	objs, err := v.bucket.List(ctx, store.Prefix+"/")
+	if err != nil {
+		return "", 0, err
+	}
+	for _, o := range objs {
+		if ow, n, ok := durable.ParseManifestName(strings.TrimPrefix(o.Key, store.Prefix+"/")); ok && durable.Newer(ow, n, owner, gen) {
+			owner, gen = ow, n
+		}
+	}
+	if gen == 0 {
+		return "", 0, errors.New("the bucket has no snapshot of it")
+	}
+	return owner, gen, nil
+}
+
+// storedGeneration returns the newest generation in the bucket written by the
+// store's own owner.
+func (s *Server) storedGeneration(ctx context.Context, store *api.Store) (int, error) {
 	v := s.vault.Load()
 	if v == nil {
 		return 0, errNoBucket
@@ -502,12 +538,35 @@ func (s *Server) latestGeneration(ctx context.Context, store *api.Store) (int, e
 	}
 	gen := 0
 	for _, o := range objs {
-		if n, err := strconv.Atoi(strings.TrimPrefix(o.Key, store.Prefix+"/")); err == nil {
+		if ow, n, ok := durable.ParseManifestName(strings.TrimPrefix(o.Key, store.Prefix+"/")); ok && ow == store.Owner {
 			gen = max(gen, n)
 		}
 	}
-	if gen == 0 {
-		return 0, errors.New("the bucket has no snapshot of it")
-	}
 	return gen, nil
+}
+
+// claim gives a box a new ownership number before it is placed on another
+// machine, with its snapshot from (owner, gen) stored again under that number,
+// so the new copy has it and the old copy's later writes never mix with its own.
+// It returns the store the new copy writes to.
+func (s *Server) claim(ctx context.Context, store *api.Store, owner string, gen int) (*api.Store, error) {
+	st, err := s.bucketStore()
+	if err != nil {
+		return nil, err
+	}
+	next, err := s.store.nextOwner(s.store.term())
+	if err != nil {
+		return nil, err
+	}
+	k := s.master.ProjectKey(store.Project)
+	m, err := st.GetManifest(ctx, k, durable.ManifestName(store.Prefix, owner, gen))
+	if err != nil {
+		return nil, err
+	}
+	if err := st.PutManifest(ctx, k, durable.ManifestName(store.Prefix, next, gen), m); err != nil && !errors.Is(err, bucket.ErrExists) {
+		return nil, err
+	}
+	claimed := *store
+	claimed.Owner = next
+	return &claimed, nil
 }

@@ -65,8 +65,9 @@ type Server struct {
 	// keysMu orders changes to the keys proxy's state and the pushes of its table.
 	keysMu sync.Mutex
 
-	// linkWake re-checks whether the link port should listen.
-	linkWake chan struct{}
+	// linkWake re-checks whether the link port should listen; backupNow backs up
+	// without waiting for backup.interval.
+	linkWake, backupNow chan struct{}
 
 	mu      sync.Mutex
 	workers map[string]*workerConn
@@ -106,9 +107,15 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{started: time.Now(), cfg: cfg, store: st, master: master, workers: map[string]*workerConn{}, linkWake: make(chan struct{}, 1), pending: map[string]int{}, wakes: map[string]*wakeCall{}, peaks: map[string]int{}, relieving: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{},
+	s := &Server{started: time.Now(), cfg: cfg, store: st, master: master, workers: map[string]*workerConn{}, linkWake: make(chan struct{}, 1), backupNow: make(chan struct{}, 1), pending: map[string]int{}, wakes: map[string]*wakeCall{}, peaks: map[string]int{}, relieving: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{},
 		gitStates: map[string]guestproto.GitStatus{}, events: newHub()}
 	st.onChange = s.changed
+	st.onLogin = func() {
+		select {
+		case s.backupNow <- struct{}{}:
+		default:
+		}
+	}
 	go s.publish()
 	s.changed()
 	b, bcfg, err := loadBucket(cfg.Dir)

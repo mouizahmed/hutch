@@ -54,7 +54,7 @@ func (s *Server) boxWorker(ctx context.Context, b api.Box) (*workerConn, api.Box
 	if err != nil {
 		return nil, b, err
 	}
-	gen, err := s.latestGeneration(ctx, store)
+	owner, gen, err := s.latestSnapshot(ctx, store)
 	if err != nil {
 		return nil, b, fmt.Errorf("%s can't move from lost worker %s: %w", b.ID, b.Worker, err)
 	}
@@ -64,14 +64,21 @@ func (s *Server) boxWorker(ctx context.Context, b api.Box) (*workerConn, api.Box
 	}
 	defer release()
 	s.hostProject(ctx, w, store.Project)
-	nb, err := s.callForBox(ctx, w, api.BoxRestore, api.RestoreParams{ID: b.ID, Store: *store, Generation: gen})
+	claimed, err := s.claim(ctx, store, owner, gen)
+	if err != nil {
+		return nil, b, err
+	}
+	nb, err := s.callForBox(ctx, w, api.BoxRestore, api.RestoreParams{ID: b.ID, Store: *claimed, Generation: gen})
 	if err != nil {
 		return nil, b, fmt.Errorf("restore %s on %s: %w", b.ID, w.id, err)
+	}
+	if err := s.store.setOwner(b.ID, claimed.Owner); err != nil {
+		return nil, b, err
 	}
 	msg := fmt.Sprintf("restored on %s from snapshot %d after worker %s was lost", w.id, gen, b.Worker)
 	s.store.event(b.ID, "moved", msg)
 	log.Printf("%s: %s", b.ID, msg)
-	nb.Project, nb.Kind, nb.Branch, nb.Base = b.Project, b.Kind, b.Branch, b.Base
+	nb.Project, nb.Kind, nb.Branch, nb.Base, nb.UID, nb.Owner = b.Project, b.Kind, b.Branch, b.Base, b.UID, claimed.Owner
 	return w, nb, nil
 }
 
@@ -94,7 +101,11 @@ func (s *Server) storeOf(b api.Box) (*api.Store, error) {
 	if b.Kind != "" || b.Project == "" {
 		return nil, fmt.Errorf("%s isn't stored in the bucket", b.ID)
 	}
-	return s.boxStore(b.Project, b.ID), nil
+	uid := b.UID
+	if uid == "" {
+		uid = b.ID
+	}
+	return s.boxStore(b.Project, uid, b.Owner), nil
 }
 
 // dropStale removes from a reconnecting worker the boxes that moved to another

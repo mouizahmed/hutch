@@ -515,12 +515,13 @@ func (s *Server) forkProject(ctx context.Context, p api.ForkParams, stdout, stde
 	}
 	defer release()
 	s.hostProject(ctx, w, p.Project)
-	p.Source, p.Store = source, s.boxStore(p.Project, p.ID)
+	uid := "b-" + randomHex(8)
+	p.Source, p.Store = source, s.boxStore(p.Project, uid, "")
 	b, err := s.callForBox(ctx, w, api.BoxFork, p)
 	if err != nil {
 		return b, err
 	}
-	if err := s.store.putMeta(b.ID, boxMeta{project: p.Project, commit: v.Commit, version: v.Version}); err != nil {
+	if err := s.store.putMeta(b.ID, boxMeta{project: p.Project, commit: v.Commit, version: v.Version, uid: uid}); err != nil {
 		return b, err
 	}
 	if err := s.linkPath(ctx, w, b.ID, p.Path, stderr); err != nil {
@@ -611,6 +612,15 @@ func (s *Server) removeBox(ctx context.Context, id string) error {
 		return fmt.Errorf("%s is on a machine that is offline; remove it once that machine is back", id)
 	}
 	if store != nil {
+		if b.Kind == "" {
+			cfg, err := s.settings()
+			if err != nil {
+				return err
+			}
+			if err := s.store.recordDeleted(path.Base(store.Prefix), store.Owner, cfg.Duration("retention.backups")); err != nil {
+				return err
+			}
+		}
 		s.deletePrefix(ctx, store.Prefix)
 	}
 	s.mu.Lock()

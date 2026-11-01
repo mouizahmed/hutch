@@ -280,6 +280,7 @@ func NewWorkerSettings(c *config.Config) WorkerSettingsParams {
 type Store struct {
 	Project string `json:"project"`
 	Prefix  string `json:"prefix"`
+	Owner   string `json:"owner,omitempty"` // the box's ownership number (durable.ManifestName)
 }
 
 // RestoreParams creates box ID on a worker from generation Generation in the bucket.
@@ -318,6 +319,11 @@ type Box struct {
 	Unpushed int `json:"unpushed,omitempty"`
 	// Path is the laptop directory /workspace also appears at; threads start there.
 	Path string `json:"path,omitempty"`
+	// UID names a project box in the bucket, kept through moves and restores
+	// (empty for boxes from before it, named by ID); Owner is its ownership
+	// number (durable.ManifestName).
+	UID   string `json:"uid,omitempty"`
+	Owner string `json:"owner,omitempty"`
 }
 
 const (

@@ -92,11 +92,12 @@ type Box struct {
 	Checkpointed time.Time `json:"checkpointed,omitzero"`
 }
 
-// Store places a box's snapshots in the bucket: manifests <Prefix>/<generation>,
-// encrypted with Project's key.
+// Store places a box's snapshots in the bucket: manifests <Prefix>/<Owner>-<generation>
+// (durable.ManifestName), encrypted with Project's key.
 type Store struct {
 	Project string `json:"project"`
 	Prefix  string `json:"prefix"`
+	Owner   string `json:"owner,omitempty"`
 }
 
 // Idle is a box's idle policy; zero values mean the defaults.

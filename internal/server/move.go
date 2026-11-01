@@ -64,10 +64,17 @@ func (s *Server) move(ctx context.Context, id, to string, stdout, stderr io.Writ
 	}
 	defer func() { release() }()
 	s.hostProject(ctx, w, store.Project)
+	claimed, err := s.claim(ctx, store, store.Owner, b.Generation)
+	if err != nil {
+		return r, err
+	}
 	fmt.Fprintf(stdout, "Restoring on %s...\n", w.info.Name)
-	nb, err := s.callForBox(ctx, w, api.BoxRestore, api.RestoreParams{ID: id, Store: *store, Generation: b.Generation})
+	nb, err := s.callForBox(ctx, w, api.BoxRestore, api.RestoreParams{ID: id, Store: *claimed, Generation: b.Generation})
 	if err != nil {
 		return r, fmt.Errorf("restore on %s: %w (the box is still on %s)", w.id, err, src.id)
+	}
+	if err := s.store.setOwner(id, claimed.Owner); err != nil {
+		return r, err
 	}
 	if err := rpc.Call(ctx, src.sess, api.BoxRm, api.IDParams{ID: id}, nil); err != nil {
 		fmt.Fprintf(stderr, "warning: removing the old copy on %s: %v (it's removed when that worker reconnects)\n", src.id, err)
@@ -92,7 +99,7 @@ func (s *Server) waitStored(ctx context.Context, store *api.Store, gen int, time
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	for {
-		if have, err := s.latestGeneration(ctx, store); err == nil && have >= gen {
+		if have, err := s.storedGeneration(ctx, store); err == nil && have >= gen {
 			return nil
 		}
 		select {

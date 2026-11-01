@@ -22,7 +22,8 @@ import (
 const ChunkSize = 4 << 20
 
 // Format is the bucket format version this build writes; it reads every older one.
-const Format = 1
+// 2: box manifests carry an ownership number in their names (owner.go).
+const Format = 2
 
 const parallel = 8
 
@@ -100,6 +101,8 @@ func (s *Store) Init(ctx context.Context) error {
 	return s.CheckFormat(ctx)
 }
 
+// CheckFormat checks that this build can read the bucket, and raises an older
+// format to this build's.
 func (s *Store) CheckFormat(ctx context.Context) error {
 	data, err := s.Bucket.Get(ctx, "format")
 	if err != nil {
@@ -111,6 +114,11 @@ func (s *Store) CheckFormat(ctx context.Context) error {
 	}
 	if f.Format > Format {
 		return fmt.Errorf("the bucket has format %d; this Hutch reads up to %d, upgrade it", f.Format, Format)
+	}
+	if f.Format < Format {
+		// Older builds can't read what this one writes, so they're told to upgrade.
+		data, _ := json.Marshal(map[string]int{"format": Format})
+		return s.Bucket.Put(ctx, "format", data, false)
 	}
 	return nil
 }

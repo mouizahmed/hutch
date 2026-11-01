@@ -320,7 +320,7 @@ func (s *Server) copyVersion(ctx context.Context, w *workerConn, v api.Template,
 	store, err := s.storeOf(src)
 	if err == nil {
 		var gen int
-		if gen, err = s.latestGeneration(ctx, store); err == nil {
+		if store.Owner, gen, err = s.latestSnapshot(ctx, store); err == nil {
 			s.hostProject(ctx, w, v.Project)
 			err = rpc.Call(ctx, w.sess, api.BoxRestore, api.RestoreParams{ID: buildBox, Store: *store, Generation: gen}, nil)
 			if err != nil && strings.Contains(err.Error(), "already exists") {

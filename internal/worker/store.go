@@ -22,7 +22,7 @@ var snapshotFiles = append([]string{"rootfs.ext4", "mem", "vmstate"}, checkpoint
 func (w *Worker) refDir(id string) string { return filepath.Join(w.boxDir(id), "ref") }
 
 // ManifestName is where generation gen of a box with store s is in the bucket.
-func ManifestName(s *Store, gen int) string { return fmt.Sprintf("%s/%010d", s.Prefix, gen) }
+func ManifestName(s *Store, gen int) string { return durable.ManifestName(s.Prefix, s.Owner, gen) }
 
 // cloneDir reflinks every regular file of src into a new dst.
 func cloneDir(src, dst string) error {
