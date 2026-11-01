@@ -2,13 +2,13 @@
 
 Every coding agent gets its own computer, on a Linux machine you rent or own. Hutch clones boxes from snapshots of your project's environment, keeps terminals running when you disconnect, and sleeps idle boxes. Machines with KVM use Firecracker microVMs; other machines use gVisor sandboxes.
 
-> **Pre-release.** Phase 9 prepares installation, security checks, and documentation. Its completion does not publish v0.1. The first release will follow separate validation and a release decision.
+Hutch is early software. Read the [v0.1.0 release notes](docs/releases/v0.1.0.md) for supported platforms and current limitations.
 
 The CLI and TUI run on Linux, macOS, and Windows. A project has reusable template versions; each box has its own files and services; terminals in the same box share that environment. Claude Code and Codex have built-in adapters, and you can add a TOML adapter for another agent's CLI.
 
 ## Install
 
-Once a release is published, install the CLI on Linux or macOS with:
+Install the CLI on Linux or macOS with:
 
 ```sh
 curl -fsSL https://github.com/mouizahmed/hutch/releases/latest/download/install.sh | sh

@@ -1,6 +1,6 @@
 # Security model
 
-Hutch is pre-release and has not completed independent security review. Use a machine and development accounts whose access you intend to give the workloads you run. Report vulnerabilities through the [security policy](../SECURITY.md).
+Hutch is early software and has not completed independent security review. Use a machine and development accounts whose access you intend to give the workloads you run. Report vulnerabilities through the [security policy](../SECURITY.md).
 
 ## Boundaries
 

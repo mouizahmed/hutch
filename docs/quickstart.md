@@ -94,4 +94,4 @@ hutch machine upgrade
 hutch doctor
 ```
 
-For a lost machine backed by a bucket, use `hutch machine restore <new-ssh-host>` with its recovery passphrase. Avoid deleting a box until its work is somewhere you intend to keep it. [Release validation](releases.md) tracks checks still needed before public release, including live upgrade continuity and both backends.
+For a lost machine backed by a bucket, use `hutch machine restore <new-ssh-host>` with its recovery passphrase. Avoid deleting a box until its work is somewhere you intend to keep it. See [release preparation](releases.md) for artifact verification and validation of upgrades and both backends.

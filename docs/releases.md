@@ -1,6 +1,6 @@
 # Release preparation
 
-Completing Phase 9 means the installation, checks, and documentation are ready for validation. It does not trigger a v0.1 tag, publication, or announcement. Release timing is a separate maintainer decision.
+Releases provide CLI archives, matching machine bundles and build attestations. A version-tag push builds and checks the artifacts and creates a draft release; publication is a separate maintainer action. See the [v0.1.0 release notes](releases/v0.1.0.md) for the initial scope and limitations.
 
 ## Artifacts
 

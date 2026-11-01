@@ -1,5 +1,5 @@
 #!/bin/sh
-# curl -fsSL https://raw.githubusercontent.com/mouizahmed/hutch/main/install.sh | sh
+# curl -fsSL https://github.com/mouizahmed/hutch/releases/latest/download/install.sh | sh
 set -eu
 export LC_ALL=C
 
