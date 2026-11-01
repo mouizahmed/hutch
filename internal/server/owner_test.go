@@ -128,4 +128,3 @@ func TestLoginChangeBacksUp(t *testing.T) {
 		t.Fatal("a stored refresh didn't ask for a backup")
 	}
 }
-
