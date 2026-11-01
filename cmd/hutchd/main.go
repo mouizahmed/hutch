@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -27,6 +28,7 @@ import (
 	"github.com/mouizahmed/hutch/internal/client"
 	"github.com/mouizahmed/hutch/internal/guestproto"
 	"github.com/mouizahmed/hutch/internal/image"
+	"github.com/mouizahmed/hutch/internal/link"
 	"github.com/mouizahmed/hutch/internal/server"
 	"github.com/mouizahmed/hutch/internal/version"
 	"github.com/mouizahmed/hutch/internal/worker"
@@ -45,6 +47,7 @@ commands:
   box status <id>                                        print what hutch-guest reports (threads, sessions, ports)
   image build [--pin REF@DIGEST]... <name> [<dir>]       build an image from the Dockerfile in a directory (none: the default image)
   run [--name NAME]                                      run the machine: boxes, their state, and the API
+  join --lead HOST:PORT --token TOKEN --name NAME        join another machine's lead as a worker (hutch machine add runs it)
   api                                                    bridge stdio to the API (what ssh <machine> hutchd api runs)
   restore                                                recover the state from a bucket: {"bucket": ..., "passphrase": ...} on stdin
   version
@@ -80,6 +83,8 @@ func dispatch(ctx context.Context, root, fcVersion, socket string, args []string
 		return client.Bridge(socket)
 	case "run":
 		return run(ctx, root, fcVersion, socket, args)
+	case "join":
+		return join(ctx, root, args)
 	case "restore":
 		var p api.ServerInitParams
 		if err := json.NewDecoder(os.Stdin).Decode(&p); err != nil {
@@ -298,6 +303,11 @@ func run(ctx context.Context, root, fcVersion, socket string, args []string) err
 	if err != nil {
 		return err
 	}
+	if dir := link.Dir(filepath.Join(root, "link")); dir.Enrolled() {
+		log.Printf("hutchd %s on %s, data in %s: a worker of another machine's lead", version.String(), dir.Name(), root)
+		agent.Start(ctx, w, dir.Name(), dir).Link(ctx, dir)
+		return nil
+	}
 	dir := filepath.Dir(socket)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
@@ -314,13 +324,47 @@ func run(ctx context.Context, root, fcVersion, socket string, args []string) err
 	}
 	a, b := net.Pipe()
 	go func() {
-		if err := agent.Run(ctx, w, *name, a); err != nil && ctx.Err() == nil {
+		if err := agent.Start(ctx, w, *name, "").Serve(ctx, a); err != nil && ctx.Err() == nil {
 			log.Printf("worker: %v", err)
 		}
 	}()
 	go s.AttachWorker(ctx, id, *name, b)
 	log.Printf("hutchd %s on %s, data in %s", version.String(), *name, root)
 	return s.Run(ctx)
+}
+
+// join enrolls this machine as a worker of another machine's lead. A machine
+// that keeps its own state can't join: it leads.
+func join(ctx context.Context, root string, args []string) error {
+	fs := flag.NewFlagSet("join", flag.ExitOnError)
+	lead := fs.String("lead", "", "the lead's link address, host:port")
+	token := fs.String("token", "", "a token from hutch machine add")
+	name := fs.String("name", "", "this machine's name")
+	fs.Parse(args[1:])
+	if *lead == "" || *token == "" || *name == "" {
+		return errors.New("usage: hutchd join --lead HOST:PORT --token TOKEN --name NAME")
+	}
+	if _, err := os.Stat(filepath.Join(root, "state", "hutch.db")); err == nil {
+		return fmt.Errorf("this machine has its own Hutch state in %s; it can't join another", filepath.Join(root, "state"))
+	}
+	// A machine added again replaces its old enrollment once the new one succeeds.
+	dir := filepath.Join(root, "link")
+	os.RemoveAll(dir + ".new")
+	id, err := link.Enroll(ctx, link.Dir(dir+".new"), *lead, *token, *name)
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	if err := os.Rename(dir+".new", dir); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(root, "worker-id"), []byte(id+"\n"), 0o600); err != nil {
+		return err
+	}
+	fmt.Printf("joined %s as %s\n", *lead, id)
+	return nil
 }
 
 // workerID is this machine's worker ID, made on first start.

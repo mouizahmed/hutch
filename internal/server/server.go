@@ -65,8 +65,15 @@ type Server struct {
 	// keysMu orders changes to the keys proxy's state and the pushes of its table.
 	keysMu sync.Mutex
 
+	// linkWake re-checks whether the link port should listen.
+	linkWake chan struct{}
+
 	mu      sync.Mutex
 	workers map[string]*workerConn
+	// local is the worker on this machine; enrolledAt, the last enrollment
+	// attempt, which limits them to one a second.
+	local      string
+	enrolledAt time.Time
 	// threadStates holds the latest reported state of each thread, by box and number.
 	threadStates map[string]map[int]api.ThreadState
 	// gitStates holds each box's latest git status.
@@ -99,7 +106,7 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{started: time.Now(), cfg: cfg, store: st, master: master, workers: map[string]*workerConn{}, pending: map[string]int{}, wakes: map[string]*wakeCall{}, peaks: map[string]int{}, relieving: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{},
+	s := &Server{started: time.Now(), cfg: cfg, store: st, master: master, workers: map[string]*workerConn{}, linkWake: make(chan struct{}, 1), pending: map[string]int{}, wakes: map[string]*wakeCall{}, peaks: map[string]int{}, relieving: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{},
 		gitStates: map[string]guestproto.GitStatus{}, events: newHub()}
 	st.onChange = s.changed
 	go s.publish()
@@ -127,6 +134,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.gcLoop(ctx)
 	go s.archiveLoop(ctx)
 	go s.maxAwakeLoop(ctx)
+	go s.linkLoop(ctx)
 	select {
 	case <-ctx.Done():
 		return nil
@@ -184,24 +192,45 @@ func yamuxConfig() *yamux.Config {
 // AttachWorker serves the worker on this machine over conn, the other end of
 // which its agent serves, until conn closes.
 func (s *Server) AttachWorker(ctx context.Context, id, name string, conn net.Conn) {
+	s.mu.Lock()
+	s.local = id
+	s.mu.Unlock()
+	s.attach(ctx, id, name, conn, false)
+}
+
+// attach serves a worker over conn until it closes: the one on this machine, or
+// a linked one.
+func (s *Server) attach(ctx context.Context, id, name string, conn net.Conn, linked bool) {
 	if err := s.store.ensureWorker(id, name); err != nil {
 		log.Printf("worker %s: %v", id, err)
 		conn.Close()
 		return
 	}
-	sess, err := yamux.Client(conn, yamuxConfig())
+	cfg := yamuxConfig()
+	if linked {
+		cfg = s.linkYamux()
+	}
+	sess, err := yamux.Client(conn, cfg)
 	if err != nil {
 		conn.Close()
 		return
 	}
 	defer sess.Close()
 
+	var term int64
+	if l, err := s.store.link(); err == nil && l != nil {
+		term = l.term
+	}
 	var info api.Worker
 	helloCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	err = rpc.Call(helloCtx, sess, api.WorkerHello, struct{}{}, &info)
+	err = rpc.Call(helloCtx, sess, api.WorkerHello, api.LinkHello{Protocol: api.LinkProtocol, Term: term, WorkerID: id}, &info)
 	cancel()
 	if err != nil {
 		log.Printf("worker %s: hello: %v", id, err)
+		return
+	}
+	if linked && info.Link < api.LinkProtocol-1 {
+		log.Printf("worker %s: hutchd %s is too old for this lead's %d link protocol: upgrade it", id, info.Version, api.LinkProtocol)
 		return
 	}
 	info.ID, info.Online = id, true

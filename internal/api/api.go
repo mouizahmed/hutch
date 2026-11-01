@@ -92,6 +92,7 @@ const (
 	DoctorTemplate = "doctor.template" // two diagnostic builds of a committed recipe
 	KeysIdentity   = "keys.identity"   // public box identity verification keys
 	WorkerDoctor   = "worker.doctor"   // hutchd only
+	MachineToken   = "machine.token"   // a one-time token for hutch machine add
 )
 
 // Check is one hutch doctor result: Status ok, warn, or fail, with a fix for the others.
@@ -148,6 +149,30 @@ type DrainParams struct {
 // Protocol is the API's version, raised when a change breaks older CLIs or an
 // older hutchd. hutchd accepts CLIs of its protocol and the one before.
 const Protocol = 1
+
+// LinkProtocol is the worker link's version; the lead accepts workers at it and
+// the one before.
+const LinkProtocol = 1
+
+// LinkHello is the lead's hello to a worker: what it speaks, its term, and the
+// worker's ID from its certificate.
+type LinkHello struct {
+	Protocol int    `json:"protocol"`
+	Term     int64  `json:"term"`
+	WorkerID string `json:"worker_id"`
+}
+
+// MachineTokenParams carries the lead's address as the CLI reaches it, used
+// unless machine.address is set.
+type MachineTokenParams struct {
+	Address string `json:"address"`
+}
+
+// MachineTokenResult is a one-time enrollment token and the address to dial.
+type MachineTokenResult struct {
+	Token string `json:"token"`
+	Lead  string `json:"lead"` // host:port
+}
 
 // Handshake is the CLI's and hutchd's protocol and version, exchanged on connecting.
 type Handshake struct {
@@ -239,6 +264,8 @@ type WorkerSettingsParams struct {
 	PeakWindow     time.Duration `json:"peak_window,omitempty"`
 	// PressureStall: memory stalls this long within a second trigger a check at once.
 	PressureStall time.Duration `json:"pressure_stall,omitempty"`
+	// ReconnectMax is the longest wait between a linked worker's reconnects.
+	ReconnectMax time.Duration `json:"reconnect_max,omitempty"`
 }
 
 // NewWorkerSettings is the part of the worker's settings that comes from config.
@@ -246,7 +273,7 @@ func NewWorkerSettings(c *config.Config) WorkerSettingsParams {
 	return WorkerSettingsParams{IdleInterval: c.Duration("idle.check_interval"), ThreadInterval: c.Duration("threads.check_interval"), WorkingWindow: c.Duration("threads.working_window"), RedrawWindow: c.Duration("threads.redraw_window"), EchoWindow: c.Duration("threads.echo_window"),
 		Checkpoint: c.Duration("checkpoint.interval"), FirstCheckpoint: c.Duration("checkpoint.first_after"), ChunkCache: c.Percent("machine.chunk_cache"), Refresh: c.Duration("gc.grace") / 2,
 		Overcommit: c.Float("machine.overcommit"), MemoryHigh: c.Percent("machine.memory_high"), MemoryCritical: c.Percent("machine.memory_critical"),
-		PeakWindow: c.Duration("machine.peak_window"), PressureStall: c.Duration("machine.pressure_stall")}
+		PeakWindow: c.Duration("machine.peak_window"), PressureStall: c.Duration("machine.pressure_stall"), ReconnectMax: c.Duration("machines.reconnect_max")}
 }
 
 // Store places a box's snapshots in the bucket (see worker.Store).
@@ -584,6 +611,10 @@ type Worker struct {
 	Gone        bool `json:"gone,omitempty"` // removed; its boxes restore elsewhere
 	// Draining workers take no new boxes.
 	Draining bool `json:"draining,omitempty"`
+	// Lead is the machine whose hutchd leads; the others are linked workers.
+	Lead bool `json:"lead,omitempty"`
+	// Link is the worker's link protocol, from its hello.
+	Link int `json:"link,omitempty"`
 }
 
 // Disk is a worker's data volume, in bytes.

@@ -25,6 +25,19 @@ CREATE TABLE IF NOT EXISTS workers (
 	created   TIMESTAMP NOT NULL,
 	last_seen TIMESTAMP NOT NULL
 );
+-- The worker link's CA (its key sealed) and the address workers dial.
+CREATE TABLE IF NOT EXISTS link (
+	id      INTEGER PRIMARY KEY CHECK (id = 1),
+	ca_cert BLOB NOT NULL,
+	ca_key  BLOB NOT NULL,
+	address TEXT NOT NULL,
+	term    INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS link_tokens (
+	hash    TEXT PRIMARY KEY,
+	expires TIMESTAMP NOT NULL,
+	used    TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS boxes (
 	id         TEXT PRIMARY KEY,
 	worker_id  TEXT NOT NULL REFERENCES workers(id),
@@ -158,6 +171,7 @@ var migrations = []string{
 	`UPDATE configs SET name = 'machine' WHERE name = 'server'`,
 	`ALTER TABLE box_meta ADD COLUMN image TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE templates ADD COLUMN image TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE workers ADD COLUMN linked INTEGER NOT NULL DEFAULT 0`,
 }
 
 func openStore(path string, userKey durable.Key) (*store, error) {

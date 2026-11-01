@@ -21,7 +21,7 @@ import (
 func setupCommands() []*cobra.Command {
 	machineCmd := &cobra.Command{
 		Use:     "machine",
-		Short:   "Your machine: what it runs and how full it is",
+		Short:   "Your machines: what they run and how full they are",
 		GroupID: "setup",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -38,10 +38,21 @@ func setupCommands() []*cobra.Command {
 			if err != nil {
 				return err
 			}
+			several := 0
+			for _, w := range ws {
+				if !w.Gone {
+					several++
+				}
+			}
+			first := true
 			for _, w := range ws {
 				if w.Gone {
 					continue
 				}
+				if !first {
+					fmt.Println()
+				}
+				first = false
 				awake, total := 0, 0
 				for _, b := range boxes {
 					if b.Worker == w.ID && b.Kind != api.BoxVersion {
@@ -58,13 +69,24 @@ func setupCommands() []*cobra.Command {
 						disk = fmt.Sprintf("%d%% free of %d GB", 100*w.Disk.Free/w.Disk.Total, w.Disk.Total>>30)
 					}
 				}
-				target := machineTarget()
-				if target == "" {
-					target = "this computer"
+				label := w.Name
+				if w.Lead || several == 1 {
+					target := machineTarget()
+					if target == "" {
+						target = "this computer"
+					}
+					label += " (" + target + ")"
+				}
+				rows := [][2]string{{"Machine", label}}
+				if several > 1 {
+					role := "worker"
+					if w.Lead {
+						role = "lead"
+					}
+					rows = append(rows, [2]string{"Role", role})
 				}
 				tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-				for _, r := range [][2]string{
-					{"Machine", w.Name + " (" + target + ")"},
+				for _, r := range append(rows, [][2]string{
 					{"State", state},
 					{"hutchd", w.Version},
 					{"Class", w.Class},
@@ -72,7 +94,7 @@ func setupCommands() []*cobra.Command {
 					{"Memory", fmt.Sprintf("%.1f of %.1f GB reserved by awake boxes", float64(w.ReservedMiB)/1024, float64(w.MemMiB)/1024)},
 					{"Disk", disk},
 					{"Boxes", fmt.Sprintf("%d, %d awake", total, awake)},
-				} {
+				}...) {
 					fmt.Fprintf(tw, "%s\t%s\n", r[0], r[1])
 				}
 				tw.Flush()
@@ -151,7 +173,7 @@ func setupCommands() []*cobra.Command {
 			return enc.Encode(public)
 		},
 	}
-	machineCmd.AddCommand(bucketCmd, gc, upgradeCommand(), restoreCommand(), addComputerCommand(), joinCommand(), identity)
+	machineCmd.AddCommand(machineAddCommand(), machineRmCommand(), bucketCmd, gc, upgradeCommand(), restoreCommand(), addComputerCommand(), joinCommand(), identity)
 	return []*cobra.Command{setupCommand(), machineCmd}
 }
 

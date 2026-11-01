@@ -24,15 +24,24 @@ import (
 	"github.com/mouizahmed/hutch/internal/guestproto"
 	"github.com/mouizahmed/hutch/internal/image"
 	"github.com/mouizahmed/hutch/internal/keys"
+	"github.com/mouizahmed/hutch/internal/link"
 	"github.com/mouizahmed/hutch/internal/rpc"
 	"github.com/mouizahmed/hutch/internal/version"
 	"github.com/mouizahmed/hutch/internal/wire"
 	"github.com/mouizahmed/hutch/internal/worker"
 )
 
-// Run serves the server's calls over conn, the server's end of which is in the
-// same hutchd. Boxes keep running if it closes.
-func Run(ctx context.Context, w *worker.Worker, name string, conn net.Conn) error {
+// Agent serves the lead's calls to the boxes on this machine.
+type Agent struct {
+	m       *monitor
+	mux     rpc.Mux
+	streams rpc.Streams
+	server  atomic.Pointer[yamux.Session]
+}
+
+// Start recovers this machine's boxes and starts watching them. dir is the
+// worker's enrollment when another machine leads, else empty.
+func Start(ctx context.Context, w *worker.Worker, name string, dir link.Dir) *Agent {
 	// A host out-of-memory kill of hutchd would leave boxes unmanaged; kill VMs first.
 	os.WriteFile("/proc/self/oom_score_adj", []byte("-900"), 0)
 	kp := keys.NewProxy()
@@ -40,25 +49,71 @@ func Run(ctx context.Context, w *worker.Worker, name string, conn net.Conn) erro
 	w.Recover(ctx)
 	u := newUploader(w)
 	m := newMonitor(w, u)
+	a := &Agent{m: m}
+	kp.Refreshed = func(ctx context.Context, adapter string, changes []keys.Change) error {
+		sess := a.server.Load()
+		if sess == nil {
+			return errors.New("the lead is unreachable")
+		}
+		return rpc.Call(ctx, sess, api.WorkerKeysRefreshed, api.KeysRefreshedParams{Adapter: adapter, Changes: changes}, nil)
+	}
+	w.OpenKeys()
+	go m.run(ctx, &a.server)
+	go m.watchPressure(ctx)
+	go u.run(ctx)
+	a.mux, a.streams = handlers(w, name, m, u, kp, &image.Builder{Root: w.Root}, dir), streamHandlers(w, m)
+	return a
+}
+
+// Serve serves the lead's calls over conn until it closes. Boxes keep running.
+func (a *Agent) Serve(ctx context.Context, conn net.Conn) error {
 	cfg := yamux.DefaultConfig()
 	cfg.LogOutput = nil
 	cfg.Logger = log.New(log.Writer(), "yamux: ", log.LstdFlags)
 	sess, err := yamux.Server(conn, cfg)
 	if err != nil {
+		conn.Close()
 		return err
 	}
 	defer sess.Close()
-	context.AfterFunc(ctx, func() { sess.Close() })
-	var server atomic.Pointer[yamux.Session]
-	server.Store(sess)
-	kp.Refreshed = func(ctx context.Context, adapter string, changes []keys.Change) error {
-		return rpc.Call(ctx, server.Load(), api.WorkerKeysRefreshed, api.KeysRefreshedParams{Adapter: adapter, Changes: changes}, nil)
+	stop := context.AfterFunc(ctx, func() { sess.Close() })
+	defer stop()
+	a.server.Store(sess)
+	defer a.server.CompareAndSwap(sess, nil)
+	if err := rpc.Serve(ctx, sess, a.mux, a.streams); err != nil {
+		return err
 	}
-	w.OpenKeys()
-	go m.run(ctx, &server)
-	go m.watchPressure(ctx)
-	go u.run(ctx)
-	return rpc.Serve(ctx, sess, handlers(w, name, m, u, kp, &image.Builder{Root: w.Root}), streamHandlers(w, m))
+	return errors.New("connection closed")
+}
+
+// Link keeps a connection to another machine's lead, reconnecting with backoff
+// up to machines.reconnect_max.
+func (a *Agent) Link(ctx context.Context, dir link.Dir) {
+	backoff := time.Second
+	for ctx.Err() == nil {
+		start := time.Now()
+		conn, err := link.Dial(ctx, dir)
+		if err == nil {
+			log.Printf("link: connected to the lead at %s", conn.RemoteAddr())
+			err = a.Serve(ctx, conn)
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if time.Since(start) > time.Minute {
+			backoff = time.Second
+		}
+		log.Printf("link: %v; retrying in %s", err, backoff)
+		select {
+		case <-ctx.Done():
+		case <-time.After(backoff):
+		}
+		limit := 30 * time.Second
+		if p := a.m.settings.Load(); p != nil && p.ReconnectMax > 0 {
+			limit = p.ReconnectMax
+		}
+		backoff = min(backoff*2, limit)
+	}
 }
 
 func toAPI(w *worker.Worker, b *worker.Box) api.Box {
@@ -77,7 +132,7 @@ func toStore(s *api.Store) *worker.Store {
 	return &worker.Store{Project: s.Project, Prefix: s.Prefix}
 }
 
-func handlers(w *worker.Worker, name string, m *monitor, u *uploader, kp *keys.Proxy, images *image.Builder) rpc.Mux {
+func handlers(w *worker.Worker, name string, m *monitor, u *uploader, kp *keys.Proxy, images *image.Builder, dir link.Dir) rpc.Mux {
 	box := func(f func(context.Context, json.RawMessage) (*worker.Box, error)) rpc.Handler {
 		return func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
 			b, err := f(ctx, params)
@@ -141,13 +196,22 @@ func handlers(w *worker.Worker, name string, m *monitor, u *uploader, kp *keys.P
 			}
 			return nil, images.RemoveDiagnostic(p.ID)
 		},
-		api.WorkerHello: func(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any, error) {
+		api.WorkerHello: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+			var p api.LinkHello
+			if err := rpc.Decode(params, &p); err != nil {
+				return nil, err
+			}
+			if dir != "" {
+				if err := link.CheckTerm(dir, p.Term); err != nil {
+					return nil, err
+				}
+			}
 			boxes, err := w.List()
 			if err != nil {
 				return nil, err
 			}
 			info := api.Worker{Name: name, Class: w.Class(), Classes: w.Classes(), Version: version.String(), CPUs: runtime.NumCPU(), MemMiB: hostMemMiB(),
-				Arch: runtime.GOARCH, Disk: diskUsage(w.Root)}
+				Arch: runtime.GOARCH, Disk: diskUsage(w.Root), Link: api.LinkProtocol}
 			for _, b := range boxes {
 				info.Boxes = append(info.Boxes, toAPI(w, b))
 			}

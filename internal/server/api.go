@@ -58,6 +58,7 @@ func (s *Server) apiMux() rpc.Mux {
 		api.DoctorTemplate:   s.doctorTemplate,
 		api.KeysIdentity:     s.keysIdentity,
 		api.WorkerList:       s.workerList,
+		api.MachineToken:     s.machineToken,
 	}
 }
 
@@ -99,6 +100,7 @@ func (s *Server) workerList(ctx context.Context, _ json.RawMessage, _ *rpc.Out) 
 	s.mu.Lock()
 	for i := range ws {
 		ws[i].ReservedMiB = reserved[ws[i].ID]
+		ws[i].Lead = ws[i].ID == s.local
 		if w := s.workers[ws[i].ID]; w != nil {
 			ws[i].Online, ws[i].Disk = true, w.info.Disk
 			if w.memTotal > 0 {

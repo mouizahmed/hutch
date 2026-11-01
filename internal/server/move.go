@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -138,17 +139,22 @@ func (s *Server) workerDrain(ctx context.Context, params json.RawMessage, out *r
 	return nil, nil
 }
 
-// workerRm forgets an offline worker.
-// Its boxes that are in the bucket restore on another worker when used; a worker
-// holding any that aren't is kept.
+// workerRm forgets a worker and revokes its link certificate: an online one
+// only once it holds no boxes. An offline one's boxes that are in the bucket
+// restore on another worker when used; one holding any that aren't is kept.
 func (s *Server) workerRm(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
 	var p api.IDParams
 	if err := rpc.Decode(params, &p); err != nil {
 		return nil, err
 	}
-	if _, err := s.worker(p.ID); err == nil {
-		return nil, fmt.Errorf("%s is online; drain it and stop hutchd first", p.ID)
+	s.mu.Lock()
+	local := s.local
+	s.mu.Unlock()
+	if p.ID == local {
+		return nil, errors.New("that's the lead's own machine: it can't be removed")
 	}
+	_, err := s.worker(p.ID)
+	online := err == nil
 	ws, err := s.store.workers()
 	if err != nil {
 		return nil, err
@@ -165,12 +171,24 @@ func (s *Server) workerRm(ctx context.Context, params json.RawMessage, _ *rpc.Ou
 			if b.Worker != w.ID {
 				continue
 			}
+			if online {
+				return nil, fmt.Errorf("%s still holds %s: move or remove its boxes first", w.Name, b.ID)
+			}
 			if _, err := s.storeOf(b); err != nil {
 				return nil, fmt.Errorf("%s holds %s, which isn't in the bucket; remove it first", w.ID, b.ID)
 			}
 		}
 		s.store.event("", "worker removed", w.Name)
-		return nil, s.store.setWorkerGone(w.ID)
+		if err := s.store.setWorkerGone(w.ID); err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		if c := s.workers[w.ID]; c != nil {
+			c.sess.Close()
+		}
+		s.mu.Unlock()
+		s.wakeLink()
+		return nil, nil
 	}
 	return nil, fmt.Errorf("no worker %s", p.ID)
 }
