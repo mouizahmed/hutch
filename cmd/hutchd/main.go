@@ -303,11 +303,6 @@ func run(ctx context.Context, root, fcVersion, socket string, args []string) err
 	if err != nil {
 		return err
 	}
-	if dir := link.Dir(filepath.Join(root, "link")); dir.Enrolled() {
-		log.Printf("hutchd %s on %s, data in %s: a worker of another machine's lead", version.String(), dir.Name(), root)
-		agent.Start(ctx, w, dir.Name(), dir).Link(ctx, dir)
-		return nil
-	}
 	dir := filepath.Dir(socket)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
@@ -317,6 +312,17 @@ func run(ctx context.Context, root, fcVersion, socket string, args []string) err
 		if err := os.Chown(dir, 0, gid); err != nil {
 			return err
 		}
+	}
+	if ld := link.Dir(filepath.Join(root, "link")); ld.Enrolled() {
+		log.Printf("hutchd %s on %s, data in %s: a worker of another machine's lead", version.String(), ld.Name(), root)
+		a := agent.Start(ctx, w, ld.Name(), ld)
+		go func() {
+			if err := a.ServeCLI(ctx, socket, ld); err != nil {
+				log.Printf("cli: %v", err)
+			}
+		}()
+		a.Link(ctx, ld)
+		return nil
 	}
 	s, err := server.New(server.Config{Dir: filepath.Join(root, "state"), Socket: socket})
 	if err != nil {

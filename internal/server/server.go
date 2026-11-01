@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 	"unicode"
 
@@ -151,43 +150,10 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 }
 
-// listenAPI serves the CLI on a Unix socket open to hutchd's user and its
-// directory's group; CLIs reach it through `ssh <machine> hutchd api`.
+// listenAPI serves the CLI on a Unix socket; CLIs reach it through
+// `ssh <machine> hutchd api`.
 func (s *Server) listenAPI(ctx context.Context) error {
-	path := s.cfg.Socket
-	os.Remove(path)
-	ln, err := net.Listen("unix", path)
-	if err != nil {
-		return err
-	}
-	if err := os.Chmod(path, 0o660); err != nil {
-		return err
-	}
-	if fi, err := os.Stat(filepath.Dir(path)); err == nil {
-		if st, ok := fi.Sys().(*syscall.Stat_t); ok {
-			os.Chown(path, -1, int(st.Gid))
-		}
-	}
-	context.AfterFunc(ctx, func() { ln.Close() })
-	mux := s.apiMux()
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			return err
-		}
-		go func() {
-			sess, err := yamux.Server(conn, yamuxConfig())
-			if err != nil {
-				conn.Close()
-				return
-			}
-			defer sess.Close()
-			rpc.Serve(ctx, sess, mux, s.apiStreams())
-		}()
-	}
+	return rpc.ServeSocket(ctx, s.cfg.Socket, s.apiMux(), s.apiStreams())
 }
 
 func yamuxConfig() *yamux.Config {

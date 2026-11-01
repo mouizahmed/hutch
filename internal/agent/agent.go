@@ -33,6 +33,7 @@ import (
 
 // Agent serves the lead's calls to the boxes on this machine.
 type Agent struct {
+	w       *worker.Worker
 	m       *monitor
 	mux     rpc.Mux
 	streams rpc.Streams
@@ -49,7 +50,7 @@ func Start(ctx context.Context, w *worker.Worker, name string, dir link.Dir) *Ag
 	w.Recover(ctx)
 	u := newUploader(w)
 	m := newMonitor(w, u)
-	a := &Agent{m: m}
+	a := &Agent{w: w, m: m}
 	kp.Refreshed = func(ctx context.Context, adapter string, changes []keys.Change) error {
 		sess := a.server.Load()
 		if sess == nil {

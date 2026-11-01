@@ -70,6 +70,10 @@ func sessionCommands() []*cobra.Command {
 // openShell starts a thread running bash in a box and attaches to it; the thread
 // closes when bash exits.
 func openShell(ctx context.Context, sess *yamux.Session, box string) error {
+	if leadDown {
+		// Terminals are the lead's to number; this one lasts as long as the connection.
+		return terminal(ctx, sess, box, []string{"sh", "-c", "cd /workspace 2>/dev/null; exec bash -l"})
+	}
 	var t api.Thread
 	if err := rpc.Call(ctx, sess, api.ThreadNew, api.ThreadParams{Box: box, Cmd: "bash"}, &t); err != nil {
 		return err

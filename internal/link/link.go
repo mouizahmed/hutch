@@ -46,6 +46,12 @@ func (d Dir) Enrolled() bool {
 	return err == nil
 }
 
+// Lead is the lead's link address, host:port.
+func (d Dir) Lead() string {
+	b, _ := os.ReadFile(d.path("lead"))
+	return strings.TrimSpace(string(b))
+}
+
 func (d Dir) Name() string {
 	b, _ := os.ReadFile(d.path("name"))
 	return strings.TrimSpace(string(b))

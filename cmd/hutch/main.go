@@ -114,8 +114,16 @@ func checkVersion(ctx context.Context, sess *yamux.Session) error {
 	case h.Protocol < api.Protocol:
 		return fmt.Errorf("the machine's hutchd %s is older than hutch %s on this computer: hutch machine upgrade", h.Version, version.String())
 	}
+	if h.LeadDown != "" {
+		leadDown = true
+		fmt.Fprintln(os.Stderr, "warning:", h.LeadDown)
+	}
 	return nil
 }
+
+// leadDown is set when the machine is a worker whose lead is unreachable, which
+// serves only its own boxes.
+var leadDown bool
 
 // connect opens a session to the machine and syncs the user config with it.
 func connect() (*yamux.Session, error) {
@@ -137,6 +145,9 @@ func connectTarget(target string) (*yamux.Session, error) {
 	if err := checkVersion(ctx, sess); err != nil {
 		sess.Close()
 		return nil, err
+	}
+	if leadDown {
+		return sess, nil
 	}
 	if err := syncUserConfig(ctx, sess, target, ""); err != nil {
 		sess.Close()

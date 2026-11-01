@@ -32,7 +32,11 @@ func withServer(f func(ctx context.Context, sess *yamux.Session, args []string) 
 			return err
 		}
 		defer sess.Close()
-		return f(cmd.Context(), sess, args)
+		err = f(cmd.Context(), sess, args)
+		if leadDown && err != nil && strings.Contains(err.Error(), "unknown method") {
+			return errors.New("this needs the lead, which is unreachable")
+		}
+		return err
 	}
 }
 

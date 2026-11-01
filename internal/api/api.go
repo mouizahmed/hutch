@@ -178,6 +178,9 @@ type MachineTokenResult struct {
 type Handshake struct {
 	Protocol int    `json:"protocol"`
 	Version  string `json:"version"`
+	// LeadDown is set by a worker serving its own boxes while its lead is
+	// unreachable, saying so.
+	LeadDown string `json:"lead_down,omitempty"`
 }
 
 // BucketInfo names the machine's bucket, if it has one; never its credentials.
