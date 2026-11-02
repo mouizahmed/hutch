@@ -6,7 +6,7 @@ Settings resolve from defaults, the machine, your user config, the project's `.h
 hutch config explain                   # resolved settings, source, and descriptions
 hutch config get idle_timeout
 hutch config set default_agent codex
-hutch config unset default_agent           # back to the layers below
+hutch config unset default_agent       # back to the layers below
 hutch config edit                      # ~/.config/hutch/config.toml
 hutch config edit --project
 hutch config validate
