@@ -29,6 +29,10 @@ import (
 type Config struct {
 	Dir    string // data directory: hutch.db, master.key, bucket.json
 	Socket string // the API's Unix socket; group members of its directory may use it
+	// Restart restarts hutchd, after a handover; Fence restarts it fenced, when
+	// another machine leads. Nil in tests.
+	Restart func()
+	Fence   func(why string)
 }
 
 type Server struct {
@@ -70,9 +74,13 @@ type Server struct {
 	// machine's; leadMu orders reading and writing the record.
 	superseded atomic.Pointer[link.Record]
 	leadMu     sync.Mutex
+	// gate stops the changing calls, and new placements, during a handover.
+	gate gate
 
 	// keyProxy holds the whole keys table, to sign and refresh for workers' proxies.
 	keyProxy *keys.Proxy
+	// revoked are the logins you were told need hutch login; guarded by mu.
+	revoked map[string]bool
 
 	// linkWake re-checks whether the link port should listen; backupNow backs up
 	// without waiting for backup.interval.
@@ -124,6 +132,7 @@ func New(cfg Config) (*Server, error) {
 	s.keyProxy.Refreshed = func(ctx context.Context, login string, changes []keys.Change) error {
 		return s.keysRefreshed(ctx, api.KeysRefreshedParams{Adapter: login, Changes: changes})
 	}
+	s.keyProxy.Revoked = s.loginRevoked
 	st.onChange = s.changed
 	st.onLogin = func() {
 		select {

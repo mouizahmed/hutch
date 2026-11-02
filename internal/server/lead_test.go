@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -82,6 +83,12 @@ func TestLeadTerms(t *testing.T) {
 	if err := winner.checkLead(ctx); err != nil {
 		t.Fatalf("the highest term's lead: %v", err)
 	}
+	// One just started, before its own worker attaches, steps down as well.
+	old.local = ""
+	fenced := map[*Server]string{}
+	for _, s := range []*Server{old, loser} {
+		s.cfg.Fence = func(why string) { fenced[s] = why }
+	}
 	for _, s := range []*Server{old, loser} {
 		if err := s.checkLead(ctx); !errors.Is(err, errNotLead) {
 			t.Fatalf("a passed lead's check: %v", err)
@@ -95,6 +102,9 @@ func TestLeadTerms(t *testing.T) {
 		if _, err := s.gc(ctx); !errors.Is(err, errNotLead) {
 			t.Fatalf("a passed lead collected garbage: %v", err)
 		}
+	}
+	if len(fenced) != 2 || !strings.Contains(fenced[old], "leads at term") {
+		t.Fatalf("passed leads fenced themselves: %v", fenced)
 	}
 }
 

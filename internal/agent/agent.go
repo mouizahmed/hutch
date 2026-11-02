@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -43,6 +44,9 @@ type Agent struct {
 	// fenced says why this machine was fenced: its boxes stay asleep and its CLI
 	// refuses until it joins a lead again.
 	fenced string
+	dir    link.Dir
+	// Restart restarts hutchd: after taking the lead, it starts leading.
+	Restart func()
 }
 
 // Start recovers this machine's boxes and starts watching them. dir is the
@@ -55,13 +59,27 @@ func Start(ctx context.Context, w *worker.Worker, name string, dir link.Dir) *Ag
 	w.Recover(ctx)
 	u := newUploader(w)
 	m := newMonitor(w, u)
-	a := &Agent{w: w, m: m}
+	a := &Agent{w: w, m: m, dir: dir}
 	kp.Lead = leadKeys{a}
 	w.OpenKeys()
 	go m.run(ctx, &a.server)
 	go m.watchPressure(ctx)
 	go u.run(ctx)
 	a.mux, a.streams = handlers(w, name, m, u, kp, &image.Builder{Root: w.Root}, dir), streamHandlers(w, m)
+	if dir != "" {
+		a.mux[api.WorkerTakeLead] = a.takeLead
+		a.mux[api.WorkerLead] = func(_ context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+			var p api.LeadParams
+			if err := rpc.Decode(params, &p); err != nil {
+				return nil, err
+			}
+			log.Printf("link: the lead moved to %s (term %d)", p.Address, p.Term)
+			if err := link.CheckTerm(dir, p.Term); err != nil {
+				return nil, err
+			}
+			return nil, dir.SetLead(p.Address)
+		}
+	}
 	return a
 }
 
@@ -567,4 +585,37 @@ func (a *Agent) Fence(ctx context.Context, why string) {
 			log.Printf("fenced: %s asleep", b.ID)
 		}
 	}
+}
+
+// takeLead makes this worker the lead: it keeps the database and master key the
+// lead handed over, puts its enrollment aside, and restarts, leading.
+func (a *Agent) takeLead(_ context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+	var p api.TakeLeadParams
+	if err := rpc.Decode(params, &p); err != nil {
+		return nil, err
+	}
+	state := filepath.Join(a.w.Root, "state")
+	if _, err := os.Stat(filepath.Join(state, "hutch.db")); err == nil {
+		return nil, fmt.Errorf("%s already holds lead state", state)
+	}
+	if err := os.MkdirAll(state, 0o700); err != nil {
+		return nil, err
+	}
+	bucket, _ := json.MarshalIndent(p.Bucket, "", "  ")
+	for name, data := range map[string][]byte{"hutch.db": p.DB, "master.key": p.Master, "bucket.json": bucket} {
+		if err := os.WriteFile(filepath.Join(state, name), data, 0o600); err != nil {
+			return nil, err
+		}
+	}
+	aside := filepath.Join(state, "worker-link")
+	os.RemoveAll(aside)
+	if err := os.Rename(string(a.dir), aside); err != nil {
+		return nil, err
+	}
+	os.Remove(filepath.Join(a.w.Root, "fenced"))
+	log.Printf("link: taking the lead; restarting to lead")
+	if a.Restart != nil {
+		time.AfterFunc(time.Second, a.Restart)
+	}
+	return nil, nil
 }

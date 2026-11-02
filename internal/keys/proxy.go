@@ -67,6 +67,9 @@ type Proxy struct {
 	Refreshed func(ctx context.Context, login string, changes []Change) error
 	// Lead, on a worker, signs and refreshes for it.
 	Lead Lead
+	// Revoked is told of a login whose refresh the provider refused outright
+	// (invalid_grant): it needs hutch login.
+	Revoked func(login string)
 
 	mu        sync.Mutex
 	table     Table
@@ -80,6 +83,10 @@ type Proxy struct {
 	// stay applied over whatever older table arrives until it has them.
 	pending    map[string][]Change
 	identities map[[2]string]Token // from the lead, by box and host
+	// busy counts refreshes gone upstream and not yet stored; draining refuses
+	// new ones (a handover).
+	busy     int
+	draining bool
 }
 
 // refreshState is a login's last refresh, answered again within the reuse window.
@@ -542,6 +549,19 @@ func (p *Proxy) refreshed(ctx context.Context, box, hostport string, l Login, r 
 	if st.answer.Body != nil && time.Since(st.at) < reuse && st.refresh == current {
 		return st.answer, nil
 	}
+	p.mu.Lock()
+	if p.draining {
+		p.mu.Unlock()
+		return RefreshAnswer{}, errors.New("the lead is handing over; try again in a minute")
+	}
+	p.busy++
+	p.mu.Unlock()
+	queued := false
+	defer func() {
+		if !queued {
+			p.done()
+		}
+	}()
 	// Only the refresh token becomes real, as sent (JSON or form-encoded).
 	swaps := map[string]string{}
 	for _, ph := range sec.Placeholders {
@@ -583,6 +603,9 @@ func (p *Proxy) refreshed(ctx context.Context, box, hostport string, l Login, r 
 		// A refused refresh (a revoked login) reaches the box, without real
 		// values, and the agent asks to log in again.
 		log.Printf("keys proxy: %s's refresh for %s refused upstream (%d): hutch login %s", l.Name, box, resp.StatusCode, l.Adapter)
+		if p.Revoked != nil && bytes.Contains(data, []byte("invalid_grant")) {
+			p.Revoked(l.Name)
+		}
 		scrub := scrubberOf(append([]Login{l}, p.allLogins()...))
 		h := http.Header{}
 		copyHeader(h, resp.Header)
@@ -596,6 +619,7 @@ func (p *Proxy) refreshed(ctx context.Context, box, hostport string, l Login, r 
 		p.applyPending()
 		p.mu.Unlock()
 		p.queueStore(st, l.Name, changes)
+		queued = true
 	}
 	log.Printf("keys proxy: refreshed %s's login for %s", l.Name, box)
 	data, _ = json.Marshal(m)
@@ -629,6 +653,7 @@ func (p *Proxy) queueStore(st *refreshState, name string, changes []Change) {
 			changes := st.queue[0]
 			st.storeMu.Unlock()
 			p.store(name, changes)
+			p.done()
 			st.storeMu.Lock()
 			st.queue[0] = nil
 			st.queue = st.queue[1:]
@@ -814,4 +839,37 @@ type closeConn struct {
 func (c *closeConn) Close() error {
 	c.once.Do(func() { close(c.done) })
 	return c.Conn.Close()
+}
+
+func (p *Proxy) done() {
+	p.mu.Lock()
+	p.busy--
+	p.mu.Unlock()
+}
+
+// Drain refuses new refreshes and waits until those under way are stored: the
+// provider may already have rotated their tokens. Undrain lets them through again.
+func (p *Proxy) Drain(ctx context.Context) error {
+	p.mu.Lock()
+	p.draining = true
+	p.mu.Unlock()
+	for {
+		p.mu.Lock()
+		busy := p.busy
+		p.mu.Unlock()
+		if busy == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%d login refreshes not stored yet", busy)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+func (p *Proxy) Undrain() {
+	p.mu.Lock()
+	p.draining = false
+	p.mu.Unlock()
 }

@@ -123,6 +123,7 @@ func loginValues(a *agents.Adapter, files []guestproto.File) (map[string]string,
 // changed (a new login) keeps its placeholders, so the copies boxes have stay
 // valid; a JWT gets a new first one, carrying its new claims.
 func (s *Server) syncSecrets(a *agents.Adapter, files []guestproto.File) error {
+	s.loginWorks(a.Name)
 	old, err := s.loginSecrets(a.Name)
 	if err != nil {
 		return err
@@ -399,6 +400,7 @@ func (s *Server) keysRefreshed(ctx context.Context, p api.KeysRefreshedParams) e
 	if err := s.storeRefresh(p); err != nil {
 		return err
 	}
+	s.loginWorks(p.Adapter)
 	// The rotated token must reach every worker even if the call that brought it
 	// is cancelled. Boxes' placeholders still stand for the login, so their files
 	// aren't rewritten.
@@ -471,4 +473,30 @@ if [ "$(cat "$3" 2>/dev/null)" != "$1" ]; then
 fi
 printf '%s' "$2" > "$4"; chmod 644 "$4"`
 	return s.run(ctx, w, box, api.ExecParams{User: "root", Argv: []string{"sh", "-c", script, "sh", strings.TrimSpace(string(cert)), env, keys.CAPath, guestproto.EnvPath}}, io.Discard, io.Discard)
+}
+
+// loginRevoked tells you, once until it works again, that a login's provider
+// refused its refresh: a lead restored from a backup taken before a rotation
+// has a dead refresh token, and so does a login revoked elsewhere.
+func (s *Server) loginRevoked(login string) {
+	s.mu.Lock()
+	if s.revoked == nil {
+		s.revoked = map[string]bool{}
+	}
+	told := s.revoked[login]
+	s.revoked[login] = true
+	s.mu.Unlock()
+	if told {
+		return
+	}
+	msg := fmt.Sprintf("%s's provider refused to refresh its login (invalid_grant): sign in again with hutch login %s", login, login)
+	s.store.event("", "login", msg)
+	s.notify("login", "", "Login needs signing in again", msg)
+}
+
+// loginWorks forgets that a login was refused, once it's refreshed or captured.
+func (s *Server) loginWorks(login string) {
+	s.mu.Lock()
+	delete(s.revoked, login)
+	s.mu.Unlock()
 }

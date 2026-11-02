@@ -25,6 +25,10 @@ func (s *Server) leadLoop(ctx context.Context) {
 		if cfg, err := s.settings(); err == nil {
 			every = cfg.Duration("machines.lead_check")
 		}
+		// A new lead claims its term as soon as its own worker attaches.
+		if l, err := s.store.link(); err == nil && l != nil && l.term == 0 && s.vault.Load() != nil {
+			every = time.Second
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -53,12 +57,6 @@ func (s *Server) checkLead(ctx context.Context) error {
 	if v == nil || l == nil || err != nil {
 		return err
 	}
-	s.mu.Lock()
-	local := s.local
-	s.mu.Unlock()
-	if local == "" {
-		return nil // until this machine's own worker attaches
-	}
 	s.leadMu.Lock()
 	defer s.leadMu.Unlock()
 	cfg, err := s.settings()
@@ -69,6 +67,16 @@ func (s *Server) checkLead(ctx context.Context) error {
 	h, ok, err := link.HighestRecord(ctx, v.bucket, l.ca.Cert)
 	if err != nil {
 		return err
+	}
+	if ok && h.Term > l.term && l.term > 0 {
+		s.stepDown(&h)
+		return notLead(&h)
+	}
+	s.mu.Lock()
+	local := s.local
+	s.mu.Unlock()
+	if local == "" {
+		return nil // until this machine's own worker attaches
 	}
 	mine := link.Record{Term: l.term, Address: addr, WorkerID: local}
 	switch {
@@ -130,6 +138,11 @@ func (s *Server) stepDown(r *link.Record) {
 		}
 	}
 	s.mu.Unlock()
+	// It restarts fenced: its state goes aside, its boxes to sleep, and it
+	// rejoins as a worker when added again.
+	if s.cfg.Fence != nil {
+		s.cfg.Fence(fmt.Sprintf("the machine at %s leads at term %d", r.Address, r.Term))
+	}
 }
 
 func (s *store) setTerm(term int64) error {

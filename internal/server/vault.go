@@ -16,6 +16,7 @@ import (
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/bucket"
 	"github.com/mouizahmed/hutch/internal/durable"
+	"github.com/mouizahmed/hutch/internal/link"
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
@@ -295,7 +296,9 @@ func pruneBackups(ctx context.Context, b bucket.Bucket, now time.Time, keep time
 
 // Restore recovers a server's data directory from its bucket: the master key with
 // the recovery passphrase, then the newest backup. It returns when that backup was taken.
-func Restore(ctx context.Context, dir string, cfg bucket.Config, passphrase string) (time.Time, error) {
+// With address, the machine it restores onto is a worker being promoted:
+// other machines dial it at address.
+func Restore(ctx context.Context, dir string, cfg bucket.Config, passphrase, address string) (time.Time, error) {
 	if _, err := os.Stat(filepath.Join(dir, "hutch.db")); err == nil {
 		return time.Time{}, fmt.Errorf("%s already holds a machine's state", dir)
 	}
@@ -361,6 +364,22 @@ func Restore(ctx context.Context, dir string, cfg bucket.Config, passphrase stri
 	_, err = db.db.Exec(`UPDATE boxes SET state = 'asleep' WHERE state = 'running' AND worker_id IN (SELECT id FROM workers WHERE linked = 0);
 		UPDATE workers SET gone = 1 WHERE linked = 0;
 		UPDATE link SET term = 0`)
+	if err == nil && address != "" {
+		_, err = db.db.Exec(`UPDATE link SET address = ? WHERE id = 1`, address)
+	}
+	// Promoting: the dead lead, which the highest lead record names, was fenced
+	// or is down. It's lost: its boxes come back elsewhere when used, and it
+	// rejoins with hutch machine add.
+	if err == nil && address != "" {
+		var l *linkState
+		if l, err = db.link(); err == nil && l != nil {
+			var r link.Record
+			var ok bool
+			if r, ok, err = link.HighestRecord(ctx, b, l.ca.Cert); err == nil && ok {
+				_, err = db.db.Exec(`UPDATE workers SET gone = 1 WHERE id = ?`, r.WorkerID)
+			}
+		}
+	}
 	db.db.Close()
 	if err != nil {
 		return time.Time{}, err

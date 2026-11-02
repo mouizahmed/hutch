@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mouizahmed/hutch/internal/api"
+	"github.com/mouizahmed/hutch/internal/config"
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
@@ -157,4 +160,152 @@ func sshHostname(target string) string {
 		}
 	}
 	return ""
+}
+
+func machineLeadCommand() *cobra.Command {
+	var fromBackup, down bool
+	c := &cobra.Command{
+		Use:   "lead <machine>",
+		Short: "Make another machine the lead",
+		Long: `Make another machine the lead.
+
+<machine> is a connected worker's name: changes and login refreshes stop for
+seconds, the lead hands it the database and master key, and the old lead
+becomes its worker. Boxes keep running; nothing is lost.
+
+With --from-backup, for a lead that's dead, <machine> is the SSH host of a
+worker to promote: it restores the lead's newest backup from the bucket, with
+your recovery passphrase, and leads. Up to backup.interval of changes can be
+lost. The old lead is fenced over SSH first, so it can't keep leading; if it
+can't be reached, --down confirms it's off or cut off from the bucket and the
+other machines. Its boxes come back elsewhere when used, and it rejoins as a
+worker with hutch machine add.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var host string
+			if fromBackup {
+				host = args[0]
+				if err := promote(cmd, host, down); err != nil {
+					return err
+				}
+			} else {
+				var err error
+				if host, err = handOver(cmd, args[0]); err != nil {
+					return err
+				}
+			}
+			if err := setUserMachine(host); err != nil {
+				return err
+			}
+			fmt.Printf("machine = %q in %s\n", host, config.UserPath())
+			ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
+			defer cancel()
+			for {
+				if sess, err := dialTarget(host); err == nil {
+					var h api.Handshake
+					err = rpc.Call(ctx, sess, api.Hello, api.Handshake{Protocol: api.Protocol}, &h)
+					sess.Close()
+					if err == nil && h.LeadDown == "" {
+						fmt.Printf("  ✓ %s leads\n", host)
+						return nil
+					}
+				}
+				select {
+				case <-ctx.Done():
+					return fmt.Errorf("%s hasn't started leading yet: see journalctl -u hutchd there", host)
+				case <-time.After(2 * time.Second):
+				}
+			}
+		},
+	}
+	c.Flags().BoolVar(&fromBackup, "from-backup", false, "the lead is dead: promote <machine> (its SSH host) from the bucket's newest backup")
+	c.Flags().BoolVar(&down, "down", false, "with --from-backup: go on when the old lead can't be fenced over SSH, as it's off")
+	return c
+}
+
+// handOver asks the lead to hand over to the named worker, and returns the SSH
+// host to reach it at.
+func handOver(cmd *cobra.Command, name string) (string, error) {
+	sess, err := connect()
+	if err != nil {
+		return "", err
+	}
+	defer sess.Close()
+	var ws []api.Worker
+	if err := rpc.Call(cmd.Context(), sess, api.WorkerList, struct{}{}, &ws); err != nil {
+		return "", err
+	}
+	i := slices.IndexFunc(ws, func(w api.Worker) bool { return w.Name == name && !w.Gone })
+	if i < 0 {
+		return "", fmt.Errorf("no machine named %s", name)
+	}
+	w := ws[i]
+	host := cmp.Or(w.SSH, w.Name)
+	addr := sshHostname(host)
+	if addr == "" {
+		return "", fmt.Errorf("can't tell %s's address from its SSH host %s", w.Name, host)
+	}
+	fmt.Printf("Handing the lead to %s (%s)...\n", w.Name, addr)
+	if err := rpc.CallOutput(cmd.Context(), sess, api.MachineLead, api.MachineLeadParams{ID: w.ID, Address: addr, Self: machineTarget()}, nil, os.Stdout, os.Stderr); err != nil {
+		return "", err
+	}
+	return host, nil
+}
+
+// promote makes the worker at host the lead from the bucket's newest backup,
+// after fencing the old lead.
+func promote(cmd *cobra.Command, host string, down bool) error {
+	old := machineTarget()
+	if old != "" && old != host {
+		fmt.Printf("Fencing the old lead over SSH (%s)...\n", old)
+		out, err := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", old,
+			"sudo hutchd fence "+shellQuote("hutch machine lead --from-backup made "+host+" the lead")).CombinedOutput()
+		switch {
+		case err == nil:
+			fmt.Println("  ✓ fenced: it restarted with its boxes asleep and its state aside")
+		case !down:
+			return fmt.Errorf("can't fence the old lead %s over SSH (%v: %s).\nIf it's off or cut off from the bucket and the other machines, run this again with --down; if it still leads, there'd be two leads until it reads the new lead record", old, err, strings.TrimSpace(string(out)))
+		default:
+			fmt.Printf("  ! not fenced (%v); going on, as you said it's down\n", err)
+		}
+	}
+	addr := sshHostname(host)
+	if addr == "" {
+		return fmt.Errorf("can't tell %s's address", host)
+	}
+	cfg, pass, err := recoverBucket()
+	if err != nil {
+		return err
+	}
+	body, _ := json.Marshal(api.ServerInitParams{Bucket: cfg, Passphrase: pass, Address: addr})
+	fmt.Printf("Restoring the newest backup onto %s...\n", host)
+	c := exec.Command("ssh", "-o", "BatchMode=yes", host, "sudo hutchd restore && sudo systemctl restart hutchd")
+	var out bytes.Buffer
+	c.Stdin, c.Stdout, c.Stderr = bytes.NewReader(body), &out, &out
+	if err := c.Run(); err != nil {
+		return fmt.Errorf("restore on %s: %v: %s", host, err, strings.TrimSpace(out.String()))
+	}
+	fmt.Print("  ✓ " + out.String())
+	return nil
+}
+
+func forgetStaleCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "forget-stale <ssh-host>",
+		Short: "Delete the lead state an old lead kept aside, once you've checked the new lead",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			out, err := exec.Command("ssh", "-o", "BatchMode=yes", args[0],
+				`sudo sh -c 'ls -d /var/lib/hutch/state/stale-lead-* 2>/dev/null && rm -rf /var/lib/hutch/state/stale-lead-*; true'`).CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("ssh %s: %v: %s", args[0], err, out)
+			}
+			if len(bytes.TrimSpace(out)) == 0 {
+				fmt.Printf("%s keeps no old lead state.\n", args[0])
+				return nil
+			}
+			fmt.Printf("Deleted on %s:\n%s", args[0], out)
+			return nil
+		},
+	}
 }

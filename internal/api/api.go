@@ -95,6 +95,10 @@ const (
 	KeysIdentity   = "keys.identity"   // public box identity verification keys
 	WorkerDoctor   = "worker.doctor"   // hutchd only
 	MachineToken   = "machine.token"   // a one-time token for hutch machine add
+	MachineLead    = "machine.lead"    // hand the lead to another machine
+	// The lead hands another machine the lead, and tells the rest where it is.
+	WorkerTakeLead = "worker.take_lead"
+	WorkerLead     = "worker.lead"
 )
 
 // Check is one hutch doctor result: Status ok, warn, or fail, with a fix for the others.
@@ -166,6 +170,28 @@ type MachineTokenParams struct {
 	SSH     string `json:"ssh,omitempty"` // the SSH host of the machine being added
 }
 
+type MachineLeadParams struct {
+	ID      string `json:"id"`
+	Address string `json:"address"` // the host workers dial to reach it
+	// Self is the SSH host the CLI reaches the current lead at, kept for when
+	// the lead is handed back to it.
+	Self string `json:"self,omitempty"`
+}
+
+// TakeLeadParams is what a lead hands over: its database, as it stood when
+// changes stopped, the master key, and the bucket.
+type TakeLeadParams struct {
+	DB     []byte        `json:"db"`
+	Master []byte        `json:"master"`
+	Bucket bucket.Config `json:"bucket"`
+}
+
+// LeadParams points a worker at a new lead's link address and term.
+type LeadParams struct {
+	Address string `json:"address"`
+	Term    int64  `json:"term"`
+}
+
 type MachineRmParams struct {
 	ID string `json:"id"`
 	// Lost: the machine is gone. Its boxes come back elsewhere from the bucket.
@@ -200,6 +226,9 @@ const MinPassphrase = 12
 type ServerInitParams struct {
 	Bucket     bucket.Config `json:"bucket"`
 	Passphrase string        `json:"passphrase"`
+	// Address, when restoring onto a worker to promote it: the host other
+	// machines dial to reach it as their lead.
+	Address string `json:"address,omitempty"`
 }
 
 type GCResult struct {

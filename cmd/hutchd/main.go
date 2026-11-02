@@ -94,9 +94,20 @@ func dispatch(ctx context.Context, root, fcVersion, socket string, args []string
 		if err := json.NewDecoder(os.Stdin).Decode(&p); err != nil {
 			return fmt.Errorf("restore: read the bucket and passphrase: %w", err)
 		}
-		at, err := server.Restore(ctx, filepath.Join(root, "state"), p.Bucket, p.Passphrase)
+		at, err := server.Restore(ctx, filepath.Join(root, "state"), p.Bucket, p.Passphrase, p.Address)
 		if err != nil {
 			return err
+		}
+		// A worker promoted to lead: its enrollment goes aside.
+		if p.Address != "" {
+			if ld := filepath.Join(root, "link"); link.Dir(ld).Enrolled() {
+				aside := filepath.Join(root, "state", "worker-link")
+				os.RemoveAll(aside)
+				if err := os.Rename(ld, aside); err != nil {
+					return err
+				}
+			}
+			os.Remove(filepath.Join(root, "fenced"))
 		}
 		fmt.Printf("restored the backup from %s\n", at.Local().Format(time.DateTime))
 		return nil
@@ -297,6 +308,10 @@ func buildImage(ctx context.Context, root string, args []string) error {
 func run(ctx context.Context, root, fcVersion, socket string, args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	host, _ := os.Hostname()
+	// A worker that became the lead keeps the name it was added with.
+	if b, err := os.ReadFile(filepath.Join(root, "state", "worker-link", "name")); err == nil {
+		host = strings.TrimSpace(string(b))
+	}
 	name := fs.String("name", host, "this machine's name")
 	fs.Parse(args[1:])
 	id, err := workerID(root)
@@ -317,12 +332,15 @@ func run(ctx context.Context, root, fcVersion, socket string, args []string) err
 			return err
 		}
 	}
+	fenced, ferr := os.ReadFile(filepath.Join(root, "fenced"))
+	why := strings.TrimSpace(string(fenced))
 	if ld := link.Dir(filepath.Join(root, "link")); ld.Enrolled() {
 		log.Printf("hutchd %s on %s, data in %s: a worker of another machine's lead", version.String(), ld.Name(), root)
 		a := agent.Start(ctx, w, ld.Name(), ld)
-		if why, err := os.ReadFile(filepath.Join(root, "fenced")); err == nil {
-			log.Printf("fenced: %s", strings.TrimSpace(string(why)))
-			a.Fence(ctx, strings.TrimSpace(string(why)))
+		a.Restart = restart
+		if ferr == nil {
+			log.Printf("fenced: %s", why)
+			a.Fence(ctx, why)
 		}
 		go func() {
 			if err := a.ServeCLI(ctx, socket, ld); err != nil {
@@ -332,7 +350,19 @@ func run(ctx context.Context, root, fcVersion, socket string, args []string) err
 		a.Link(ctx, ld)
 		return nil
 	}
-	s, err := server.New(server.Config{Dir: filepath.Join(root, "state"), Socket: socket})
+	// A fenced lead: another machine leads in its place. Its state goes aside,
+	// never deleted, and its boxes sleep until it's added as a worker.
+	if ferr == nil {
+		log.Printf("hutchd %s on %s: fenced: %s; its boxes stay asleep until hutch machine add makes it a worker", version.String(), *name, why)
+		if err := server.SetAside(filepath.Join(root, "state")); err != nil {
+			return err
+		}
+		a := agent.Start(ctx, w, *name, "")
+		a.Fence(ctx, why)
+		return a.ServeCLI(ctx, socket, "")
+	}
+	s, err := server.New(server.Config{Dir: filepath.Join(root, "state"), Socket: socket, Restart: restart,
+		Fence: func(why string) { writeFenced(root, why); restart() }})
 	if err != nil {
 		return err
 	}
@@ -405,7 +435,7 @@ func fence(root string, args []string) error {
 	if len(args) > 1 {
 		why = strings.Join(args[1:], " ")
 	}
-	if err := os.WriteFile(filepath.Join(root, "fenced"), []byte(why+"\n"), 0o600); err != nil {
+	if err := writeFenced(root, why); err != nil {
 		return err
 	}
 	exec.Command("systemctl", "kill", "--kill-whom=main", "--signal=SIGKILL", "hutchd").Run()
@@ -414,4 +444,16 @@ func fence(root string, args []string) error {
 	}
 	fmt.Println("fenced:", why)
 	return nil
+}
+
+func writeFenced(root, why string) error {
+	return os.WriteFile(filepath.Join(root, "fenced"), []byte(why+"\n"), 0o600)
+}
+
+// restart restarts hutchd from within it: systemd stops this process, and the
+// boxes' VMs live on.
+func restart() {
+	if out, err := exec.Command("systemctl", "--no-block", "restart", "hutchd").CombinedOutput(); err != nil {
+		log.Printf("restart hutchd: %v: %s", err, out)
+	}
 }

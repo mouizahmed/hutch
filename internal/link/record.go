@@ -126,11 +126,7 @@ func follow(ctx context.Context, d Dir, b bucket.Bucket) (bool, error) {
 	if err != nil || !ok || r.Term < d.Term() || r.Address == d.Lead() {
 		return false, err
 	}
-	tmp := d.path("lead.tmp")
-	if err := os.WriteFile(tmp, []byte(r.Address+"\n"), 0o600); err != nil {
-		return false, err
-	}
-	return true, os.Rename(tmp, d.path("lead"))
+	return true, d.SetLead(r.Address)
 }
 
 // Term is the highest lead term this worker has seen.

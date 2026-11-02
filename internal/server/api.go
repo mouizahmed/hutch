@@ -14,7 +14,8 @@ import (
 )
 
 func (s *Server) apiMux() rpc.Mux {
-	return rpc.Mux{
+	mux := rpc.Mux{
+		api.MachineLead:      s.machineLead,
 		api.BoxList:          s.boxList,
 		api.BoxBoot:          s.boxBoot,
 		api.BoxFork:          s.boxFork,
@@ -60,6 +61,8 @@ func (s *Server) apiMux() rpc.Mux {
 		api.WorkerList:       s.workerList,
 		api.MachineToken:     s.machineToken,
 	}
+	s.gated(mux)
+	return mux
 }
 
 func (s *Server) boxList(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any, error) {

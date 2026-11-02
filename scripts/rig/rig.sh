@@ -7,7 +7,8 @@
 #   rig.sh up       create, or start, everything; SSH aliases rig-lead, rig-w1, rig-w2
 #   rig.sh stop     stop the instances (their disks are kept)
 #   rig.sh down     terminate the instances, delete the groups, empty and delete the bucket
-#   rig.sh bucket   give the lead the rig's bucket (after hutch setup)
+#   rig.sh bucket   give the lead the rig's bucket (after hutch setup), and
+#                   save its recovery details; rig.sh bucket --recovery, only those
 #   rig.sh hutch …  the hutch CLI with the rig's own config; yours is untouched
 #
 # Needs the aws CLI with EC2 and S3 rights, RIG_KEY_NAME (an EC2 key pair) and
@@ -22,7 +23,7 @@ ec2() { aws ec2 --region "$region" "$@"; }
 
 declare -A type=([lead]=m8i.large [w1]=m8i.large [w2]=m8a.large)
 declare -A nested=([lead]=enabled [w1]=enabled [w2]=)
-declare -A group=([lead]=hutch-rig-lead [w1]=hutch-rig-closed [w2]=hutch-rig-closed)
+declare -A group=([lead]=hutch-rig-lead [w1]=hutch-rig-lead [w2]=hutch-rig-closed)
 
 instance() {
   ec2 describe-instances --filters "Name=tag:Name,Values=hutch-rig-$1" Name=instance-state-name,Values=pending,running,stopping,stopped \
@@ -135,7 +136,7 @@ case ${1:-} in
       --arg ak "$(aws configure get aws_access_key_id)" --arg sk "$(aws configure get aws_secret_access_key)" \
       --arg pass "$(cat "$dir/passphrase")" \
       '{bucket: {name: $name, region: $region, access_key: $ak, secret_key: $sk}, passphrase: $pass}' |
-      go run ./scripts/rig/bucket rig-lead
+      XDG_CONFIG_HOME=$dir/config go run ./scripts/rig/bucket "${2:-rig-lead}"
     ;;
   hutch)
     shift

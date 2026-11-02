@@ -108,19 +108,33 @@ func Enroll(ctx context.Context, d Dir, lead, token, name string) (string, error
 	if resp.Error != "" {
 		return "", errors.New(resp.Error)
 	}
+	return resp.WorkerID, Write(d, keyPEM, resp.Cert, resp.CA, name, lead)
+}
+
+// Write records an enrollment: the worker's key and certificate, the CA, its
+// name, and the lead's address, which goes last: it marks the enrollment complete.
+func Write(d Dir, keyPEM, cert, ca []byte, name, lead string) error {
 	if err := os.MkdirAll(string(d), 0o700); err != nil {
-		return "", err
+		return err
 	}
-	// lead goes last: it marks the enrollment complete.
 	for _, f := range []struct {
 		name string
 		data []byte
-	}{{"key.pem", keyPEM}, {"cert.pem", resp.Cert}, {"ca.pem", resp.CA}, {"name", []byte(name + "\n")}, {"lead", []byte(lead + "\n")}} {
+	}{{"key.pem", keyPEM}, {"cert.pem", cert}, {"ca.pem", ca}, {"name", []byte(name + "\n")}, {"lead", []byte(lead + "\n")}} {
 		if err := os.WriteFile(d.path(f.name), f.data, 0o600); err != nil {
-			return "", err
+			return err
 		}
 	}
-	return resp.WorkerID, nil
+	return nil
+}
+
+// SetLead points the worker at another lead's address.
+func (d Dir) SetLead(addr string) error {
+	tmp := d.path("lead.tmp")
+	if err := os.WriteFile(tmp, []byte(addr+"\n"), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, d.path("lead"))
 }
 
 // Dial connects to the lead with the worker's certificate.

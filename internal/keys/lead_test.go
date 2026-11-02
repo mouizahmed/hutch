@@ -156,3 +156,62 @@ func TestRefreshThroughLead(t *testing.T) {
 		t.Fatalf("upstream refreshed %d times, want 2", n)
 	}
 }
+
+// A handover drains refreshes: one under way is stored before the drain ends,
+// a new one is refused, and the provider refusing a login outright is told.
+func TestDrainAndRevoked(t *testing.T) {
+	var refused bool
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if refused {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"invalid_grant"}`))
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"access_token": "at-REAL-new-0123456789012345678901", "refresh_token": "rt-REAL-new-0123456789012345678901"})
+	}))
+	defer upstream.Close()
+	p, client := proxied(t, Table{Grants: map[string][]string{"box": {"agent"}},
+		Logins: []Login{refreshLogin("https://auth.example/oauth/token")}}, upstream, "auth.example")
+	release := make(chan struct{})
+	p.Refreshed = func(context.Context, string, []Change) error {
+		<-release
+		return nil
+	}
+	var revoked []string
+	p.Revoked = func(login string) { revoked = append(revoked, login) }
+	refresh := func() int {
+		t.Helper()
+		r, _ := http.NewRequest(http.MethodPost, "https://auth.example/oauth/token", strings.NewReader(`{"grant_type":"refresh_token","refresh_token":"rt-hutch-refresh"}`))
+		r.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if code := refresh(); code != http.StatusOK {
+		t.Fatalf("refresh: %d", code)
+	}
+	drained := make(chan error)
+	go func() { drained <- p.Drain(context.Background()) }()
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case err := <-drained:
+		t.Fatalf("the drain ended before the refresh was stored: %v", err)
+	default:
+	}
+	if code := refresh(); code != http.StatusBadGateway {
+		t.Fatalf("a refresh while draining: %d", code)
+	}
+	close(release)
+	if err := <-drained; err != nil {
+		t.Fatal(err)
+	}
+	p.Undrain()
+	refused = true
+	if code := refresh(); code != http.StatusBadRequest || len(revoked) != 1 || revoked[0] != "agent" {
+		t.Fatalf("a refused refresh: %d, revoked %v", code, revoked)
+	}
+}

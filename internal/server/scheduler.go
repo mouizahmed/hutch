@@ -108,6 +108,9 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 	if r := s.superseded.Load(); r != nil {
 		return nil, nil, notLead(r)
 	}
+	if closed, _ := s.gate.state(); closed {
+		return nil, nil, errors.New("this machine is handing the lead to another")
+	}
 	ws, err := s.store.workers()
 	if err != nil {
 		return nil, nil, err

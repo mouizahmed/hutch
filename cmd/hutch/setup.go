@@ -173,7 +173,7 @@ func setupCommands() []*cobra.Command {
 			return enc.Encode(public)
 		},
 	}
-	machineCmd.AddCommand(machineAddCommand(), machineRmCommand(), bucketCmd, gc, upgradeCommand(), restoreCommand(), addComputerCommand(), joinCommand(), identity)
+	machineCmd.AddCommand(machineAddCommand(), machineRmCommand(), machineLeadCommand(), forgetStaleCommand(), bucketCmd, gc, upgradeCommand(), restoreCommand(), addComputerCommand(), joinCommand(), identity)
 	return []*cobra.Command{setupCommand(), machineCmd}
 }
 
