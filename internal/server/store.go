@@ -189,6 +189,8 @@ var migrations = []string{
 	`ALTER TABLE workers ADD COLUMN linked INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE box_meta ADD COLUMN uid TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE box_meta ADD COLUMN owner TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE link_tokens ADD COLUMN ssh TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE workers ADD COLUMN ssh TEXT NOT NULL DEFAULT ''`,
 }
 
 func openStore(path string, userKey durable.Key) (*store, error) {
@@ -254,7 +256,7 @@ func (s *store) workerSeen(id string, w api.Worker) error {
 }
 
 func (s *store) workers() ([]api.Worker, error) {
-	rows, err := s.db.Query(`SELECT id, name, class, version, last_seen, cpus, mem_mib, arch, disk_bytes, gone, draining FROM workers ORDER BY created`)
+	rows, err := s.db.Query(`SELECT id, name, class, version, last_seen, cpus, mem_mib, arch, disk_bytes, gone, draining, ssh FROM workers ORDER BY created`)
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +264,7 @@ func (s *store) workers() ([]api.Worker, error) {
 	var ws []api.Worker
 	for rows.Next() {
 		var w api.Worker
-		if err := rows.Scan(&w.ID, &w.Name, &w.Class, &w.Version, &w.LastSeen, &w.CPUs, &w.MemMiB, &w.Arch, &w.Disk.Total, &w.Gone, &w.Draining); err != nil {
+		if err := rows.Scan(&w.ID, &w.Name, &w.Class, &w.Version, &w.LastSeen, &w.CPUs, &w.MemMiB, &w.Arch, &w.Disk.Total, &w.Gone, &w.Draining, &w.SSH); err != nil {
 			return nil, err
 		}
 		ws = append(ws, w)

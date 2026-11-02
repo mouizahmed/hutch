@@ -262,6 +262,9 @@ func (s *Server) attach(ctx context.Context, id, name string, conn net.Conn, lin
 	s.store.workerSeen(id, info)
 	s.changed()
 	log.Printf("worker %s disconnected", id)
+	if linked {
+		s.notifyLost(id, info.Name)
+	}
 }
 
 func randomHex(n int) string {
@@ -494,4 +497,25 @@ func threadTitle(b api.Box, t api.ThreadState) string {
 		title = string(r[:79]) + "…"
 	}
 	return title
+}
+
+// notifyLost tells you, once, when a worker stays unreachable for
+// machines.lost_notify_after. Its boxes are never restored elsewhere without
+// you: it may be cut off from this machine only, still running them.
+func (s *Server) notifyLost(id, name string) {
+	after := 5 * time.Minute
+	if cfg, err := s.settings(); err == nil {
+		after = cfg.Duration("machines.lost_notify_after")
+	}
+	time.AfterFunc(after, func() {
+		s.mu.Lock()
+		back := s.workers[id] != nil
+		s.mu.Unlock()
+		if lost, err := s.workerLost(id); back || err != nil || lost {
+			return
+		}
+		msg := fmt.Sprintf("%s has been unreachable for %s. If it's gone for good, hutch machine rm --lost %s brings its boxes back elsewhere from the bucket; if it's only cut off, they're still running there", name, after, name)
+		s.store.event("", "unreachable", msg)
+		s.notify("unreachable", "", "Machine unreachable", msg)
+	})
 }

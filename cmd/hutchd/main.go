@@ -14,6 +14,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"os/user"
 	"path/filepath"
@@ -47,6 +48,7 @@ commands:
   box status <id>                                        print what hutch-guest reports (threads, sessions, ports)
   image build [--pin REF@DIGEST]... <name> [<dir>]       build an image from the Dockerfile in a directory (none: the default image)
   run [--name NAME]                                      run the machine: boxes, their state, and the API
+  fence [<why>]                                          stop this machine acting on its own: restart hutchd with its boxes asleep
   join --lead HOST:PORT --token TOKEN --name NAME        join another machine's lead as a worker (hutch machine add runs it)
   api                                                    bridge stdio to the API (what ssh <machine> hutchd api runs)
   restore                                                recover the state from a bucket: {"bucket": ..., "passphrase": ...} on stdin
@@ -85,6 +87,8 @@ func dispatch(ctx context.Context, root, fcVersion, socket string, args []string
 		return run(ctx, root, fcVersion, socket, args)
 	case "join":
 		return join(ctx, root, args)
+	case "fence":
+		return fence(root, args)
 	case "restore":
 		var p api.ServerInitParams
 		if err := json.NewDecoder(os.Stdin).Decode(&p); err != nil {
@@ -316,6 +320,10 @@ func run(ctx context.Context, root, fcVersion, socket string, args []string) err
 	if ld := link.Dir(filepath.Join(root, "link")); ld.Enrolled() {
 		log.Printf("hutchd %s on %s, data in %s: a worker of another machine's lead", version.String(), ld.Name(), root)
 		a := agent.Start(ctx, w, ld.Name(), ld)
+		if why, err := os.ReadFile(filepath.Join(root, "fenced")); err == nil {
+			log.Printf("fenced: %s", strings.TrimSpace(string(why)))
+			a.Fence(ctx, strings.TrimSpace(string(why)))
+		}
 		go func() {
 			if err := a.ServeCLI(ctx, socket, ld); err != nil {
 				log.Printf("cli: %v", err)
@@ -369,6 +377,10 @@ func join(ctx context.Context, root string, args []string) error {
 	if err := os.WriteFile(filepath.Join(root, "worker-id"), []byte(id+"\n"), 0o600); err != nil {
 		return err
 	}
+	// The lead it joins decides about its boxes from now on.
+	if err := os.Remove(filepath.Join(root, "fenced")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	fmt.Printf("joined %s as %s\n", *lead, id)
 	return nil
 }
@@ -383,4 +395,23 @@ func workerID(root string) (string, error) {
 	rand.Read(b)
 	id := "w-" + hex.EncodeToString(b)
 	return id, os.WriteFile(path, []byte(id+"\n"), 0o600)
+}
+
+// fence stops this machine acting on its own, as another takes its boxes: it
+// records why, kills the running hutchd (SIGKILL works on a paused one too; the
+// boxes' VMs live on), and starts it again fenced, which puts every box to sleep.
+func fence(root string, args []string) error {
+	why := "another machine took over its boxes"
+	if len(args) > 1 {
+		why = strings.Join(args[1:], " ")
+	}
+	if err := os.WriteFile(filepath.Join(root, "fenced"), []byte(why+"\n"), 0o600); err != nil {
+		return err
+	}
+	exec.Command("systemctl", "kill", "--kill-whom=main", "--signal=SIGKILL", "hutchd").Run()
+	if out, err := exec.Command("systemctl", "restart", "hutchd").CombinedOutput(); err != nil {
+		return fmt.Errorf("restart hutchd: %v: %s", err, out)
+	}
+	fmt.Println("fenced:", why)
+	return nil
 }

@@ -54,7 +54,7 @@ func TestLinkEnrollAndRevoke(t *testing.T) {
 	lead := addr.String()
 	token := func(expires time.Time) string {
 		secret := randomHex(24)
-		if err := s.store.addToken(secret, expires); err != nil {
+		if err := s.store.addToken(secret, expires, ""); err != nil {
 			t.Fatal(err)
 		}
 		s.mu.Lock()

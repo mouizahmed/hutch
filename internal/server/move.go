@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mouizahmed/hutch/internal/api"
+	"github.com/mouizahmed/hutch/internal/durable"
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
@@ -127,13 +128,13 @@ func (s *Server) waitStored(ctx context.Context, store *api.Store, gen int, time
 	}
 }
 
-// workerRm forgets a worker and revokes its link certificate. An online one is
+// workerRm forgets a worker and revokes its link certificate. A connected one is
 // drained first: each box moves to another machine (warm within its class, cold
-// across), and one that can't stops the drain where it is. An offline one's
-// boxes that are in the bucket restore on another worker when used; one holding
-// any that aren't is kept.
+// across), and one that can't stops the drain where it is. A lost one (the CLI
+// fenced it first, or you said it's down) has its boxes come back elsewhere from
+// the bucket.
 func (s *Server) workerRm(ctx context.Context, params json.RawMessage, out *rpc.Out) (any, error) {
-	var p api.IDParams
+	var p api.MachineRmParams
 	if err := rpc.Decode(params, &p); err != nil {
 		return nil, err
 	}
@@ -152,19 +153,19 @@ func (s *Server) workerRm(ctx context.Context, params json.RawMessage, out *rpc.
 		return nil, fmt.Errorf("no worker %s", p.ID)
 	}
 	w := ws[i]
-	if _, err := s.worker(w.ID); err == nil {
+	_, err = s.worker(w.ID)
+	switch online := err == nil; {
+	case online && p.Lost:
+		return nil, fmt.Errorf("%s is connected, so it isn't lost: hutch machine rm %s moves its boxes off it", w.Name, w.Name)
+	case online:
 		if err := s.drain(ctx, w, out); err != nil {
 			return nil, err
 		}
-	} else {
-		boxes, err := s.store.boxes()
-		if err != nil {
+	case !p.Lost:
+		return nil, fmt.Errorf("%s is offline, so its boxes can't move off it: wait for it, or if it's gone for good, hutch machine rm --lost %s brings them back elsewhere from the bucket", w.Name, w.Name)
+	default:
+		if err := s.lose(ctx, w, out); err != nil {
 			return nil, err
-		}
-		for _, b := range boxes {
-			if _, err := s.storeOf(b); b.Worker == w.ID && err != nil {
-				return nil, fmt.Errorf("%s holds %s, which isn't in the bucket; remove it first", w.Name, b.ID)
-			}
 		}
 	}
 	s.store.event("", "worker removed", w.Name)
@@ -335,4 +336,74 @@ func (s *Server) relieve(w *workerConn) {
 	msg := fmt.Sprintf("%s moved %s from %s to %s: memory pressure", pick.ID, r.Kind, r.From, r.To)
 	s.store.event(pick.ID, "moved", msg)
 	s.notify("moved", pick.ID, "Box moved", msg)
+}
+
+// lose gives up a lost worker's boxes. Each in the bucket comes back elsewhere
+// from its newest snapshot, at a raised ownership number: the awake ones at
+// once, the rest when used. One never uploaded is forgotten here; its only copy
+// is on that machine, and returns as <box>-returned if the machine is added again.
+func (s *Server) lose(ctx context.Context, w api.Worker, out *rpc.Out) error {
+	stdout, _ := out.Writers()
+	boxes, err := s.store.boxes()
+	if err != nil {
+		return err
+	}
+	var wake []string
+	for _, b := range boxes {
+		if b.Worker != w.ID {
+			continue
+		}
+		if b.Kind == api.BoxVersion {
+			continue // other machines copy it from the bucket
+		}
+		store, err := s.storeOf(b)
+		var at time.Time
+		if err == nil {
+			at, err = s.snapshotTime(ctx, store)
+		}
+		if err != nil {
+			if err := s.store.deleteBox(b.ID, "lost with "+w.Name); err != nil {
+				return err
+			}
+			fmt.Fprintf(stdout, "%s: lost, it never reached the bucket; its only copy is on %s\n", b.ID, w.Name)
+			continue
+		}
+		age := time.Since(at).Round(time.Second)
+		if b.State == "running" {
+			wake = append(wake, b.ID)
+			fmt.Fprintf(stdout, "%s: back elsewhere now, from its snapshot of %s ago (work since then is lost)\n", b.ID, age)
+		} else {
+			fmt.Fprintf(stdout, "%s: back elsewhere when you use it, from its snapshot of %s ago\n", b.ID, age)
+		}
+		b.State = "asleep"
+		if err := s.store.putBox(b); err != nil {
+			return err
+		}
+		s.store.event(b.ID, "lost", fmt.Sprintf("%s was lost; restored from the bucket when used, from its snapshot of %s ago", w.Name, age))
+	}
+	if err := s.store.setWorkerGone(w.ID); err != nil {
+		return err
+	}
+	for _, id := range wake {
+		go func() {
+			if _, err := s.awake(context.WithoutCancel(ctx), id); err != nil {
+				log.Printf("%s: restore after %s was lost: %v", id, w.Name, err)
+			}
+		}()
+	}
+	return nil
+}
+
+// snapshotTime is when the newest snapshot of a box in the bucket was written.
+func (s *Server) snapshotTime(ctx context.Context, store *api.Store) (time.Time, error) {
+	owner, gen, err := s.latestSnapshot(ctx, store)
+	if err != nil {
+		return time.Time{}, err
+	}
+	v := s.vault.Load()
+	if v == nil {
+		return time.Time{}, errNoBucket
+	}
+	o, err := v.bucket.Head(ctx, durable.ManifestName(store.Prefix, owner, gen))
+	return o.Modified, err
 }

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -70,17 +71,20 @@ func (s *Server) boxList(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (an
 	if err != nil {
 		return nil, err
 	}
-	names := map[string]string{}
+	names, lost := map[string]string{}, map[string]string{}
 	for _, w := range ws {
 		if !w.Gone {
 			names[w.ID] = w.Name
+		} else {
+			// Its boxes restore on another machine when used.
+			lost[w.ID] = w.Name + " (lost)"
 		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := range boxes {
 		if len(names) > 1 {
-			boxes[i].Machine = names[boxes[i].Worker]
+			boxes[i].Machine = cmp.Or(names[boxes[i].Worker], lost[boxes[i].Worker])
 		}
 		// A sleeping box's threads keep their last titles, without live states.
 		if boxes[i].State != "running" {

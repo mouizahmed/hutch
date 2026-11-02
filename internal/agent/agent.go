@@ -40,6 +40,9 @@ type Agent struct {
 	mux     rpc.Mux
 	streams rpc.Streams
 	server  atomic.Pointer[yamux.Session]
+	// fenced says why this machine was fenced: its boxes stay asleep and its CLI
+	// refuses until it joins a lead again.
+	fenced string
 }
 
 // Start recovers this machine's boxes and starts watching them. dir is the
@@ -543,4 +546,25 @@ func (l leadKeys) Refresh(ctx context.Context, c keys.RefreshCall) (keys.Refresh
 	var a keys.RefreshAnswer
 	err := l.call(ctx, api.WorkerKeysRefresh, c, &a)
 	return a, err
+}
+
+// Fence puts every running box to sleep and keeps this machine from acting on
+// its own: another machine has its boxes now, or leads in its place.
+func (a *Agent) Fence(ctx context.Context, why string) {
+	a.fenced = why
+	bs, err := a.w.List()
+	if err != nil {
+		log.Printf("fenced: %v", err)
+		return
+	}
+	for _, b := range bs {
+		if b.State != worker.Running {
+			continue
+		}
+		if _, err := a.w.Sleep(ctx, b.ID); err != nil {
+			log.Printf("fenced: sleep %s: %v", b.ID, err)
+		} else {
+			log.Printf("fenced: %s asleep", b.ID)
+		}
+	}
 }

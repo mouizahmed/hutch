@@ -29,6 +29,11 @@ func (s *Server) workerLost(id string) (bool, error) {
 	return true, nil
 }
 
+func (s *Server) lostWorker(id string) bool {
+	lost, err := s.workerLost(id)
+	return err == nil && lost
+}
+
 // boxWorker returns the worker that has a box. When that worker has been lost,
 // the box is restored on another one from its newest snapshot in the bucket.
 func (s *Server) boxWorker(ctx context.Context, b api.Box) (*workerConn, api.Box, error) {
@@ -146,7 +151,10 @@ func (s *Server) reconcile(ctx context.Context, w *workerConn, boxes []api.Box) 
 		case err == nil && known.Kind != "":
 			keep = append(keep, b)
 			continue
-		case err == nil && (known.Worker == w.id && !durable.OwnerLess(b.Owner, known.Owner) || durable.OwnerLess(known.Owner, b.Owner)):
+		case err == nil && (known.Worker == w.id && !durable.OwnerLess(b.Owner, known.Owner) || durable.OwnerLess(known.Owner, b.Owner) ||
+			b.Owner == known.Owner && s.lostWorker(known.Worker)):
+			// The last case: a lost machine added again before its box was
+			// restored elsewhere has the box, with work the bucket may lack.
 			if b.Owner != known.Owner {
 				s.store.setOwner(b.ID, b.Owner)
 			}

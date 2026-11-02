@@ -1,10 +1,12 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
@@ -39,7 +41,7 @@ its own. Several machines need a bucket.`,
 				name = strings.TrimSpace(string(out))
 			}
 			var tok api.MachineTokenResult
-			if err := rpc.Call(cmd.Context(), sess, api.MachineToken, api.MachineTokenParams{Address: sshHostname(machineTarget())}, &tok); err != nil {
+			if err := rpc.Call(cmd.Context(), sess, api.MachineToken, api.MachineTokenParams{Address: sshHostname(machineTarget()), SSH: host}, &tok); err != nil {
 				return err
 			}
 			r, p, a, st, err := prepare(cmd.Context(), host, f)
@@ -85,10 +87,20 @@ its own. Several machines need a bucket.`,
 }
 
 func machineRmCommand() *cobra.Command {
-	return &cobra.Command{
+	var lost, down bool
+	c := &cobra.Command{
 		Use:   "rm <name>",
 		Short: "Move a machine's boxes to the others, then remove it; it's refused from then on",
-		Args:  cobra.ExactArgs(1),
+		Long: `Move a machine's boxes to the others, then remove it; it's refused from then on.
+
+With --lost, for a machine that's gone: its boxes come back elsewhere from their
+newest snapshots in the bucket (work since then is lost). First the machine is
+fenced over SSH, so it can't keep running its copies: its hutchd restarts with
+every box asleep. If it can't be reached, --down confirms it's off or cut off
+from the bucket and the other machines (stopped, unplugged, firewalled); Hutch
+can't check that for you, and a machine that's still running its boxes would
+keep two copies of each working.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sess, err := connect()
 			if err != nil {
@@ -99,18 +111,35 @@ func machineRmCommand() *cobra.Command {
 			if err := rpc.Call(cmd.Context(), sess, api.WorkerList, struct{}{}, &ws); err != nil {
 				return err
 			}
-			for _, w := range ws {
-				if w.Name == args[0] && !w.Gone {
-					if err := rpc.CallOutput(cmd.Context(), sess, api.WorkerRm, api.IDParams{ID: w.ID}, nil, os.Stdout, os.Stderr); err != nil {
-						return err
-					}
-					fmt.Printf("Removed %s; its hutchd can't connect again.\n", w.Name)
-					return nil
+			i := slices.IndexFunc(ws, func(w api.Worker) bool { return w.Name == args[0] && !w.Gone })
+			if i < 0 {
+				return fmt.Errorf("no machine named %s", args[0])
+			}
+			w := ws[i]
+			if lost && !w.Online {
+				host := cmp.Or(w.SSH, w.Name)
+				fmt.Printf("Fencing %s over SSH (%s)...\n", w.Name, host)
+				out, err := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host,
+					"sudo hutchd fence "+shellQuote("hutch machine rm --lost took its boxes")).CombinedOutput()
+				switch {
+				case err == nil:
+					fmt.Printf("  ✓ fenced: its hutchd restarted with every box asleep\n")
+				case !down:
+					return fmt.Errorf("can't fence %s over SSH (%v: %s).\nIf it's off or cut off from the bucket and the other machines, run this again with --down; if it's still running its boxes, they'd have two working copies", w.Name, err, strings.TrimSpace(string(out)))
+				default:
+					fmt.Printf("  ! not fenced (%v); going on, as you said it's down\n", err)
 				}
 			}
-			return fmt.Errorf("no machine named %s", args[0])
+			if err := rpc.CallOutput(cmd.Context(), sess, api.WorkerRm, api.MachineRmParams{ID: w.ID, Lost: lost}, nil, os.Stdout, os.Stderr); err != nil {
+				return err
+			}
+			fmt.Printf("Removed %s; its hutchd can't connect again.\n", w.Name)
+			return nil
 		},
 	}
+	c.Flags().BoolVar(&lost, "lost", false, "the machine is gone: bring its boxes back elsewhere from the bucket")
+	c.Flags().BoolVar(&down, "down", false, "with --lost: go on when the machine can't be fenced over SSH, as it's off")
+	return c
 }
 
 // sshHostname is the host an SSH target connects to, as another machine dials it.

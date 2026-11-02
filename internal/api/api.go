@@ -163,6 +163,13 @@ type LinkHello struct {
 // unless machine.address is set.
 type MachineTokenParams struct {
 	Address string `json:"address"`
+	SSH     string `json:"ssh,omitempty"` // the SSH host of the machine being added
+}
+
+type MachineRmParams struct {
+	ID string `json:"id"`
+	// Lost: the machine is gone. Its boxes come back elsewhere from the bucket.
+	Lost bool `json:"lost,omitempty"`
 }
 
 // MachineTokenResult is a one-time enrollment token and the address to dial.
@@ -638,6 +645,8 @@ type Worker struct {
 	Lead bool `json:"lead,omitempty"`
 	// Link is the worker's link protocol, from its hello.
 	Link int `json:"link,omitempty"`
+	// SSH is the host it was added with, which a fence reaches it through.
+	SSH string `json:"ssh,omitempty"`
 }
 
 // Disk is a worker's data volume, in bytes.

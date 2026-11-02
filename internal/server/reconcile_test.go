@@ -59,7 +59,7 @@ func TestReconcile(t *testing.T) {
 		},
 	}, nil)
 
-	for _, id := range []string{"w-old", "w-new"} {
+	for _, id := range []string{"w-old", "w-new", "w-lost"} {
 		if err := s.store.ensureWorker(id, id); err != nil {
 			t.Fatal(err)
 		}
@@ -78,6 +78,10 @@ func TestReconcile(t *testing.T) {
 	known("missed", "w-new", "1.4") // moved here in a minute the lead's backup missed
 	known("stale", "w-new", "1.9")  // moved away while w-old was cut off
 	known("behind", "w-old", "1.7") // placed here again since this copy
+	known("held", "w-lost", "1.8")  // its machine was lost, and is added again before it was restored
+	if err := s.store.setWorkerGone("w-lost"); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.store.recordDeleted("b-gone", "1.2", time.Hour); err != nil {
 		t.Fatal(err)
 	}
@@ -86,6 +90,7 @@ func TestReconcile(t *testing.T) {
 		{ID: "missed", State: "asleep", Owner: "2.1", Project: "p", UID: "b-missed"},
 		{ID: "stale", State: "running", Owner: "1.5", Project: "p", UID: "b-stale"},
 		{ID: "behind", State: "asleep", Owner: "1.6", Project: "p", UID: "b-behind"},
+		{ID: "held", State: "asleep", Owner: "1.8", Project: "p", UID: "b-held"},
 		{ID: "gone", State: "asleep", Owner: "1.2", Project: "p", UID: "b-gone"},
 		{ID: "unknown", State: "asleep", Owner: "2.2", Project: "p", UID: "b-unknown"},
 	}
@@ -108,6 +113,7 @@ func TestReconcile(t *testing.T) {
 		"gone-returned":   "w-old ",
 		"behind-returned": "w-old ",
 		"unknown":         "w-old 2.2",
+		"held":            "w-old 1.8",
 	} {
 		if where[id] != want {
 			t.Errorf("%s: %q, want %q", id, where[id], want)

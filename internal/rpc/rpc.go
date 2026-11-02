@@ -56,8 +56,12 @@ func (o *Out) send(f Frame) error {
 func (o *Out) Stdout(b []byte) error { return o.send(Frame{Type: FrameStdout, Data: b}) }
 func (o *Out) Stderr(b []byte) error { return o.send(Frame{Type: FrameStderr, Data: b}) }
 
-// Writers adapts Out to io.Writers for stdout and stderr.
+// Writers adapts Out to io.Writers for stdout and stderr; a nil Out (a handler
+// called directly) discards.
 func (o *Out) Writers() (stdout, stderr io.Writer) {
+	if o == nil {
+		return io.Discard, io.Discard
+	}
 	return writerFunc(o.Stdout), writerFunc(o.Stderr)
 }
 

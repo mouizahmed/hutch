@@ -139,6 +139,8 @@ var Keys = []*Key{
 		Doc: "a silent worker gets no new boxes or wakes after this"},
 	{Path: "machines.reconnect_max", Kind: Duration, Default: "30s", Min: "1s", Max: "1h", Layers: machine,
 		Doc: "longest wait between a worker's reconnect attempts"},
+	{Path: "machines.lost_notify_after", Kind: Duration, Default: "5m", Min: "10s", Max: "7d", Layers: machine,
+		Doc: "you're notified, with hutch machine rm --lost, when a worker stays unreachable this long; its boxes are never restored elsewhere without that"},
 	{Path: "machines.lead_check", Kind: Duration, Default: "30s", Min: "5s", Max: "1h", Layers: machine,
 		Doc: "how often the lead, and a worker without one, read the lead record in the bucket"},
 	{Path: "machines.enroll_ttl", Kind: Duration, Default: "15m", Min: "1m", Max: "24h", Layers: machine,

@@ -73,4 +73,10 @@ func TestWorkerRefusesCLIWhileLinked(t *testing.T) {
 	if err := rpc.Call(ctx, sess, api.BoxFork, api.ForkParams{ID: "x"}, nil); err == nil || !strings.Contains(err.Error(), "unknown method") {
 		t.Errorf("a lead-only call: %v", err)
 	}
+	// A fenced worker refuses too, with its lead gone.
+	ag.server.Store(nil)
+	ag.fenced = "another machine took over its boxes"
+	if err := rpc.Call(ctx, sess, api.BoxWake, api.IDParams{ID: "box"}, nil); err == nil || !strings.Contains(err.Error(), "fenced") {
+		t.Errorf("a fenced worker's wake: %v", err)
+	}
 }

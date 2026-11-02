@@ -80,26 +80,30 @@ func (s *store) ensureLink(address string) (*linkState, error) {
 	return l, nil
 }
 
-func (s *store) addToken(secret string, expires time.Time) error {
-	_, err := s.exec(`INSERT INTO link_tokens (hash, expires) VALUES (?, ?)`, hashSecret(secret), expires.UTC())
+// addToken records an enrollment token, and the SSH host the machine it's for
+// was added with, which hutch machine rm --lost fences it through.
+func (s *store) addToken(secret string, expires time.Time, ssh string) error {
+	_, err := s.exec(`INSERT INTO link_tokens (hash, expires, ssh) VALUES (?, ?, ?)`, hashSecret(secret), expires.UTC(), ssh)
 	return err
 }
 
-// useToken marks a token used; each enrolls one worker, before it expires.
-func (s *store) useToken(secret string) error {
-	res, err := s.exec(`UPDATE link_tokens SET used = ? WHERE hash = ? AND used IS NULL AND expires > ?`,
-		time.Now().UTC(), hashSecret(secret), time.Now().UTC())
-	if err != nil {
-		return err
+// useToken marks a token used, and returns its SSH host; each token enrolls one
+// worker, before it expires.
+func (s *store) useToken(secret string) (string, error) {
+	var ssh string
+	err := s.db.QueryRow(`UPDATE link_tokens SET used = ? WHERE hash = ? AND used IS NULL AND expires > ? RETURNING ssh`,
+		time.Now().UTC(), hashSecret(secret), time.Now().UTC()).Scan(&ssh)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", errors.New("invalid, expired, or already used token: run hutch machine add again")
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return errors.New("invalid, expired, or already used token: run hutch machine add again")
+	if err == nil {
+		s.changed()
 	}
-	return nil
+	return ssh, err
 }
 
 // enrollWorker records a new linked worker, refusing a name another machine has.
-func (s *store) enrollWorker(id, name string) error {
+func (s *store) enrollWorker(id, name, ssh string) error {
 	var n int
 	if err := s.db.QueryRow(`SELECT count(*) FROM workers WHERE name = ? AND gone = 0`, name).Scan(&n); err != nil {
 		return err
@@ -108,7 +112,7 @@ func (s *store) enrollWorker(id, name string) error {
 		return fmt.Errorf("a machine named %s is already added: choose another with --name", name)
 	}
 	now := time.Now().UTC()
-	_, err := s.exec(`INSERT INTO workers (id, name, created, last_seen, linked) VALUES (?, ?, ?, ?, 1)`, id, name, now, now)
+	_, err := s.exec(`INSERT INTO workers (id, name, created, last_seen, linked, ssh) VALUES (?, ?, ?, ?, 1, ?)`, id, name, now, now, ssh)
 	return err
 }
 
@@ -151,7 +155,7 @@ func (s *Server) machineToken(ctx context.Context, params json.RawMessage, _ *rp
 		return nil, err
 	}
 	secret := randomHex(24)
-	if err := s.store.addToken(secret, time.Now().Add(c.Duration("machines.enroll_ttl"))); err != nil {
+	if err := s.store.addToken(secret, time.Now().Add(c.Duration("machines.enroll_ttl")), p.SSH); err != nil {
 		return nil, err
 	}
 	s.wakeLink()
@@ -309,7 +313,8 @@ func (s *Server) enroll(conn net.Conn) {
 		if err != nil || l == nil {
 			return link.EnrollResponse{Error: "the lead has no link CA"}
 		}
-		if err := s.store.useToken(req.Secret); err != nil {
+		ssh, err := s.store.useToken(req.Secret)
+		if err != nil {
 			return link.EnrollResponse{Error: err.Error()}
 		}
 		id := "w-" + randomHex(6)
@@ -317,7 +322,7 @@ func (s *Server) enroll(conn net.Conn) {
 		if err != nil {
 			return link.EnrollResponse{Error: err.Error()}
 		}
-		if err := s.store.enrollWorker(id, req.Name); err != nil {
+		if err := s.store.enrollWorker(id, req.Name, ssh); err != nil {
 			return link.EnrollResponse{Error: err.Error()}
 		}
 		s.store.event("", "machine added", req.Name)
