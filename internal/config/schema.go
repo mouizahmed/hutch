@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"github.com/BurntSushi/toml"
 	"math"
 	"slices"
 	"strconv"
@@ -349,7 +350,7 @@ func cmp[T int64 | time.Duration | float64](a, b T) int {
 }
 
 // FromString turns a command-line value into the raw form a TOML file would hold.
-// Lists are comma-separated.
+// Lists are comma-separated, or written as TOML arrays.
 func (k *Key) FromString(s string) (any, error) {
 	switch k.Kind {
 	case Bool:
@@ -359,6 +360,13 @@ func (k *Key) FromString(s string) (any, error) {
 	case Float:
 		return strconv.ParseFloat(s, 64)
 	case List:
+		if t := strings.TrimSpace(s); strings.HasPrefix(t, "[") {
+			var m map[string]any
+			if _, err := toml.Decode("v = "+t, &m); err != nil {
+				return nil, fmt.Errorf("invalid list %s", t)
+			}
+			return m["v"], nil
+		}
 		items := []any{}
 		for _, it := range strings.Split(s, ",") {
 			if it = strings.TrimSpace(it); it != "" {

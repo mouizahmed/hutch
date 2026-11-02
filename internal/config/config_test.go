@@ -176,3 +176,21 @@ func TestNormalizeRemote(t *testing.T) {
 		}
 	}
 }
+
+// A list given as a TOML array is that list, not one item holding it.
+func TestListFromString(t *testing.T) {
+	k := Lookup([]string{"keys", "identity_hosts"})
+	for _, in := range []string{`["a.example", "b.example"]`, "a.example, b.example"} {
+		raw, err := k.FromString(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		v, err := k.Parse(raw)
+		if got, ok := v.([]string); err != nil || !ok || len(got) != 2 || got[0] != "a.example" || got[1] != "b.example" {
+			t.Errorf("%s: %#v %v", in, v, err)
+		}
+	}
+	if _, err := k.FromString(`["a.example"`); err == nil {
+		t.Error("an unclosed array was accepted")
+	}
+}

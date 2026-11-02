@@ -487,6 +487,33 @@ func configCommands() *cobra.Command {
 	}
 	setLayer.register(set)
 
+	var unsetLayer layerFlags
+	unset := &cobra.Command{
+		Use:   "unset <key>",
+		Short: "Remove a setting from one layer, so the layers below it apply",
+		Args:  cobra.ExactArgs(1),
+		RunE: withServer(func(ctx context.Context, sess *yamux.Session, args []string) error {
+			path, err := config.SplitPath(args[0])
+			if err != nil {
+				return err
+			}
+			k := config.Lookup(path)
+			if k == nil {
+				return fmt.Errorf("unknown key %s", args[0])
+			}
+			if args[0] == "machine" {
+				return errors.New("machine says where the machine is: change it with hutch config set machine")
+			}
+			if unsetLayer.on != "" && !strings.HasPrefix(k.Path, "machine.") {
+				return fmt.Errorf("%s is the same on every machine: unset it with --machine, not --on", args[0])
+			}
+			return editLayer(ctx, sess, unsetLayer.layer(k), unsetLayer.on, func(text []byte) ([]byte, error) {
+				return config.Remove(text, path)
+			})
+		}),
+	}
+	unsetLayer.register(unset)
+
 	var editFlags layerFlags
 	var projectFlags formFlags
 	edit := &cobra.Command{
@@ -646,7 +673,7 @@ func configCommands() *cobra.Command {
 	syncCmd.Flags().BoolVar(&theirs, "theirs", false, "replace this computer's copy with the machine's")
 	syncCmd.MarkFlagsMutuallyExclusive("mine", "theirs")
 
-	cfgCmd.AddCommand(get, set, edit, explain, validate, grants, syncCmd)
+	cfgCmd.AddCommand(get, set, unset, edit, explain, validate, grants, syncCmd)
 	return cfgCmd
 }
 
