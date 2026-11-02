@@ -105,6 +105,9 @@ func better(a, b candidate, n need) bool {
 // there until release, so boxes placed at the same time don't all land on the one
 // worker that had room for one of them.
 func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
+	if r := s.superseded.Load(); r != nil {
+		return nil, nil, notLead(r)
+	}
 	ws, err := s.store.workers()
 	if err != nil {
 		return nil, nil, err

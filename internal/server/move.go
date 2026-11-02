@@ -94,7 +94,7 @@ func (s *Server) move(ctx context.Context, id string, o moveOpts, stdout, stderr
 		return r, err
 	}
 	if err := rpc.Call(ctx, src.sess, api.BoxRm, api.IDParams{ID: id}, nil); err != nil {
-		fmt.Fprintf(stderr, "warning: removing the old copy on %s: %v (it's removed when that machine reconnects)\n", src.info.Name, err)
+		fmt.Fprintf(stderr, "warning: removing the old copy on %s: %v (it's kept asleep as %s-returned when that machine reconnects)\n", src.info.Name, err, id)
 	}
 	r = api.MoveResult{From: src.info.Name, To: w.info.Name, Kind: "warm"}
 	if nb.State == "archived" {

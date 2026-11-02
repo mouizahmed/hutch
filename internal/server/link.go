@@ -271,6 +271,12 @@ func (s *Server) handleLink(ctx context.Context, conn *tls.Conn) {
 	}
 	conn.SetDeadline(time.Time{})
 	id := peers[0].Subject.CommonName
+	// Workers take a lead's hello only at a term it has claimed and still holds.
+	if l, err := s.store.link(); s.superseded.Load() != nil || err != nil || l == nil || l.term == 0 {
+		log.Printf("link: refused %s from %s: this machine doesn't lead at a term", id, conn.RemoteAddr())
+		conn.Close()
+		return
+	}
 	name, ok := s.store.linkedWorker(id)
 	if !ok {
 		log.Printf("link: refused %s from %s: removed", id, conn.RemoteAddr())

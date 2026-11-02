@@ -279,6 +279,8 @@ type WorkerSettingsParams struct {
 	PressureStall time.Duration `json:"pressure_stall,omitempty"`
 	// ReconnectMax is the longest wait between a linked worker's reconnects.
 	ReconnectMax time.Duration `json:"reconnect_max,omitempty"`
+	// LeadCheck is how often a worker without its lead reads the lead record.
+	LeadCheck time.Duration `json:"lead_check,omitempty"`
 }
 
 // NewWorkerSettings is the part of the worker's settings that comes from config.
@@ -286,7 +288,8 @@ func NewWorkerSettings(c *config.Config) WorkerSettingsParams {
 	return WorkerSettingsParams{IdleInterval: c.Duration("idle.check_interval"), ThreadInterval: c.Duration("threads.check_interval"), WorkingWindow: c.Duration("threads.working_window"), RedrawWindow: c.Duration("threads.redraw_window"), EchoWindow: c.Duration("threads.echo_window"),
 		Checkpoint: c.Duration("checkpoint.interval"), FirstCheckpoint: c.Duration("checkpoint.first_after"), ChunkCache: c.Percent("machine.chunk_cache"), Refresh: c.Duration("gc.grace") / 2,
 		Overcommit: c.Float("machine.overcommit"), MemoryHigh: c.Percent("machine.memory_high"), MemoryCritical: c.Percent("machine.memory_critical"),
-		PeakWindow: c.Duration("machine.peak_window"), PressureStall: c.Duration("machine.pressure_stall"), ReconnectMax: c.Duration("machines.reconnect_max")}
+		PeakWindow: c.Duration("machine.peak_window"), PressureStall: c.Duration("machine.pressure_stall"), ReconnectMax: c.Duration("machines.reconnect_max"),
+		LeadCheck: c.Duration("machines.lead_check")}
 }
 
 // Store places a box's snapshots in the bucket (see worker.Store).

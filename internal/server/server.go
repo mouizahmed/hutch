@@ -22,6 +22,7 @@ import (
 	"github.com/mouizahmed/hutch/internal/durable"
 	"github.com/mouizahmed/hutch/internal/guestproto"
 	"github.com/mouizahmed/hutch/internal/keys"
+	"github.com/mouizahmed/hutch/internal/link"
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
@@ -65,6 +66,11 @@ type Server struct {
 
 	// keysMu orders changes to the keys proxy's state and the pushes of its table.
 	keysMu sync.Mutex
+	// superseded is the lead record of a higher term, once one replaced this
+	// machine's; leadMu orders reading and writing the record.
+	superseded atomic.Pointer[link.Record]
+	leadMu     sync.Mutex
+
 	// keyProxy holds the whole keys table, to sign and refresh for workers' proxies.
 	keyProxy *keys.Proxy
 
@@ -151,6 +157,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.archiveLoop(ctx)
 	go s.maxAwakeLoop(ctx)
 	go s.linkLoop(ctx)
+	go s.leadLoop(ctx)
 	select {
 	case <-ctx.Done():
 		return nil
@@ -225,7 +232,7 @@ func (s *Server) attach(ctx context.Context, id, name string, conn net.Conn, lin
 	// Busy until its first report says what it has left to upload.
 	w := &workerConn{id: id, sess: sess, info: info, projects: map[string]bool{}, uploading: 1}
 	var copies []string
-	info.Boxes, copies = s.dropStale(ctx, w, info.Boxes)
+	info.Boxes, copies = s.reconcile(ctx, w, info.Boxes)
 	if err := s.store.syncWorkerBoxes(id, info.Boxes, copies); err != nil {
 		log.Printf("worker %s: sync boxes: %v", id, err)
 	}

@@ -154,8 +154,7 @@ func Dial(ctx context.Context, d Dir) (net.Conn, error) {
 // CheckTerm refuses a lead whose term is below the highest this worker has
 // seen, and records a higher one.
 func CheckTerm(d Dir, term int64) error {
-	b, _ := os.ReadFile(d.path("term"))
-	seen, _ := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	seen := d.Term()
 	if term < seen {
 		return fmt.Errorf("refusing a lead at term %d: this worker has seen term %d", term, seen)
 	}

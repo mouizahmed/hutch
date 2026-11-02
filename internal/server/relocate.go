@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/mouizahmed/hutch/internal/api"
+	"github.com/mouizahmed/hutch/internal/durable"
+	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
 // workerLost reports whether a worker is gone: removed, or a machine this one
@@ -108,30 +111,100 @@ func (s *Server) storeOf(b api.Box) (*api.Store, error) {
 	return s.boxStore(b.Project, uid, b.Owner), nil
 }
 
-// dropStale removes from a reconnecting worker the boxes that moved to another
-// worker, or were removed, while it was gone. It returns the rest of its boxes, and
-// separately the template versions it holds copies of.
-func (s *Server) dropStale(ctx context.Context, w *workerConn, boxes []api.Box) (keep []api.Box, copies []string) {
+// reconcile compares a reconnecting worker's boxes with what the lead knows, by
+// ownership number. Its copy of a box is the box when the lead has it there at
+// that number, or at a lower one (a move the lead's database missed), and is
+// adopted when the lead has never heard of it. A copy that lost to a higher
+// number elsewhere, or of a box that was removed, is stale: it's kept asleep as
+// a new box, <name>-returned, never deleted. It returns the boxes to record, and
+// separately the template versions the worker holds copies of.
+func (s *Server) reconcile(ctx context.Context, w *workerConn, boxes []api.Box) (keep []api.Box, copies []string) {
 	for _, b := range boxes {
 		known, err := s.store.box(b.ID)
 		if err == nil && known.Worker != w.id && known.Kind == api.BoxVersion {
 			copies = append(copies, b.ID)
 			continue
 		}
-		if err != nil && s.store.removed(b.ID) {
-			known.Worker = "nowhere: it was removed"
-		} else if err != nil || known.Worker == w.id {
+		deleted := false
+		if b.UID != "" {
+			_, deleted = s.store.deleted(b.UID)
+		}
+		switch {
+		case err != nil && !deleted && !s.store.removed(b.ID):
+			if b.Project != "" {
+				b.Worker = w.id
+				if err := s.store.putBox(b); err != nil {
+					log.Printf("worker %s: adopt %s: %v", w.id, b.ID, err)
+					continue
+				}
+				s.store.putMeta(b.ID, boxMeta{project: b.Project, uid: b.UID})
+				s.store.setOwner(b.ID, b.Owner)
+			}
+			s.store.event(b.ID, "adopted", fmt.Sprintf("%s reported it and the lead had no record of it", w.info.Name))
+			keep = append(keep, b)
+			continue
+		case err == nil && known.Kind != "":
+			keep = append(keep, b)
+			continue
+		case err == nil && (known.Worker == w.id && !durable.OwnerLess(b.Owner, known.Owner) || durable.OwnerLess(known.Owner, b.Owner)):
+			if b.Owner != known.Owner {
+				s.store.setOwner(b.ID, b.Owner)
+			}
 			keep = append(keep, b)
 			continue
 		}
-		if err := rpcCall(ctx, w, api.BoxRm, api.IDParams{ID: b.ID}); err != nil {
-			log.Printf("worker %s: remove stale %s: %v", w.id, b.ID, err)
+		why := "it was removed"
+		if err == nil {
+			why = fmt.Sprintf("the box is on %s at a higher ownership number", known.Worker)
+		}
+		r, rerr := s.returned(ctx, w, b)
+		if rerr != nil {
+			log.Printf("worker %s: keep stale %s: %v", w.id, b.ID, rerr)
 			continue
 		}
-		s.store.event(b.ID, "stale", fmt.Sprintf("removed the old copy on %s; the box is on %s", w.id, known.Worker))
-		log.Printf("worker %s: removed stale copy of %s (now on %s)", w.id, b.ID, known.Worker)
+		keep = append(keep, r)
+		msg := fmt.Sprintf("%s had an older copy of %s (%s); it's kept asleep as %s", w.info.Name, b.ID, why, r.ID)
+		s.store.event(r.ID, "returned", msg)
+		s.notify("returned", r.ID, "Old copy kept", msg)
 	}
 	return keep, copies
+}
+
+// returned puts a worker's stale copy of a box to sleep under a name of its own,
+// with its own place in the bucket, so it never writes over the box.
+func (s *Server) returned(ctx context.Context, w *workerConn, b api.Box) (api.Box, error) {
+	if b.State == "running" || b.State == "crashed" {
+		if err := rpcCall(ctx, w, api.BoxSleep, api.IDParams{ID: b.ID}); err != nil {
+			return b, err
+		}
+	}
+	name := b.ID + "-returned"
+	for i := 2; ; i++ {
+		if _, err := s.store.box(name); err != nil && !slices.ContainsFunc(w.info.Boxes, func(o api.Box) bool { return o.ID == name }) {
+			break
+		}
+		name = fmt.Sprintf("%s-returned-%d", b.ID, i)
+	}
+	p := api.RenameParams{ID: b.ID, NewID: name}
+	uid := ""
+	if b.Project != "" {
+		uid = "b-" + randomHex(8)
+		p.Store = s.boxStore(b.Project, uid, "")
+	}
+	var nb api.Box
+	if err := rpc.Call(ctx, w.sess, api.BoxRename, p, &nb); err != nil {
+		return b, err
+	}
+	nb.Worker = w.id
+	if err := s.store.putBox(nb); err != nil {
+		return nb, err
+	}
+	if b.Project != "" {
+		if err := s.store.putMeta(name, boxMeta{project: b.Project, uid: uid}); err != nil {
+			return nb, err
+		}
+	}
+	return nb, nil
 }
 
 // archiveLoop archives boxes asleep for longer than archive_after: their memory is

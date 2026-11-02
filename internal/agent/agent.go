@@ -4,6 +4,7 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -85,6 +87,7 @@ func (a *Agent) Serve(ctx context.Context, conn net.Conn) error {
 // up to machines.reconnect_max.
 func (a *Agent) Link(ctx context.Context, dir link.Dir) {
 	backoff := time.Second
+	var followed time.Time
 	for ctx.Err() == nil {
 		start := time.Now()
 		conn, err := link.Dial(ctx, dir)
@@ -103,9 +106,20 @@ func (a *Agent) Link(ctx context.Context, dir link.Dir) {
 		case <-ctx.Done():
 		case <-time.After(backoff):
 		}
-		limit := 30 * time.Second
+		limit, every := 30*time.Second, 30*time.Second
 		if p := a.m.settings.Load(); p != nil && p.ReconnectMax > 0 {
-			limit = p.ReconnectMax
+			limit, every = p.ReconnectMax, cmp.Or(p.LeadCheck, every)
+		}
+		// Without its lead, a worker follows the lead record to a newer one.
+		if time.Since(followed) >= every {
+			followed = time.Now()
+			if moved, err := dir.Follow(ctx); err != nil {
+				log.Printf("link: reading the lead record: %v", err)
+			} else if moved {
+				log.Printf("link: the lead record names a newer lead at %s; dialing it", dir.Lead())
+				backoff = time.Second
+				continue
+			}
 		}
 		backoff = min(backoff*2, limit)
 	}
@@ -119,7 +133,7 @@ func toAPI(w *worker.Worker, b *worker.Box) api.Box {
 	ab := api.Box{ID: b.ID, State: state, Image: b.Image, VCPUs: b.VCPUs, MemMiB: b.MemMiB,
 		Generation: b.Generation, Uploaded: b.Uploaded, Class: b.Class, ReachIP: b.ReachIP(), Created: b.Created}
 	if b.Store != nil {
-		ab.Owner = b.Store.Owner
+		ab.Owner, ab.Project, ab.UID = b.Store.Owner, b.Store.Project, path.Base(b.Store.Prefix)
 	}
 	return ab
 }
@@ -236,6 +250,11 @@ func handlers(w *worker.Worker, name string, m *monitor, u *uploader, kp *keys.P
 				return nil, err
 			}
 			m.settings.Store(&p)
+			if dir != "" && p.Bucket != nil {
+				if err := dir.SaveBucket(*p.Bucket); err != nil {
+					log.Printf("link: keeping the bucket's settings: %v", err)
+				}
+			}
 			u.configure(&p)
 			m.kick()
 			return nil, nil

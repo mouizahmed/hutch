@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -216,6 +215,9 @@ func (s *Server) backupLoop(ctx context.Context) {
 func (s *Server) backup(ctx context.Context) error {
 	s.backupMu.Lock()
 	defer s.backupMu.Unlock()
+	if err := s.checkLead(ctx); err != nil {
+		return err
+	}
 	st, err := s.bucketStore()
 	if err != nil {
 		return err
@@ -245,7 +247,7 @@ func (s *Server) backup(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := st.PutManifest(ctx, k, fmt.Sprintf("server/backups/%016d", now.UnixMilli()), m); err != nil {
+	if err := st.PutManifest(ctx, k, backupName(s.store.term(), now), m); err != nil {
 		return err
 	}
 	s.lastBackup, s.backedUp = now, changes
@@ -263,14 +265,13 @@ func pruneBackups(ctx context.Context, b bucket.Bucket, now time.Time, keep time
 	if err != nil {
 		return err
 	}
-	sort.Slice(objs, func(i, j int) bool { return objs[i].Key > objs[j].Key })
+	sort.Slice(objs, func(i, j int) bool { return newerBackup(objs[i].Key, objs[j].Key) })
 	seen := map[string]bool{}
 	for i, o := range objs {
-		ms, err := strconv.ParseInt(strings.TrimPrefix(o.Key, "server/backups/"), 10, 64)
-		if err != nil {
+		_, t, ok := parseBackup(o.Key)
+		if !ok {
 			continue
 		}
-		t := time.UnixMilli(ms).UTC()
 		age := now.Sub(t)
 		var slot string
 		switch {
@@ -325,7 +326,8 @@ func Restore(ctx context.Context, dir string, cfg bucket.Config, passphrase stri
 	if len(objs) == 0 {
 		return time.Time{}, errors.New("the bucket has no backups")
 	}
-	sort.Slice(objs, func(i, j int) bool { return objs[i].Key > objs[j].Key })
+	// The newest backup of the highest term: a stale lead's later ones lose.
+	sort.Slice(objs, func(i, j int) bool { return newerBackup(objs[i].Key, objs[j].Key) })
 	m, err := st.GetManifest(ctx, master.ServerKey(), objs[0].Key)
 	if err != nil {
 		return time.Time{}, err
@@ -350,13 +352,15 @@ func Restore(ctx context.Context, dir string, cfg bucket.Config, passphrase stri
 		return time.Time{}, err
 	}
 	// This is a new machine: the old one's boxes restore here from the bucket.
-	// Linked workers keep theirs.
+	// Linked workers keep theirs. It leads at a term of its own, above the
+	// highest in the bucket, which it claims when it starts.
 	db, err := openStore(filepath.Join(dir, "hutch.db"), master.Derive("user-layer"))
 	if err != nil {
 		return time.Time{}, err
 	}
 	_, err = db.db.Exec(`UPDATE boxes SET state = 'asleep' WHERE state = 'running' AND worker_id IN (SELECT id FROM workers WHERE linked = 0);
-		UPDATE workers SET gone = 1 WHERE linked = 0`)
+		UPDATE workers SET gone = 1 WHERE linked = 0;
+		UPDATE link SET term = 0`)
 	db.db.Close()
 	if err != nil {
 		return time.Time{}, err
@@ -404,6 +408,9 @@ func (s *Server) gc(ctx context.Context) (api.GCResult, error) {
 	s.gcMu.Lock()
 	defer s.gcMu.Unlock()
 	var r api.GCResult
+	if err := s.checkLead(ctx); err != nil {
+		return r, err
+	}
 	st, err := s.bucketStore()
 	if err != nil {
 		return r, err
