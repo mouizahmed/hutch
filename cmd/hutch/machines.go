@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -86,7 +87,7 @@ its own. Several machines need a bucket.`,
 func machineRmCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "rm <name>",
-		Short: "Remove a machine you added; it's refused from then on",
+		Short: "Move a machine's boxes to the others, then remove it; it's refused from then on",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sess, err := connect()
@@ -100,7 +101,7 @@ func machineRmCommand() *cobra.Command {
 			}
 			for _, w := range ws {
 				if w.Name == args[0] && !w.Gone {
-					if err := rpc.Call(cmd.Context(), sess, api.WorkerRm, api.IDParams{ID: w.ID}, nil); err != nil {
+					if err := rpc.CallOutput(cmd.Context(), sess, api.WorkerRm, api.IDParams{ID: w.ID}, nil, os.Stdout, os.Stderr); err != nil {
 						return err
 					}
 					fmt.Printf("Removed %s; its hutchd can't connect again.\n", w.Name)

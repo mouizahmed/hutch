@@ -455,7 +455,7 @@ func moveCommand() *cobra.Command {
 	var to string
 	cmd := &cobra.Command{
 		Use:     "move <box>",
-		Short:   "Move a box to another worker (warm when it can, else cold)",
+		Short:   "Move a box to another machine (warm when it can, else cold)",
 		GroupID: "boxes",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -477,7 +477,7 @@ func moveCommand() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&to, "to", "", "worker to move to (default: the scheduler's choice)")
+	cmd.Flags().StringVar(&to, "to", "", "machine to move to (default: the scheduler's choice)")
 	return cmd
 }
 

@@ -49,7 +49,6 @@ func (s *Server) apiMux() rpc.Mux {
 		api.BoxMove:          s.boxMove,
 		api.BoxResize:        s.boxResize,
 		api.BoxPlan:          s.boxPlan,
-		api.WorkerDrain:      s.workerDrain,
 		api.WorkerRm:         s.workerRm,
 		api.BucketGet:        s.bucketGet,
 		api.Hello:            s.hello,
@@ -326,7 +325,9 @@ func (s *Server) awake(ctx context.Context, id string) (*workerConn, error) {
 func (s *Server) wake(ctx context.Context, b api.Box) (*workerConn, error) {
 	id := b.ID
 	if b.State == "asleep" || b.State == "archived" {
-		release, err := s.admitWake(ctx, b)
+		var release func()
+		var err error
+		b, release, err = s.admitWake(ctx, b)
 		if err != nil {
 			return nil, err
 		}

@@ -125,6 +125,8 @@ var Keys = []*Key{
 		Doc: "most awake boxes on the machine; 0 means only its memory, CPUs, and disk limit it"},
 	{Path: "placement.order", Kind: Enum, Enum: []string{"fill", "spread"}, Default: "fill", Layers: machine,
 		Doc: "among machines a new box fits: fill the fullest, keeping others free, or spread to the emptiest"},
+	{Path: "placement.move_queued_after", Kind: Duration, Default: "10m", Min: "0s", Max: "7d", Layers: machine,
+		Doc: "a box waking on a machine at machine.max_boxes moves to another of its class with room after this; 0s keeps it queued"},
 	{Path: "machine.build_cache", Kind: Size, Default: "20G", Min: "1G", Max: "16T", Layers: machine,
 		Doc: "disk the image builder keeps for cached layers"},
 	{Path: "machine.address", Kind: String, Layers: machine,

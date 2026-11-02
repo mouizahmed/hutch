@@ -31,6 +31,9 @@ type need struct {
 	avoid string
 	// spread prefers the emptiest worker to the fullest (placement.order).
 	spread bool
+	// asleep: it moves and stays asleep, so it needs a machine big enough for it,
+	// not room among the awake boxes there.
+	asleep bool
 }
 
 func (n need) String() string { return fmt.Sprintf("%d vCPU, %s", n.vcpus, mib(n.memMiB)) }
@@ -176,7 +179,7 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if int64(running+s.starting) >= awakeLimit {
+	if !n.asleep && int64(running+s.starting) >= awakeLimit {
 		return nil, nil, &limitError{"limits.awake_boxes", awakeLimit}
 	}
 	var cs []candidate
@@ -190,13 +193,20 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 		overcommit, high := cfg.Float("machine.overcommit"), cfg.Percent("machine.memory_high")
 		sandboxStart := int(cfg.Size("machine.sandbox_start") >> 20)
 		full := 0
-		if m := int(cfg.Int("machine.max_boxes")); m > 0 && awake[id]+s.placing[id] >= m {
+		if m := int(cfg.Int("machine.max_boxes")); !n.asleep && m > 0 && awake[id]+s.placing[id] >= m {
 			full = m
 		}
 		d := w.info.Disk
 		free := int(float64(w.info.MemMiB)*(1-margin)) - reserved[id]
 		admit := n.memMiB
-		if api.GVisorClass(w.info.Class) {
+		switch {
+		case n.asleep:
+			free = int(float64(w.info.MemMiB) * (1 - margin))
+			if api.GVisorClass(w.info.Class) {
+				free = (w.info.MemMiB + 1023) / 1024 * 1024
+			}
+			free += s.pending[id]
+		case api.GVisorClass(w.info.Class):
 			// Admitted by what the machine has free, not by boxes' sizes.
 			admit = min(n.memMiB, sandboxStart)
 			if w.memTotal > 0 {
@@ -205,7 +215,7 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 					free = 0
 				}
 			}
-		} else if overcommit > 1 {
+		case overcommit > 1:
 			free = min(free, int(float64(w.info.MemMiB)*overcommit)-promised[id])
 			// A worker under memory pressure takes nothing new.
 			if w.memTotal > 0 && 100*float64(w.memTotal-w.memAvailable)/float64(w.memTotal) >= high {
@@ -240,6 +250,9 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 		return nil, nil, fmt.Errorf("%w for a %s box (%s)", errNoRoom, n, strings.Join(reasons, "; "))
 	}
 	w, admit := conns[i], cs[i].admitMiB
+	if n.asleep {
+		return w, func() {}, nil
+	}
 	s.pending[w.id] += admit
 	s.placing[w.id]++
 	s.starting++

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"maps"
+	"slices"
 	"time"
 
 	"github.com/mouizahmed/hutch/internal/api"
@@ -20,13 +21,23 @@ func (s *Server) boxMove(ctx context.Context, params json.RawMessage, out *rpc.O
 		return nil, err
 	}
 	stdout, stderr := out.Writers()
-	return s.move(ctx, p.ID, p.To, stdout, stderr)
+	return s.move(ctx, p.ID, moveOpts{to: p.To, wait: true}, stdout, stderr)
+}
+
+// moveOpts: to is the machine to move to, else the scheduler's choice. With
+// wait, a move queues until a machine has room; without, no room is an error and
+// the box stays where it is. With wake, the box is awake afterwards even if it
+// was asleep. forWake is for a wake that waits: only a machine of its class with
+// room will do, and the caller wakes it.
+type moveOpts struct {
+	to                  string
+	wait, wake, forWake bool
 }
 
 // move puts a box on another worker through the bucket: warm (processes and all)
-// on a worker of its snapshot class, else cold (its disk, booted; agents' threads come back exited).
-// A box that was awake is awake again afterwards.
-func (s *Server) move(ctx context.Context, id, to string, stdout, stderr io.Writer) (api.MoveResult, error) {
+// on a worker of its snapshot class, else cold (its disk, booted; agents' threads
+// come back exited). A box that was awake is awake again afterwards.
+func (s *Server) move(ctx context.Context, id string, o moveOpts, stdout, stderr io.Writer) (api.MoveResult, error) {
 	var r api.MoveResult
 	b, err := s.store.box(id)
 	if err != nil {
@@ -43,10 +54,22 @@ func (s *Server) move(ctx context.Context, id, to string, stdout, stderr io.Writ
 	if err != nil {
 		return r, err
 	}
-	if to == src.id {
-		return r, fmt.Errorf("%s is already on %s", id, to)
+	if o.to == src.id || o.to == src.info.Name {
+		return r, fmt.Errorf("%s is already on %s", id, src.info.Name)
 	}
 	awake := b.State == "running"
+	n := need{memMiB: b.MemMiB, vcpus: b.VCPUs, class: b.Class, avoid: src.id, asleep: !awake && !o.wake && !o.forWake, strict: o.forWake}
+	var w *workerConn
+	var release func()
+	if o.wait {
+		w, release, err = s.placeWait(ctx, n, o.to, id, stderr)
+	} else {
+		w, release, err = s.place(n, o.to)
+	}
+	if err != nil {
+		return r, err
+	}
+	defer func() { release() }()
 	if awake {
 		fmt.Fprintf(stdout, "Snapshotting %s...\n", id)
 		if b, err = s.callForBox(ctx, src, api.BoxSleep, api.IDParams{ID: id}); err != nil {
@@ -57,12 +80,6 @@ func (s *Server) move(ctx context.Context, id, to string, stdout, stderr io.Writ
 	if err := s.waitStored(ctx, store, b.Generation, 30*time.Minute); err != nil {
 		return r, err
 	}
-	n := need{memMiB: b.MemMiB, vcpus: b.VCPUs, class: b.Class, avoid: src.id}
-	w, release, err := s.placeWait(ctx, n, to, id, stderr)
-	if err != nil {
-		return r, err
-	}
-	defer func() { release() }()
 	s.hostProject(ctx, w, store.Project)
 	claimed, err := s.claim(ctx, store, store.Owner, b.Generation)
 	if err != nil {
@@ -71,20 +88,20 @@ func (s *Server) move(ctx context.Context, id, to string, stdout, stderr io.Writ
 	fmt.Fprintf(stdout, "Restoring on %s...\n", w.info.Name)
 	nb, err := s.callForBox(ctx, w, api.BoxRestore, api.RestoreParams{ID: id, Store: *claimed, Generation: b.Generation})
 	if err != nil {
-		return r, fmt.Errorf("restore on %s: %w (the box is still on %s)", w.id, err, src.id)
+		return r, fmt.Errorf("restore on %s: %w (the box is still on %s)", w.info.Name, err, src.info.Name)
 	}
 	if err := s.store.setOwner(id, claimed.Owner); err != nil {
 		return r, err
 	}
 	if err := rpc.Call(ctx, src.sess, api.BoxRm, api.IDParams{ID: id}, nil); err != nil {
-		fmt.Fprintf(stderr, "warning: removing the old copy on %s: %v (it's removed when that worker reconnects)\n", src.id, err)
+		fmt.Fprintf(stderr, "warning: removing the old copy on %s: %v (it's removed when that machine reconnects)\n", src.info.Name, err)
 	}
-	r = api.MoveResult{From: src.id, To: w.id, Kind: "warm"}
+	r = api.MoveResult{From: src.info.Name, To: w.info.Name, Kind: "warm"}
 	if nb.State == "archived" {
 		r.Kind = "cold"
 	}
-	s.store.event(id, "moved", fmt.Sprintf("%s move from %s to %s", r.Kind, src.id, w.id))
-	if awake {
+	s.store.event(id, "moved", fmt.Sprintf("%s move from %s to %s", r.Kind, r.From, r.To))
+	if awake || o.wake {
 		release()
 		release = func() {}
 		if _, err := s.awake(ctx, id); err != nil {
@@ -110,46 +127,12 @@ func (s *Server) waitStored(ctx context.Context, store *api.Store, gen int, time
 	}
 }
 
-func (s *Server) workerDrain(ctx context.Context, params json.RawMessage, out *rpc.Out) (any, error) {
-	var p api.DrainParams
-	if err := rpc.Decode(params, &p); err != nil {
-		return nil, err
-	}
-	if err := s.store.setDraining(p.Worker, !p.Undo); err != nil {
-		return nil, err
-	}
-	stdout, stderr := out.Writers()
-	if p.Undo {
-		fmt.Fprintf(stdout, "%s takes new boxes again.\n", p.Worker)
-		return nil, nil
-	}
-	fmt.Fprintf(stdout, "%s takes no new boxes; moving its awake boxes.\n", p.Worker)
-	boxes, err := s.store.boxes()
-	if err != nil {
-		return nil, err
-	}
-	for _, b := range boxes {
-		if b.Worker != p.Worker || b.State != "running" || b.Kind != "" {
-			continue
-		}
-		if _, err := s.storeOf(b); err != nil {
-			fmt.Fprintf(stderr, "skipping %s: %v\n", b.ID, err)
-			continue
-		}
-		r, err := s.move(ctx, b.ID, "", stdout, stderr)
-		if err != nil {
-			fmt.Fprintf(stderr, "%s: %v\n", b.ID, err)
-			continue
-		}
-		fmt.Fprintf(stdout, "%s: %s move to %s\n", b.ID, r.Kind, r.To)
-	}
-	return nil, nil
-}
-
-// workerRm forgets a worker and revokes its link certificate: an online one
-// only once it holds no boxes. An offline one's boxes that are in the bucket
-// restore on another worker when used; one holding any that aren't is kept.
-func (s *Server) workerRm(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+// workerRm forgets a worker and revokes its link certificate. An online one is
+// drained first: each box moves to another machine (warm within its class, cold
+// across), and one that can't stops the drain where it is. An offline one's
+// boxes that are in the bucket restore on another worker when used; one holding
+// any that aren't is kept.
+func (s *Server) workerRm(ctx context.Context, params json.RawMessage, out *rpc.Out) (any, error) {
 	var p api.IDParams
 	if err := rpc.Decode(params, &p); err != nil {
 		return nil, err
@@ -160,44 +143,87 @@ func (s *Server) workerRm(ctx context.Context, params json.RawMessage, _ *rpc.Ou
 	if p.ID == local {
 		return nil, errors.New("that's the lead's own machine: it can't be removed")
 	}
-	_, err := s.worker(p.ID)
-	online := err == nil
 	ws, err := s.store.workers()
 	if err != nil {
 		return nil, err
 	}
-	for _, w := range ws {
-		if w.ID != p.ID || w.Gone {
-			continue
+	i := slices.IndexFunc(ws, func(w api.Worker) bool { return w.ID == p.ID && !w.Gone })
+	if i < 0 {
+		return nil, fmt.Errorf("no worker %s", p.ID)
+	}
+	w := ws[i]
+	if _, err := s.worker(w.ID); err == nil {
+		if err := s.drain(ctx, w, out); err != nil {
+			return nil, err
 		}
+	} else {
 		boxes, err := s.store.boxes()
 		if err != nil {
 			return nil, err
 		}
 		for _, b := range boxes {
-			if b.Worker != w.ID {
-				continue
-			}
-			if online {
-				return nil, fmt.Errorf("%s still holds %s: move or remove its boxes first", w.Name, b.ID)
-			}
-			if _, err := s.storeOf(b); err != nil {
-				return nil, fmt.Errorf("%s holds %s, which isn't in the bucket; remove it first", w.ID, b.ID)
+			if _, err := s.storeOf(b); b.Worker == w.ID && err != nil {
+				return nil, fmt.Errorf("%s holds %s, which isn't in the bucket; remove it first", w.Name, b.ID)
 			}
 		}
-		s.store.event("", "worker removed", w.Name)
-		if err := s.store.setWorkerGone(w.ID); err != nil {
-			return nil, err
-		}
-		s.mu.Lock()
-		if c := s.workers[w.ID]; c != nil {
-			c.sess.Close()
-		}
-		s.mu.Unlock()
-		s.wakeLink()
-		return nil, nil
 	}
-	return nil, fmt.Errorf("no worker %s", p.ID)
+	s.store.event("", "worker removed", w.Name)
+	if err := s.store.setWorkerGone(w.ID); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	if c := s.workers[w.ID]; c != nil {
+		c.sess.Close()
+	}
+	s.mu.Unlock()
+	s.wakeLink()
+	return nil, nil
+}
+
+// drain moves every box off a worker. It takes no new boxes meanwhile; a box
+// that can't move stops the drain, and the worker takes boxes again.
+func (s *Server) drain(ctx context.Context, w api.Worker, out *rpc.Out) (err error) {
+	stdout, stderr := out.Writers()
+	if err := s.store.setDraining(w.ID, true); err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			s.store.setDraining(w.ID, false)
+		}
+	}()
+	boxes, err := s.store.boxes()
+	if err != nil {
+		return err
+	}
+	for _, b := range boxes {
+		if b.Worker != w.ID {
+			continue
+		}
+		stop := func(why string) error {
+			return fmt.Errorf("%s %s, so %s isn't removed; it takes new boxes again", b.ID, why, w.Name)
+		}
+		switch b.Kind {
+		case api.BoxVersion:
+			// Other machines copy a template version from the bucket.
+			store, err := s.storeOf(b)
+			if err != nil {
+				return stop(err.Error())
+			}
+			if err := s.waitStored(ctx, store, b.Generation, 30*time.Minute); err != nil {
+				return stop("(a template version) isn't in the bucket: " + err.Error())
+			}
+			continue
+		case api.BoxTemplate:
+			return stop(fmt.Sprintf("is %s's template box, which isn't kept in the bucket: remove it first (hutch rm %s)", b.Project, b.ID))
+		}
+		r, err := s.move(ctx, b.ID, moveOpts{}, stdout, stderr)
+		if err != nil {
+			return stop("can't move: " + err.Error())
+		}
+		fmt.Fprintf(stdout, "%s: %s move to %s\n", b.ID, r.Kind, r.To)
+	}
+	return nil
 }
 
 // boxResize changes a box's size with a cold boot: it sleeps (a snapshot), drops
@@ -251,7 +277,7 @@ func (s *Server) boxResize(ctx context.Context, params json.RawMessage, out *rpc
 		release()
 	} else {
 		fmt.Fprintf(stdout, "It no longer fits %s; moving it.\n", w.info.Name)
-		if _, err := s.move(ctx, p.ID, "", stdout, stderr); err != nil {
+		if _, err := s.move(ctx, p.ID, moveOpts{wait: true, wake: true}, stdout, stderr); err != nil {
 			return nil, err
 		}
 		return s.store.box(p.ID)
@@ -301,7 +327,7 @@ func (s *Server) relieve(w *workerConn) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	log.Printf("memory: moving %s off %s", pick.ID, w.info.Name)
-	r, err := s.move(ctx, pick.ID, "", io.Discard, io.Discard)
+	r, err := s.move(ctx, pick.ID, moveOpts{}, io.Discard, io.Discard)
 	if err != nil {
 		log.Printf("memory: move %s: %v", pick.ID, err)
 		return

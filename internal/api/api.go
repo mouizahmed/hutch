@@ -86,7 +86,6 @@ const (
 	ServerInit     = "server.init"
 	ServerGC       = "server.gc"
 	BoxMove        = "box.move"
-	WorkerDrain    = "worker.drain"
 	WorkerRm       = "worker.rm"
 	Hello          = "hello"
 	NotifyTest     = "notify.test"
@@ -142,11 +141,6 @@ type MoveResult struct {
 	From string `json:"from"`
 	To   string `json:"to"`
 	Kind string `json:"kind"`
-}
-
-type DrainParams struct {
-	Worker string `json:"worker"`
-	Undo   bool   `json:"undo,omitempty"`
 }
 
 // Protocol is the API's version, raised when a change breaks older CLIs or an

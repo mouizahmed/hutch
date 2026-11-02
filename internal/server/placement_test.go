@@ -88,9 +88,34 @@ func TestPlaceAcrossMachines(t *testing.T) {
 	if !errors.Is(err, errNoRoom) || !strings.Contains(err.Error(), "machine.max_boxes (1) reached") {
 		t.Fatalf("on a full machine by name: %v, want no room there (so it queues)", err)
 	}
+	third := s.workers["w-third"]
 	delete(s.workers, "w-third")
 	if _, err := placed("third"); err == nil || errors.Is(err, errNoRoom) || !strings.Contains(err.Error(), "machine third is offline") {
 		t.Fatalf("on an offline machine: %v", err)
+	}
+
+	// A box moving asleep needs a machine big enough, not room among awake boxes:
+	// third is at its cap and big is too full of awake boxes for it awake.
+	if err := s.store.putBox(api.Box{ID: "hog", Worker: "w-big", State: "running", VCPUs: 2, MemMiB: 12288, Created: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	s.workers["w-third"] = third
+	big := need{memMiB: 8192, vcpus: 2, class: "intel", avoid: "w-small"}
+	if _, _, err := s.place(big, ""); !errors.Is(err, errNoRoom) {
+		t.Fatalf("awake, an 8 GB box placed: %v", err)
+	}
+	big.asleep = true
+	w, release, err := s.place(big, "third")
+	if err != nil {
+		t.Fatalf("asleep, on a machine at max_boxes: %v", err)
+	}
+	if s.placing["w-third"] != 0 || s.starting != 0 {
+		t.Fatal("a box moving asleep counted as starting")
+	}
+	release()
+	big.memMiB = 20480
+	if _, _, err := s.place(big, ""); !errors.Is(err, errNoRoom) {
+		t.Fatalf("asleep, a box bigger than every machine placed on %v", w.info.Name)
 	}
 
 	p, _ := json.Marshal(api.ConfigPutParams{Name: "machine", On: "small", BaseVersion: 1, Content: "machine.memory_margin = \"40%\"\nplacement.order = \"spread\"\n"})

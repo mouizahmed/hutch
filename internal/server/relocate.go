@@ -215,13 +215,15 @@ func (s *Server) maxAwakeLoop(ctx context.Context) {
 }
 
 // admitWake waits while limits.awake_boxes, or machine.max_boxes on the box's
-// machine, is reached, then counts the box as starting until release.
-func (s *Server) admitWake(ctx context.Context, b api.Box) (func(), error) {
-	notified := false
+// machine, is reached, then counts the box as starting until release. A box
+// queued on its full machine for placement.move_queued_after moves to one of its
+// class with room; it returns the box as it is then.
+func (s *Server) admitWake(ctx context.Context, b api.Box) (api.Box, func(), error) {
+	var queued time.Time
 	for {
 		boxes, err := s.store.boxes()
 		if err != nil {
-			return nil, err
+			return b, nil, err
 		}
 		running, there := 0, 0
 		for _, o := range boxes {
@@ -235,22 +237,22 @@ func (s *Server) admitWake(ctx context.Context, b api.Box) (func(), error) {
 		lim := s.limitInt("limits.awake_boxes")
 		cfg, err := s.settingsOn(b.Worker)
 		if err != nil {
-			return nil, err
+			return b, nil, err
 		}
 		max := cfg.Int("machine.max_boxes")
 		s.mu.Lock()
-		reason := ""
+		reason, full := "", false
 		switch {
 		case int64(running+s.starting) >= lim:
 			reason = fmt.Sprintf("limits.awake_boxes (%d) reached", lim)
 		case max > 0 && int64(there+s.placing[b.Worker]) >= max:
-			reason = fmt.Sprintf("machine.max_boxes (%d) reached on its machine", max)
+			reason, full = fmt.Sprintf("machine.max_boxes (%d) reached on its machine", max), true
 		}
 		if reason == "" {
 			s.starting++
 			s.placing[b.Worker]++
 			s.mu.Unlock()
-			return func() {
+			return b, func() {
 				s.mu.Lock()
 				s.starting--
 				s.placing[b.Worker]--
@@ -258,18 +260,44 @@ func (s *Server) admitWake(ctx context.Context, b api.Box) (func(), error) {
 			}, nil
 		}
 		s.mu.Unlock()
-		if !notified {
+		if queued.IsZero() {
+			queued = time.Now()
 			msg := fmt.Sprintf("%s is queued: %s", b.ID, reason)
 			s.notify("queued", b.ID, "Box queued", msg)
 			s.store.event(b.ID, "queued", msg)
-			notified = true
+		}
+		if after := cfg.Duration("placement.move_queued_after"); full && after > 0 && time.Since(queued) >= after {
+			if moved, err := s.moveQueued(ctx, b, after); err == nil {
+				b, queued = moved, time.Time{}
+				continue
+			}
 		}
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return b, nil, ctx.Err()
 		case <-time.After(10 * time.Second):
 		}
 	}
+}
+
+// moveQueued moves a box whose wake waited on its full machine for after to a
+// machine of its class with room, if its newest generation is in the bucket.
+func (s *Server) moveQueued(ctx context.Context, b api.Box, after time.Duration) (api.Box, error) {
+	store, err := s.storeOf(b)
+	if err != nil {
+		return b, err
+	}
+	if have, err := s.storedGeneration(ctx, store); err != nil || have < b.Generation {
+		return b, fmt.Errorf("generation %d isn't in the bucket yet", b.Generation)
+	}
+	r, err := s.move(ctx, b.ID, moveOpts{forWake: true}, io.Discard, io.Discard)
+	if err != nil {
+		return b, err
+	}
+	msg := fmt.Sprintf("%s moved from %s to %s: its machine stayed full for %s", b.ID, r.From, r.To, after)
+	s.store.event(b.ID, "moved", msg)
+	s.notify("moved", b.ID, "Box moved", msg)
+	return s.store.box(b.ID)
 }
 
 // recoverCrash tells you a box's VM died and wakes it from the snapshot it was
