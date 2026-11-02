@@ -118,6 +118,17 @@ func TestPlaceAcrossMachines(t *testing.T) {
 		t.Fatalf("asleep, a box bigger than every machine placed on %v", w.info.Name)
 	}
 
+	// A machine that coordinates only takes nothing, even asked for by name.
+	set("w-small", "machine.run_boxes = false\n")
+	if _, _, err := s.place(need{memMiB: 1024, vcpus: 1, class: "intel"}, "small"); err == nil || !strings.Contains(err.Error(), "doesn't run boxes") {
+		t.Fatalf("on a machine that doesn't run boxes: %v", err)
+	}
+	if w, release, err := s.place(need{memMiB: 1024, vcpus: 1, class: "intel"}, ""); err != nil || w.id == "w-small" {
+		t.Fatalf("placed on %v (%v) with small not running boxes", w, err)
+	} else {
+		release()
+	}
+
 	p, _ := json.Marshal(api.ConfigPutParams{Name: "machine", On: "small", BaseVersion: 1, Content: "machine.memory_margin = \"40%\"\nplacement.order = \"spread\"\n"})
 	if _, err := s.configPut(context.Background(), p, nil); err == nil || !strings.Contains(err.Error(), "placement.order is the same on every machine") {
 		t.Fatalf("a fleet-wide key set on one machine: %v", err)

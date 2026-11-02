@@ -123,6 +123,8 @@ var Keys = []*Key{
 		Doc: "on a gVisor machine, where boxes are admitted by the memory they use, what a starting box counts for until its use shows"},
 	{Path: "machine.max_boxes", Kind: Int, Default: int64(0), Min: "0", Max: "10000", Layers: machine,
 		Doc: "most awake boxes on the machine; 0 means only its memory, CPUs, and disk limit it"},
+	{Path: "machine.run_boxes", Kind: Bool, Default: true, Layers: machine,
+		Doc: "false makes a machine coordinate only: no new boxes are placed or moved there, and doctor skips its box checks"},
 	{Path: "placement.order", Kind: Enum, Enum: []string{"fill", "spread"}, Default: "fill", Layers: machine,
 		Doc: "among machines a new box fits: fill the fullest, keeping others free, or spread to the emptiest"},
 	{Path: "placement.move_queued_after", Kind: Duration, Default: "10m", Min: "0s", Max: "7d", Layers: machine,

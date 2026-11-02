@@ -33,6 +33,9 @@ hutch config validate
 | `ports.parked_max` | machine | `100` | Maximum connections waiting for wake |
 | `mcp.start_timeout` | machine or user | `1m` | How long one MCP server may take to start in `doctor --template` |
 | `notify.command` | user | empty | Optional event handler command |
+| `placement.order` | machine | `fill` | With several machines: `fill` the fullest that fits, or `spread` to the emptiest |
+| `machine.max_boxes` | machine | `0` (no cap) | Awake boxes one machine may run; set per machine with `--on` |
+| `machine.run_boxes` | machine | `true` | `false` makes a machine coordinate only |
 
 Use `hutch config explain` for the full reference generated from the running version's schema. The per-project grants in your user config bound requests from a repository; a project cannot grant itself more access.
 

@@ -287,7 +287,9 @@ func handlers(w *worker.Worker, name string, m *monitor, u *uploader, kp *keys.P
 			}
 			return nil, kp.Set(t)
 		},
-		api.WorkerDoctor: func(context.Context, json.RawMessage, *rpc.Out) (any, error) { return doctor(w), nil },
+		api.WorkerDoctor: func(context.Context, json.RawMessage, *rpc.Out) (any, error) {
+			return append(doctor(w), placeChecks(w, m.settings.Load())...), nil
+		},
 		api.BoxRename: box(func(ctx context.Context, params json.RawMessage) (*worker.Box, error) {
 			var p api.RenameParams
 			if err := rpc.Decode(params, &p); err != nil {

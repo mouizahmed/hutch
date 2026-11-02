@@ -345,6 +345,8 @@ func (c *Config) String(path string) string {
 
 func (c *Config) Int(path string) int64 { return c.must(path).(int64) }
 
+func (c *Config) Bool(path string) bool { return c.must(path).(bool) }
+
 func (c *Config) Duration(path string) time.Duration { return c.must(path).(time.Duration) }
 
 // Size returns bytes.

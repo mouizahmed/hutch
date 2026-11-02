@@ -3,16 +3,19 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 
 	"github.com/mouizahmed/hutch/internal/api"
+	"github.com/mouizahmed/hutch/internal/bucket"
 	"github.com/mouizahmed/hutch/internal/worker"
 )
 
@@ -91,4 +94,29 @@ func checkReflink(root string) bool {
 	}
 	defer dst.Close()
 	return unix.IoctlFileClone(int(dst.Fd()), int(src.Fd())) == nil
+}
+
+// placeChecks are a machine's checks of its place among several: the bucket
+// read with the credentials it was given, and lead state it keeps aside.
+func placeChecks(w *worker.Worker, p *api.WorkerSettingsParams) []api.Check {
+	var out []api.Check
+	if p != nil && p.Bucket != nil {
+		c := api.Check{Area: "machine", Name: "bucket from here", Status: "ok", Detail: p.Bucket.Name}
+		b, err := bucket.New(*p.Bucket)
+		if err == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			_, err = b.List(ctx, "lead/")
+			cancel()
+		}
+		if err != nil {
+			c.Status, c.Detail, c.Fix = "fail", err.Error(), "check this machine can reach the bucket's endpoint (its firewall, DNS, and clock)"
+		}
+		out = append(out, c)
+	}
+	if stale, _ := filepath.Glob(filepath.Join(w.Root, "state", "stale-lead-*")); len(stale) > 0 {
+		out = append(out, api.Check{Area: "machine", Name: "old lead state", Status: "warn",
+			Detail: fmt.Sprintf("%d kept aside from when it led (%s)", len(stale), strings.Join(stale, ", ")),
+			Fix:    "once you've checked the current lead: hutch machine forget-stale <this machine's ssh host>"})
+	}
+	return out
 }

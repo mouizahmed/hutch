@@ -195,6 +195,9 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 			continue
 		}
 		cfg := on(id)
+		if !cfg.Bool("machine.run_boxes") {
+			continue
+		}
 		margin, reserve := cfg.Percent("machine.memory_margin")/100, cfg.Percent("machine.disk_reserve")/100
 		overcommit, high := cfg.Float("machine.overcommit"), cfg.Percent("machine.memory_high")
 		sandboxStart := int(cfg.Size("machine.sandbox_start") >> 20)
@@ -241,6 +244,9 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 		conns = append(conns, w)
 	}
 	if requested != "" && len(cs) == 0 {
+		if s.workers[requested] != nil {
+			return nil, nil, fmt.Errorf("machine %s doesn't run boxes (machine.run_boxes = false)", machine)
+		}
 		return nil, nil, fmt.Errorf("machine %s is offline", machine)
 	}
 	i := choose(cs, n)
@@ -283,7 +289,7 @@ func (s *Server) checkFits(ctx context.Context, n need) error {
 	fits := func(id, name, class string, cpus, memMiB int) bool {
 		known = true
 		cfg, err := s.settingsOn(id)
-		if err != nil {
+		if err != nil || !cfg.Bool("machine.run_boxes") {
 			return false
 		}
 		margin := cfg.Percent("machine.memory_margin") / 100

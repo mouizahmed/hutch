@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mouizahmed/hutch/internal/api"
+	"github.com/mouizahmed/hutch/internal/link"
 	"github.com/mouizahmed/hutch/internal/rpc"
 	"github.com/mouizahmed/hutch/internal/version"
 )
@@ -76,17 +77,44 @@ func (s *Server) doctor(ctx context.Context, params json.RawMessage, _ *rpc.Out)
 		return nil, err
 	}
 	reserve := cfg.Percent("machine.disk_reserve")
+	live := 0
+	for _, w := range ws {
+		if !w.Gone {
+			live++
+		}
+	}
+	if live > 1 {
+		r.Checks = append(r.Checks, s.doctorLead(ctx)...)
+	}
+	s.mu.Lock()
+	local := s.local
+	s.mu.Unlock()
 	for _, w := range ws {
 		if w.Gone {
 			continue
 		}
 		area := "machine"
+		if live > 1 {
+			area = "machine " + w.Name
+		}
 		conn, err := s.worker(w.ID)
 		switch {
 		case err != nil:
 			warn(area, "state", fmt.Sprintf("offline since %s", w.LastSeen.Format(time.DateTime)),
-				"start hutchd there: sudo systemctl start hutchd")
+				"start hutchd there: sudo systemctl start hutchd; if the machine is gone for good, hutch machine rm --lost "+w.Name)
 			continue
+		}
+		if w.ID != local {
+			start := time.Now()
+			if _, err := conn.sess.Ping(); err != nil {
+				check(area, "link", err, "", "see journalctl -u hutchd there")
+			} else {
+				check(area, "link", nil, fmt.Sprintf("connected, protocol %d, round trip %s", conn.info.Link, time.Since(start).Round(time.Millisecond)), "")
+			}
+		}
+		runs := true
+		if c, err := s.settingsOn(w.ID); err == nil {
+			runs = c.Bool("machine.run_boxes")
 		}
 		var checks []api.Check
 		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -95,7 +123,14 @@ func (s *Server) doctor(ctx context.Context, params json.RawMessage, _ *rpc.Out)
 		if err != nil {
 			warn(area, "checks", "this hutchd can't run them: "+err.Error(), "upgrade hutchd on it")
 		}
+		if !runs {
+			check(area, "boxes", nil, "none: it coordinates only (machine.run_boxes = false)", "")
+		}
 		for _, c := range checks {
+			// A machine that runs no boxes needn't pass the checks for them.
+			if !runs && boxCheck[c.Name] {
+				continue
+			}
 			c.Area = area
 			r.Checks = append(r.Checks, c)
 		}
@@ -133,18 +168,23 @@ func (s *Server) doctor(ctx context.Context, params json.RawMessage, _ *rpc.Out)
 		warn("logins", "real logins in boxes", strings.Join(legacy, ", ")+" predate the keys proxy: their agents refresh logins themselves, which logs every other box out",
 			"move their work to new boxes and remove them, then hutch login again")
 	}
-	stranded := 0
+	stranded, n := 0, 0
 	for _, b := range boxes {
 		if b.Kind != "" {
 			continue
 		}
+		n++
 		if err := s.checkFits(ctx, need{memMiB: b.MemMiB, vcpus: b.VCPUs}); err != nil {
 			stranded++
 			check("boxes", b.ID, err, "", "hutch resize "+b.ID+" --cpu N --memory SIZE, or a bigger machine")
 		}
 	}
 	if stranded == 0 {
-		check("boxes", "fit", nil, fmt.Sprintf("all %d fit the machine", len(boxes)), "")
+		where := "the machine"
+		if live > 1 {
+			where = "a machine"
+		}
+		check("boxes", "fit", nil, fmt.Sprintf("all %d fit %s", n, where), "")
 	}
 	return r, nil
 }
@@ -163,4 +203,32 @@ func backupWarning(changes, backedUp int64, at, started, now time.Time, after ti
 		return fmt.Sprintf("changes since the last backup, %s ago", now.Sub(at).Round(time.Second))
 	}
 	return ""
+}
+
+// boxCheck names the worker checks that matter only to a machine running boxes.
+var boxCheck = map[string]bool{"backend": true, "kernel": true, "XFS with reflink": true, "memory pressure events": true,
+	"gVisor": true, "Firecracker": true}
+
+// doctorLead checks the lead record names this machine at its term.
+func (s *Server) doctorLead(ctx context.Context) []api.Check {
+	c := api.Check{Area: "machine", Name: "lead record", Status: "ok"}
+	v := s.vault.Load()
+	l, err := s.store.link()
+	if v == nil || l == nil || err != nil {
+		return nil
+	}
+	h, ok, err := link.HighestRecord(ctx, v.bucket, l.ca.Cert)
+	s.mu.Lock()
+	local := s.local
+	s.mu.Unlock()
+	switch {
+	case err != nil:
+		c.Status, c.Detail, c.Fix = "fail", err.Error(), "check the bucket"
+	case !ok || h.Term != l.term || h.WorkerID != local:
+		c.Status, c.Detail = "warn", fmt.Sprintf("the bucket's names term %d (%s); this machine leads at term %d", h.Term, h.Address, l.term)
+		c.Fix = "it's written within machines.lead_check; if it stays, see journalctl -u hutchd"
+	default:
+		c.Detail = fmt.Sprintf("this machine leads at term %d (%s)", h.Term, h.Address)
+	}
+	return []api.Check{c}
 }

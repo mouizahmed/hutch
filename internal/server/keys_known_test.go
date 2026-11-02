@@ -12,7 +12,7 @@ import (
 // Every setting the server reads is in the schema: reading one that isn't
 // panics, and only when that code runs.
 func TestSettingsReadAreKnown(t *testing.T) {
-	read := regexp.MustCompile(`\.(Duration|Int|String|Size|Percent|Float|List)\("([a-z_]+\.[a-z_.]+|[a-z_]+)"\)`)
+	read := regexp.MustCompile(`\.(Duration|Int|Bool|String|Size|Percent|Float|List)\("([a-z_]+\.[a-z_.]+|[a-z_]+)"\)`)
 	files, _ := filepath.Glob("*.go")
 	for _, f := range files {
 		src, err := os.ReadFile(f)

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -162,6 +163,7 @@ esac
 if [ -f /var/lib/hutch/images/base/image.json ]; then echo base=yes; fi
 for f in kernel/vmlinux layer/hutch-guest layer/tmux-$(uname -m) layer/terminfo.tar; do echo "sum_$(basename $f)=$(sudo -n sha256sum /var/lib/hutch/$f 2>/dev/null | cut -c1-64)"; done
 if [ -n "$(sudo -n ls /var/lib/hutch/state/hutch.db 2>/dev/null)" ]; then echo state=yes; fi
+if [ -n "$(sudo -n ls /var/lib/hutch/link/lead 2>/dev/null)" ]; then echo worker=yes; fi
 `
 
 type probe struct {
@@ -489,7 +491,7 @@ fi`, bk, buildkitVersion, goarch, buildkitSHA256[arch]))); err != nil {
 	}
 	unit := "sudo tee /etc/systemd/system/hutchd.service >/dev/null <<'UNIT'\n" + hutchdUnit + "UNIT\nsudo systemctl daemon-reload && sudo systemctl enable -q hutchd"
 	if start {
-		if p.get("state") == "yes" {
+		if p.get("state") == "yes" || p.get("worker") == "yes" {
 			// The uploaded binary understands the current checkpoint operation,
 			// even when the old daemon predates it. Per-box file locks coordinate
 			// this with that daemon's own checkpoints. Failure leaves it running.
@@ -639,51 +641,108 @@ func upgradeCommand() *cobra.Command {
 	var f installFlags
 	c := &cobra.Command{
 		Use:   "upgrade",
-		Short: "Install this version of hutchd on the machine and restart it",
-		Args:  cobra.NoArgs,
+		Short: "Install this version of hutchd on the lead, then on every other machine, and restart them",
+		Long: `Install this version of hutchd on the lead, then on every other machine, and
+restart them. Running boxes are checkpointed first and keep running; each
+worker reconnects within seconds. A worker that can't be reached over SSH is
+skipped and named.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			host := machineTarget()
 			if host == "" {
 				return errors.New("no machine set: hutch setup <ssh-host>")
 			}
-			r := remote{host}
-			p, err := r.probe()
-			if err != nil {
-				return err
-			}
-			have, want := p.get("hutchd"), version.String()
-			// A build with uncommitted changes isn't identified by its version.
-			if err := checkDowngrade(p, f.force); err != nil {
-				return err
-			}
-			if have == want && want != "dev" && !strings.HasSuffix(want, "-dirty") && !f.force {
-				// The file may have been uploaded by an interrupted upgrade while
-				// the old process is still running. Ask the actual daemon as well.
-				if running, err := daemonVersion(cmd.Context(), host); err == nil && running == want {
-					fmt.Printf("The machine already runs hutchd %s.\n", have)
-					return nil
-				}
-			}
-			a, err := findArtifacts(cmd.Context(), p.get("arch"), f.hutchd, f.images)
-			if err != nil {
-				return err
-			}
-			defer a.close()
-			fmt.Printf("hutchd %s → %s\n", have, want)
-			if err := install(r, p, a, storagePlan{}, true); err != nil {
+			if err := upgradeHost(cmd, host, f); err != nil {
 				return err
 			}
 			sess, err := connectTarget(host)
 			if err != nil {
 				return err
 			}
-			sess.Close()
-			fmt.Println("Upgraded.")
+			defer sess.Close()
+			var ws []api.Worker
+			if err := rpc.Call(cmd.Context(), sess, api.WorkerList, struct{}{}, &ws); err != nil {
+				return err
+			}
+			var skipped []string
+			for _, w := range ws {
+				if w.Gone || w.Lead {
+					continue
+				}
+				target := cmp.Or(w.SSH, w.Name)
+				fmt.Printf("\n%s (%s)\n", w.Name, target)
+				if err := upgradeHost(cmd, target, f); err != nil {
+					fmt.Printf("  ! %v\n", err)
+					skipped = append(skipped, w.Name)
+					continue
+				}
+				if err := waitOnline(cmd.Context(), sess, w.ID, version.String()); err != nil {
+					fmt.Printf("  ! %v\n", err)
+					skipped = append(skipped, w.Name)
+				}
+			}
+			if len(skipped) > 0 {
+				return fmt.Errorf("not upgraded: %s (run hutch machine upgrade again once they're reachable over SSH)", strings.Join(skipped, ", "))
+			}
 			return nil
 		},
 	}
 	f.register(c, false)
 	return c
+}
+
+// upgradeHost installs this hutchd on the machine at host and restarts it.
+func upgradeHost(cmd *cobra.Command, host string, f installFlags) error {
+	r := remote{host}
+	p, err := r.probe()
+	if err != nil {
+		return err
+	}
+	have, want := p.get("hutchd"), version.String()
+	if err := checkDowngrade(p, f.force); err != nil {
+		return err
+	}
+	if have == want && want != "dev" && !strings.HasSuffix(want, "-dirty") && !f.force {
+		// The file may have been uploaded by an interrupted upgrade while
+		// the old process is still running. Ask the actual daemon as well.
+		if running, err := daemonVersion(cmd.Context(), host); err == nil && running == want {
+			fmt.Printf("It already runs hutchd %s.\n", have)
+			return nil
+		}
+	}
+	a, err := findArtifacts(cmd.Context(), p.get("arch"), f.hutchd, f.images)
+	if err != nil {
+		return err
+	}
+	defer a.close()
+	fmt.Printf("hutchd %s → %s\n", have, want)
+	if err := install(r, p, a, storagePlan{}, true); err != nil {
+		return err
+	}
+	fmt.Println("Upgraded.")
+	return nil
+}
+
+// waitOnline waits for a worker to reconnect to the lead running version.
+func waitOnline(ctx context.Context, sess *yamux.Session, id, version string) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	for {
+		var ws []api.Worker
+		if err := rpc.Call(ctx, sess, api.WorkerList, struct{}{}, &ws); err == nil {
+			for _, w := range ws {
+				if w.ID == id && w.Online && w.Version == version {
+					fmt.Println("  ✓ reconnected to the lead")
+					return nil
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return errors.New("it hasn't reconnected to the lead with the new hutchd: see journalctl -u hutchd there")
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 func daemonVersion(ctx context.Context, host string) (string, error) {
