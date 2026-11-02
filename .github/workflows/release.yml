@@ -153,3 +153,77 @@ jobs:
       run_id: ${{ format('{0}', github.run_id) }}
       source_sha: ${{ github.sha }}
       version: ${{ needs.check.outputs.version }}
+
+  # The built CLI on each client platform: installed from these artifacts with
+  # the real installer (Linux, macOS) or unpacked (Windows), and run without a
+  # machine.
+  client-check:
+    needs: [check, publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            archive: linux_amd64
+          - os: macos-latest
+            archive: darwin_arm64
+          - os: windows-latest
+            archive: windows_amd64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist/release
+      - name: Install with install.sh from these artifacts
+        if: runner.os != 'Windows'
+        env:
+          RELEASE_VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          # curl serves the artifacts from disk; everything else is the real installer.
+          mkdir -p "$RUNNER_TEMP/tools"
+          cat > "$RUNNER_TEMP/tools/curl" <<'SH'
+          #!/bin/sh
+          for a; do case "$a" in https://*) url=$a;; esac; done
+          while [ "$#" -gt 0 ]; do [ "$1" = -o ] && dest=$2; shift; done
+          cp "$GITHUB_WORKSPACE/dist/release/${url##*/}" "$dest"
+          SH
+          chmod +x "$RUNNER_TEMP/tools/curl"
+          PATH="$RUNNER_TEMP/tools:$PATH" HUTCH_VERSION="$RELEASE_VERSION" HUTCH_INSTALL_DIR="$RUNNER_TEMP/bin" sh install.sh
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Unpack after checking its SHA-256
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.check.outputs.version }}
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          $name = "hutch_${env:RELEASE_VERSION}_${env:ARCHIVE}.tar.gz"
+          $want = (Get-Content dist/release/checksums.txt | Where-Object { $_ -match [regex]::Escape($name) }) -split '\s+' | Select-Object -First 1
+          $got = (Get-FileHash "dist/release/$name" -Algorithm SHA256).Hash.ToLower()
+          if (-not $want -or $got -ne $want) { throw "checksum mismatch for $name" }
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\bin" | Out-Null
+          tar -xzf "dist/release/$name" -C "$env:RUNNER_TEMP\bin"
+          "$env:RUNNER_TEMP\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - name: Run it without a machine
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          export HOME="$RUNNER_TEMP/home" XDG_CONFIG_HOME="$RUNNER_TEMP/home/.config"
+          mkdir -p "$XDG_CONFIG_HOME"
+          cd "$RUNNER_TEMP"
+          hutch --version | tee version.out
+          grep -qx "hutch version $RELEASE_VERSION" version.out
+          hutch --help > /dev/null
+          hutch help more > /dev/null
+          hutch machine --help | grep -q 'lead'
+          if hutch doctor > doctor.out 2>&1; then cat doctor.out; exit 1; fi
+          cat doctor.out
+          grep -q 'no machine set' doctor.out
+          if HUTCH_MACHINE=nosuch.invalid hutch ls > ls.out 2>&1; then exit 1; fi
+          cat ls.out
+          grep -q 'nosuch.invalid' ls.out
