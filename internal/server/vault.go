@@ -22,6 +22,8 @@ import (
 
 var errNoBucket = errors.New("the machine has no bucket: hutch machine bucket")
 
+var errNoSnapshot = errors.New("the bucket has no snapshot of it")
+
 // loadMaster reads the master key, creating it on first start. It never leaves the
 // server except wrapped by the recovery passphrase.
 func loadMaster(dir string) (durable.Key, error) {
@@ -361,25 +363,7 @@ func Restore(ctx context.Context, dir string, cfg bucket.Config, passphrase, add
 	if err != nil {
 		return time.Time{}, err
 	}
-	_, err = db.db.Exec(`UPDATE boxes SET state = 'asleep' WHERE state = 'running' AND worker_id IN (SELECT id FROM workers WHERE linked = 0);
-		UPDATE workers SET gone = 1 WHERE linked = 0;
-		UPDATE link SET term = 0`)
-	if err == nil && address != "" {
-		_, err = db.db.Exec(`UPDATE link SET address = ? WHERE id = 1`, address)
-	}
-	// Promoting: the dead lead, which the highest lead record names, was fenced
-	// or is down. It's lost: its boxes come back elsewhere when used, and it
-	// rejoins with hutch machine add.
-	if err == nil && address != "" {
-		var l *linkState
-		if l, err = db.link(); err == nil && l != nil {
-			var r link.Record
-			var ok bool
-			if r, ok, err = link.HighestRecord(ctx, b, l.ca.Cert); err == nil && ok {
-				_, err = db.db.Exec(`UPDATE workers SET gone = 1 WHERE id = ?`, r.WorkerID)
-			}
-		}
-	}
+	err = restored(ctx, db, b, address)
 	db.db.Close()
 	if err != nil {
 		return time.Time{}, err
@@ -548,7 +532,7 @@ func (s *Server) latestSnapshot(ctx context.Context, store *api.Store) (owner st
 		}
 	}
 	if gen == 0 {
-		return "", 0, errors.New("the bucket has no snapshot of it")
+		return "", 0, errNoSnapshot
 	}
 	return owner, gen, nil
 }
@@ -582,6 +566,16 @@ func (s *Server) claim(ctx context.Context, store *api.Store, owner string, gen 
 	if err != nil {
 		return nil, err
 	}
+	// A lead restored or handed over claims its term first: a number at term
+	// 0 would be below every number the boxes already have.
+	if l, err := s.store.link(); err == nil && l != nil && l.term == 0 {
+		if err := s.checkLead(ctx); err != nil {
+			return nil, err
+		}
+		if s.store.term() == 0 {
+			return nil, errors.New("this lead hasn't claimed its term yet: try again in a few seconds")
+		}
+	}
 	next, err := s.store.nextOwner(s.store.term())
 	if err != nil {
 		return nil, err
@@ -597,4 +591,48 @@ func (s *Server) claim(ctx context.Context, store *api.Store, owner string, gen 
 	claimed := *store
 	claimed.Owner = next
 	return &claimed, nil
+}
+
+// unclaim takes back a claim whose restore failed: its copy of the manifest
+// would outrank the box's own newer snapshots where it still is.
+func (s *Server) unclaim(ctx context.Context, claimed *api.Store, gen int) {
+	if v := s.vault.Load(); v != nil {
+		if err := v.bucket.Delete(ctx, durable.ManifestName(claimed.Prefix, claimed.Owner, gen)); err != nil {
+			log.Printf("take back the claim %s of %s: %v", claimed.Owner, claimed.Prefix, err)
+		}
+	}
+}
+
+// restored makes a restored database this machine's: the old lead and machines
+// that were never linked are lost, their awake boxes asleep (they come back
+// here or elsewhere when used), and the term is claimed afresh. With address,
+// other machines dial this one there.
+func restored(ctx context.Context, db *store, b bucket.Bucket, address string) error {
+	if _, err := db.db.Exec(`UPDATE workers SET gone = 1 WHERE linked = 0; UPDATE link SET term = 0`); err != nil {
+		return err
+	}
+	if address != "" {
+		if _, err := db.db.Exec(`UPDATE link SET address = ? WHERE id = 1`, address); err != nil {
+			return err
+		}
+	}
+	// The dead lead, which the highest lead record names, was fenced or is
+	// down. It rejoins with hutch machine add.
+	l, err := db.link()
+	if err != nil {
+		return err
+	}
+	if l != nil {
+		r, ok, err := link.HighestRecord(ctx, b, l.ca.Cert)
+		if err != nil {
+			return err
+		}
+		if ok {
+			if _, err := db.db.Exec(`UPDATE workers SET gone = 1 WHERE id = ?`, r.WorkerID); err != nil {
+				return err
+			}
+		}
+	}
+	_, err = db.db.Exec(`UPDATE boxes SET state = 'asleep' WHERE state = 'running' AND worker_id IN (SELECT id FROM workers WHERE gone = 1)`)
+	return err
 }

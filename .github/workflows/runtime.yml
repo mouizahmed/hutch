@@ -45,13 +45,13 @@ jobs:
           cp dist/images/* dist/runtime/
       - name: Build a previous daemon for upgrade recovery
         run: |
-          previous_ref=375eb5dd625f53879edd83facc0280ccf5ce5705
+          previous_ref=v0.1.0
           git fetch --depth=1 origin "$previous_ref"
           previous_source=$(mktemp -d)
           trap 'rm -r -- "$previous_source"' EXIT
-          git archive "$previous_ref" | tar -xf - -C "$previous_source"
+          git archive FETCH_HEAD | tar -xf - -C "$previous_source"
           CGO_ENABLED=0 go -C "$previous_source" build -trimpath \
-            -ldflags '-s -w -X github.com/mouizahmed/hutch/internal/version.Version=375eb5d' \
+            -ldflags '-s -w -X github.com/mouizahmed/hutch/internal/version.Version=v0.1.0' \
             -o "$GITHUB_WORKSPACE/dist/runtime/hutchd-previous" ./cmd/hutchd
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

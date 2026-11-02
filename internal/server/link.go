@@ -104,12 +104,8 @@ func (s *store) useToken(secret string) (string, error) {
 
 // enrollWorker records a new linked worker, refusing a name another machine has.
 func (s *store) enrollWorker(id, name, ssh string) error {
-	var n int
-	if err := s.db.QueryRow(`SELECT count(*) FROM workers WHERE name = ? AND gone = 0`, name).Scan(&n); err != nil {
+	if err := s.nameFree(name); err != nil {
 		return err
-	}
-	if n > 0 {
-		return fmt.Errorf("a machine named %s is already added: choose another with --name", name)
 	}
 	now := time.Now().UTC()
 	_, err := s.exec(`INSERT INTO workers (id, name, created, last_seen, linked, ssh) VALUES (?, ?, ?, ?, 1, ?)`, id, name, now, now, ssh)
@@ -313,6 +309,9 @@ func (s *Server) enroll(conn net.Conn) {
 		if err != nil || l == nil {
 			return link.EnrollResponse{Error: "the lead has no link CA"}
 		}
+		if err := s.store.nameFree(req.Name); err != nil {
+			return link.EnrollResponse{Error: err.Error()}
+		}
 		ssh, err := s.store.useToken(req.Secret)
 		if err != nil {
 			return link.EnrollResponse{Error: err.Error()}
@@ -341,4 +340,16 @@ func (s *Server) linkYamux() *yamux.Config {
 		c.ConnectionWriteTimeout = max(cfg.Duration("machines.unreachable_after")-c.KeepAliveInterval, time.Second)
 	}
 	return c
+}
+
+// nameFree refuses a name another current machine has.
+func (s *store) nameFree(name string) error {
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM workers WHERE name = ? AND gone = 0`, name).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return fmt.Errorf("a machine named %s is already added: choose another with --name", name)
+	}
+	return nil
 }

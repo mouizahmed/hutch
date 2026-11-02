@@ -339,8 +339,9 @@ func run(ctx context.Context, root, fcVersion, socket string, args []string) err
 		a := agent.Start(ctx, w, ld.Name(), ld)
 		a.Restart = restart
 		if ferr == nil {
-			log.Printf("fenced: %s", why)
+			log.Printf("fenced: %s; it dials no lead until hutch machine add", why)
 			a.Fence(ctx, why)
+			return a.ServeCLI(ctx, socket, ld)
 		}
 		go func() {
 			if err := a.ServeCLI(ctx, socket, ld); err != nil {

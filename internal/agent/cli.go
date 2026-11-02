@@ -26,8 +26,8 @@ func (a *Agent) ServeCLI(ctx context.Context, socket string, dir link.Dir) error
 		host = h
 	}
 	guard := func() error {
-		if a.fenced != "" {
-			return fmt.Errorf("this machine was fenced: %s; its boxes stay asleep until it's added again (hutch machine add)", a.fenced)
+		if why := a.fenced.Load(); why != nil {
+			return fmt.Errorf("this machine was fenced: %s; its boxes stay asleep until it's added again (hutch machine add)", *why)
 		}
 		if a.server.Load() != nil {
 			return fmt.Errorf("this machine is a worker; its lead is %s: point hutch at the lead (hutch config set machine <its SSH host>)", host)

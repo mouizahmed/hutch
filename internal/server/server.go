@@ -79,8 +79,10 @@ type Server struct {
 
 	// keyProxy holds the whole keys table, to sign and refresh for workers' proxies.
 	keyProxy *keys.Proxy
-	// revoked are the logins you were told need hutch login; guarded by mu.
+	// revoked are the logins you were told need hutch login; dropped, each
+	// worker's last connection that ended; guarded by mu.
 	revoked map[string]bool
+	dropped map[string]*workerConn
 
 	// linkWake re-checks whether the link port should listen; backupNow backs up
 	// without waiting for backup.interval.
@@ -267,12 +269,16 @@ func (s *Server) attach(ctx context.Context, id, name string, conn net.Conn, lin
 	if s.workers[id] == w {
 		delete(s.workers, id)
 	}
+	if s.dropped == nil {
+		s.dropped = map[string]*workerConn{}
+	}
+	s.dropped[id] = w
 	s.mu.Unlock()
 	s.store.workerSeen(id, info)
 	s.changed()
 	log.Printf("worker %s disconnected", id)
 	if linked {
-		s.notifyLost(id, info.Name)
+		s.notifyLost(id, info.Name, w)
 	}
 }
 
@@ -511,14 +517,16 @@ func threadTitle(b api.Box, t api.ThreadState) string {
 // notifyLost tells you, once, when a worker stays unreachable for
 // machines.lost_notify_after. Its boxes are never restored elsewhere without
 // you: it may be cut off from this machine only, still running them.
-func (s *Server) notifyLost(id, name string) {
+func (s *Server) notifyLost(id, name string, gone *workerConn) {
 	after := 5 * time.Minute
 	if cfg, err := s.settings(); err == nil {
 		after = cfg.Duration("machines.lost_notify_after")
 	}
 	time.AfterFunc(after, func() {
+		// Only the connection that dropped counts: one made and lost since
+		// starts its own wait.
 		s.mu.Lock()
-		back := s.workers[id] != nil
+		back := s.workers[id] != nil || s.dropped[id] != gone
 		s.mu.Unlock()
 		if lost, err := s.workerLost(id); back || err != nil || lost {
 			return

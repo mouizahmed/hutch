@@ -75,7 +75,8 @@ func TestWorkerRefusesCLIWhileLinked(t *testing.T) {
 	}
 	// A fenced worker refuses too, with its lead gone.
 	ag.server.Store(nil)
-	ag.fenced = "another machine took over its boxes"
+	why := "another machine took over its boxes"
+	ag.fenced.Store(&why)
 	if err := rpc.Call(ctx, sess, api.BoxWake, api.IDParams{ID: "box"}, nil); err == nil || !strings.Contains(err.Error(), "fenced") {
 		t.Errorf("a fenced worker's wake: %v", err)
 	}

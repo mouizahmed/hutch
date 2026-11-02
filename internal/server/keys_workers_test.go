@@ -79,7 +79,9 @@ func TestWorkerKeysScoped(t *testing.T) {
 			mu.Unlock()
 			return nil, err
 		}}, nil)
+		s.mu.Lock()
 		s.workers[id] = &workerConn{id: id, sess: client, projects: map[string]bool{}}
+		s.mu.Unlock()
 	}
 	for _, b := range []struct{ id, worker, project, login string }{{"a1", "w-a", "p-a", "claude"}, {"b1", "w-b", "p-b", "codex"}} {
 		if err := s.store.putBox(api.Box{ID: b.id, Worker: b.worker, Project: b.project, State: "running", Created: time.Now()}); err != nil {

@@ -25,6 +25,12 @@ func TestOlder(t *testing.T) {
 		{"v0.10.0", "v0.9.0", false},
 		{"dev", "v0.1.0", false},
 		{"4a5fe90-dirty", "v0.1.0", false},
+		{"v0.1.0", "v0.1.0-16-g4a5fe90", true},
+		{"v0.1.0-16-g4a5fe90-dirty", "v0.1.0", false},
+		{"v0.1.0-9-g4a5fe90", "v0.1.0-16-gbeef123", true},
+		{"v0.1.0-16-g4a5fe90", "v0.1.0-9-gbeef123", false},
+		{"v0.1.0-rc.1", "v0.1.0-3-g4a5fe90", true},
+		{"v0.1.0-3-g4a5fe90", "v0.2.0", true},
 	} {
 		if got := Older(c.a, c.b); got != c.want {
 			t.Errorf("Older(%s, %s) = %v", c.a, c.b, got)

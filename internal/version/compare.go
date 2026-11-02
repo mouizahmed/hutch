@@ -18,6 +18,15 @@ func Older(a, b string) bool {
 			return x.n[i] < y.n[i]
 		}
 	}
+	// A build from source, described as N commits past a release
+	// (v0.1.0-16-g4a5fe90), comes after that release.
+	if xn, ok := past(x.pre); ok {
+		yn, ok := past(y.pre)
+		return ok && xn < yn
+	}
+	if _, ok := past(y.pre); ok {
+		return true
+	}
 	// A pre-release comes before its release.
 	switch {
 	case x.pre == y.pre:
@@ -101,4 +110,18 @@ func identifiers(s string, prerelease bool) bool {
 		}
 	}
 	return true
+}
+
+// past reads git describe's "<commits>-g<hash>[-dirty]" after a release.
+func past(pre string) (int, bool) {
+	n, rest, ok := strings.Cut(pre, "-g")
+	if !ok {
+		return 0, false
+	}
+	hash := strings.TrimSuffix(rest, "-dirty")
+	commits, err := strconv.Atoi(n)
+	if err != nil || len(hash) < 4 || strings.Trim(hash, "0123456789abcdef") != "" {
+		return 0, false
+	}
+	return commits, true
 }

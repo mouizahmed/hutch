@@ -66,7 +66,7 @@ func (s *Server) boxWorker(ctx context.Context, b api.Box) (*workerConn, api.Box
 	if err != nil {
 		return nil, b, fmt.Errorf("%s can't move from lost worker %s: %w", b.ID, b.Worker, err)
 	}
-	w, release, err := s.placeWait(ctx, need{memMiB: b.MemMiB, vcpus: b.VCPUs, class: b.Class}, "", b.ID, io.Discard)
+	w, release, err := s.placeWait(ctx, need{memMiB: b.MemMiB, vcpus: b.VCPUs, class: b.Class, admitted: true}, "", b.ID, io.Discard)
 	if err != nil {
 		return nil, b, err
 	}
@@ -78,6 +78,7 @@ func (s *Server) boxWorker(ctx context.Context, b api.Box) (*workerConn, api.Box
 	}
 	nb, err := s.callForBox(ctx, w, api.BoxRestore, api.RestoreParams{ID: b.ID, Store: *claimed, Generation: gen})
 	if err != nil {
+		s.unclaim(context.WithoutCancel(ctx), claimed, gen)
 		return nil, b, fmt.Errorf("restore %s on %s: %w", b.ID, w.id, err)
 	}
 	if err := s.store.setOwner(b.ID, claimed.Owner); err != nil {

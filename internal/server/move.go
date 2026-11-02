@@ -89,6 +89,7 @@ func (s *Server) move(ctx context.Context, id string, o moveOpts, stdout, stderr
 	fmt.Fprintf(stdout, "Restoring on %s...\n", w.info.Name)
 	nb, err := s.callForBox(ctx, w, api.BoxRestore, api.RestoreParams{ID: id, Store: *claimed, Generation: b.Generation})
 	if err != nil {
+		s.unclaim(context.WithoutCancel(ctx), claimed, b.Generation)
 		return r, fmt.Errorf("restore on %s: %w (the box is still on %s)", w.info.Name, err, src.info.Name)
 	}
 	if err := s.store.setOwner(id, claimed.Owner); err != nil {
@@ -360,6 +361,9 @@ func (s *Server) lose(ctx context.Context, w api.Worker, out *rpc.Out) error {
 		var at time.Time
 		if err == nil {
 			at, err = s.snapshotTime(ctx, store)
+			if err != nil && !errors.Is(err, errNoSnapshot) {
+				return fmt.Errorf("%s: reading the bucket: %w (nothing was changed; try again)", b.ID, err)
+			}
 		}
 		if err != nil {
 			if err := s.store.deleteBox(b.ID, "lost with "+w.Name); err != nil {

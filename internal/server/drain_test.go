@@ -31,7 +31,9 @@ func TestRmStopsAtABoxThatCantMove(t *testing.T) {
 	if err := s.store.ensureWorker("w-a", "a"); err != nil {
 		t.Fatal(err)
 	}
+	s.mu.Lock()
 	s.workers["w-a"] = &workerConn{id: "w-a", sess: sess, info: api.Worker{Name: "a"}, projects: map[string]bool{}}
+	s.mu.Unlock()
 	if err := s.store.putBox(api.Box{ID: "tmpl", Worker: "w-a", State: "asleep", Created: time.Now()}); err != nil {
 		t.Fatal(err)
 	}

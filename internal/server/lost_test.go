@@ -53,11 +53,15 @@ func TestRmLost(t *testing.T) {
 	cfg.LogOutput = io.Discard
 	sess, _ := yamux.Client(left, cfg)
 	defer right.Close()
+	s.mu.Lock()
 	s.workers["w-a"] = &workerConn{id: "w-a", sess: sess, info: api.Worker{Name: "a"}}
+	s.mu.Unlock()
 	if err := rm(true); err == nil || !strings.Contains(err.Error(), "isn't lost") {
 		t.Fatalf("rm --lost of a connected machine: %v", err)
 	}
+	s.mu.Lock()
 	delete(s.workers, "w-a")
+	s.mu.Unlock()
 	if err := rm(false); err == nil || !strings.Contains(err.Error(), "rm --lost") {
 		t.Fatalf("plain rm of an offline machine: %v", err)
 	}

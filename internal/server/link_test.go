@@ -62,11 +62,12 @@ func TestLinkEnrollAndRevoke(t *testing.T) {
 		s.mu.Unlock()
 		return pki.Fingerprint(l.ca.Cert) + "." + secret
 	}
-	enroll := func(tok string) (link.Dir, string, error) {
+	enrollAs := func(tok, name string) (link.Dir, string, error) {
 		dir := link.Dir(filepath.Join(t.TempDir(), "link"))
-		id, err := link.Enroll(ctx, dir, lead, tok, "w1")
+		id, err := link.Enroll(ctx, dir, lead, tok, name)
 		return dir, id, err
 	}
+	enroll := func(tok string) (link.Dir, string, error) { return enrollAs(tok, "w1") }
 
 	if _, _, err := enroll(token(time.Now().Add(-time.Minute))); err == nil {
 		t.Fatal("an expired token enrolled")
@@ -86,6 +87,17 @@ func TestLinkEnrollAndRevoke(t *testing.T) {
 	s.mu.Unlock()
 	if _, _, err := enroll(tok); err == nil {
 		t.Fatal("a used token enrolled again")
+	}
+	// A name already taken is refused without using up the token.
+	tok2 := token(time.Now().Add(time.Minute))
+	if _, _, err := enroll(tok2); err == nil || !strings.Contains(err.Error(), "already added") {
+		t.Fatalf("a second machine named w1: %v", err)
+	}
+	s.mu.Lock()
+	s.enrolledAt = time.Time{}
+	s.mu.Unlock()
+	if _, _, err := enrollAs(tok2, "w2"); err != nil {
+		t.Fatalf("the token after a refused name: %v", err)
 	}
 
 	conn, err := link.Dial(ctx, dir)

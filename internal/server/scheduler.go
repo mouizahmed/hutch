@@ -34,6 +34,8 @@ type need struct {
 	// asleep: it moves and stays asleep, so it needs a machine big enough for it,
 	// not room among the awake boxes there.
 	asleep bool
+	// admitted: a wake already counted against limits.awake_boxes.
+	admitted bool
 }
 
 func (n need) String() string { return fmt.Sprintf("%d vCPU, %s", n.vcpus, mib(n.memMiB)) }
@@ -185,13 +187,13 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !n.asleep && int64(running+s.starting) >= awakeLimit {
+	if !n.asleep && !n.admitted && int64(running+s.starting) >= awakeLimit {
 		return nil, nil, &limitError{"limits.awake_boxes", awakeLimit}
 	}
 	var cs []candidate
 	var conns []*workerConn
 	for id, w := range s.workers {
-		if (requested != "" && id != requested) || id == n.avoid || (requested == "" && draining[id]) {
+		if (requested != "" && id != requested) || id == n.avoid || draining[id] {
 			continue
 		}
 		cfg := on(id)
@@ -244,6 +246,9 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 		conns = append(conns, w)
 	}
 	if requested != "" && len(cs) == 0 {
+		if draining[requested] {
+			return nil, nil, fmt.Errorf("machine %s is being removed", machine)
+		}
 		if s.workers[requested] != nil {
 			return nil, nil, fmt.Errorf("machine %s doesn't run boxes (machine.run_boxes = false)", machine)
 		}
@@ -265,14 +270,18 @@ func (s *Server) place(n need, requested string) (*workerConn, func(), error) {
 	if n.asleep {
 		return w, func() {}, nil
 	}
+	starting := 1
+	if n.admitted {
+		starting = 0
+	}
 	s.pending[w.id] += admit
 	s.placing[w.id]++
-	s.starting++
+	s.starting += starting
 	return w, func() {
 		s.mu.Lock()
 		s.pending[w.id] -= admit
 		s.placing[w.id]--
-		s.starting--
+		s.starting -= starting
 		s.mu.Unlock()
 	}, nil
 }
