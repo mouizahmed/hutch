@@ -36,15 +36,19 @@ type Table struct {
 	// Grants lists, per box, the logins it may use; "*" means all of them.
 	Grants map[string][]string `json:"grants"`
 	CACert []byte              `json:"ca_cert"`
-	CAKey  []byte              `json:"ca_key"`
+	// CAKey and IdentitySeed are in the lead's own table only; a worker's proxy
+	// has the lead sign with them.
+	CAKey []byte `json:"ca_key,omitempty"`
 	// Reuse: a refresh this soon after the last one is answered from it.
 	Reuse time.Duration `json:"reuse"`
 	// RefreshTimeout bounds a refresh upstream and storing its result, which
 	// carry on when the box stops waiting.
 	RefreshTimeout time.Duration `json:"refresh_timeout"`
-	// Identity is opt-in by exact host; the seed stays on the machine.
-	IdentitySeed  []byte            `json:"identity_seed,omitempty"`
-	IdentityHosts []string          `json:"identity_hosts,omitempty"`
+	// Identity is opt-in by exact host.
+	IdentitySeed  []byte   `json:"identity_seed,omitempty"`
+	IdentityHosts []string `json:"identity_hosts,omitempty"`
+	// IdentityRenew: a token from the lead is renewed this long before it expires.
+	IdentityRenew time.Duration     `json:"identity_renew,omitempty"`
 	Projects      map[string]string `json:"projects,omitempty"` // box → project
 }
 

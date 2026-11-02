@@ -51,13 +51,7 @@ func Start(ctx context.Context, w *worker.Worker, name string, dir link.Dir) *Ag
 	u := newUploader(w)
 	m := newMonitor(w, u)
 	a := &Agent{w: w, m: m}
-	kp.Refreshed = func(ctx context.Context, adapter string, changes []keys.Change) error {
-		sess := a.server.Load()
-		if sess == nil {
-			return errors.New("the lead is unreachable")
-		}
-		return rpc.Call(ctx, sess, api.WorkerKeysRefreshed, api.KeysRefreshedParams{Adapter: adapter, Changes: changes}, nil)
-	}
+	kp.Lead = leadKeys{a}
 	w.OpenKeys()
 	go m.run(ctx, &a.server)
 	go m.watchPressure(ctx)
@@ -501,4 +495,33 @@ func followFile(ctx context.Context, path string, offset int64, follow bool, che
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
+}
+
+// leadKeys has the lead sign and refresh for this machine's keys proxy.
+type leadKeys struct{ a *Agent }
+
+func (l leadKeys) call(ctx context.Context, method string, params, out any) error {
+	sess := l.a.server.Load()
+	if sess == nil {
+		return errors.New("the lead is unreachable")
+	}
+	return rpc.Call(ctx, sess, method, params, out)
+}
+
+func (l leadKeys) Cert(ctx context.Context, host string, pub []byte) ([]byte, error) {
+	var der []byte
+	err := l.call(ctx, api.WorkerKeysCert, api.KeysCertParams{Host: host, Public: pub}, &der)
+	return der, err
+}
+
+func (l leadKeys) Identity(ctx context.Context, box, host string) (keys.Token, error) {
+	var t keys.Token
+	err := l.call(ctx, api.WorkerKeysIdentity, api.KeysIdentityParams{Box: box, Host: host}, &t)
+	return t, err
+}
+
+func (l leadKeys) Refresh(ctx context.Context, c keys.RefreshCall) (keys.RefreshAnswer, error) {
+	var a keys.RefreshAnswer
+	err := l.call(ctx, api.WorkerKeysRefresh, c, &a)
+	return a, err
 }

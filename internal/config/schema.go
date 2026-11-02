@@ -160,6 +160,8 @@ var Keys = []*Key{
 		Doc: "a refreshed JWT's newest placeholders that stay valid; older ones go, as boxes are written the newest when they wake"},
 	{Path: "keys.refresh_reuse", Kind: Duration, Default: "1m", Min: "0s", Max: "1h", Layers: machine,
 		Doc: "a box's login refresh this soon after another box's is answered with that one, not refreshed again"},
+	{Path: "keys.identity_renew", Kind: Duration, Default: "1m", Min: "0s", Max: "4m", Layers: machine,
+		Doc: "a box's identity token from the lead is renewed this long before it expires (it lasts five minutes)"},
 	{Path: "keys.identity_hosts", Kind: List, Layers: user,
 		Doc: "exact HTTPS hosts that receive X-Hutch-Identity, a signed five-minute JWT naming the calling box and project"},
 	{Path: "threads.echo_window", Kind: Duration, Default: "1s", Min: "0s", Max: "1m", Layers: machine,

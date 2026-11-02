@@ -77,8 +77,11 @@ const (
 	WorkerReport   = "worker.report"
 	WorkerThreads  = "worker.threads" // a box's threads changed state, between reports
 	WorkerKeys     = "worker.keys"    // the keys proxy's table, to the worker
-	// The keys proxy refreshed a login: its new real values, to store.
-	WorkerKeysRefreshed = "worker.keys_refreshed"
+	// A worker's keys proxy asks the lead for a certificate, a box's identity
+	// token, or a login's refresh.
+	WorkerKeysCert     = "worker.keys_cert"
+	WorkerKeysIdentity = "worker.keys_identity"
+	WorkerKeysRefresh  = "worker.keys_refresh"
 
 	ServerInit     = "server.init"
 	ServerGC       = "server.gc"
@@ -239,6 +242,16 @@ type ConfigPutResult struct {
 // the machine's settings don't know.
 type DoctorParams struct {
 	DefaultAgent string `json:"default_agent,omitempty"`
+}
+
+type KeysCertParams struct {
+	Host   string `json:"host"`
+	Public []byte `json:"public"` // PKIX DER
+}
+
+type KeysIdentityParams struct {
+	Box  string `json:"box"`
+	Host string `json:"host"`
 }
 
 type KeysRefreshedParams struct {

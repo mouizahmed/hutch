@@ -172,7 +172,8 @@ func (s *Server) sendWorkerSettings(ctx context.Context, w *workerConn) {
 	}
 }
 
-// hostProject gives a worker a project's key before it gets the project's boxes.
+// hostProject gives a worker a project's key, and its boxes' logins, before it
+// gets the project's boxes.
 func (s *Server) hostProject(ctx context.Context, w *workerConn, project string) {
 	if project == "" {
 		return
@@ -185,5 +186,6 @@ func (s *Server) hostProject(ctx context.Context, w *workerConn, project string)
 	s.mu.Unlock()
 	if !known {
 		s.sendWorkerSettings(ctx, w)
+		s.pushKeys(ctx, w)
 	}
 }

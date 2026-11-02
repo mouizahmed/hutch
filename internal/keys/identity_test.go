@@ -58,7 +58,7 @@ func TestBoxIdentity(t *testing.T) {
 	p.table = Table{IdentitySeed: seed, IdentityHosts: []string{"service.example"}, Projects: map[string]string{"box-a": "project-a", "box-b": "project-b"}}
 	for _, box := range []string{"box-a", "box-b"} {
 		h := http.Header{IdentityHeader: {"pretend-to-be-another-box"}, "Authorization": {"Bearer service-key"}}
-		if err := p.addIdentity(h, box, "service.example", now); err != nil {
+		if err := p.addIdentity(t.Context(), h, box, "service.example", now); err != nil {
 			t.Fatal(err)
 		}
 		verifyIdentity(t, h.Get(IdentityHeader), seed, box, p.table.Projects[box], "service.example", now)
@@ -68,12 +68,12 @@ func TestBoxIdentity(t *testing.T) {
 	}
 	for _, host := range []string{"other.example", "sub.service.example", "service.example.evil"} {
 		h := http.Header{IdentityHeader: {"forged"}}
-		if err := p.addIdentity(h, "box-a", host, now); err != nil || h.Get(IdentityHeader) != "" || p.identifies("box-a", host) {
+		if err := p.addIdentity(t.Context(), h, "box-a", host, now); err != nil || h.Get(IdentityHeader) != "" || p.identifies("box-a", host) {
 			t.Fatalf("identity leaked to %s", host)
 		}
 	}
 	h := http.Header{}
-	if err := p.addIdentity(h, "unknown", "service.example", now); err != nil || h.Get(IdentityHeader) != "" {
+	if err := p.addIdentity(t.Context(), h, "unknown", "service.example", now); err != nil || h.Get(IdentityHeader) != "" {
 		t.Fatal("unknown box got an identity")
 	}
 	first, _ := identityToken(seed, "box-a", "project-a", "service.example", now)

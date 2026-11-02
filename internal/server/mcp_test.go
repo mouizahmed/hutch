@@ -142,7 +142,7 @@ func TestMCPSyncCutShort(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.db.Close()
-	s := &Server{store: st, workers: map[string]*workerConn{}}
+	s := &Server{store: st, workers: map[string]*workerConn{}, keyProxy: keys.NewProxy()}
 	a := agents.Builtin()["claude"]
 	file := func(v string) []guestproto.File {
 		return []guestproto.File{{Path: a.MCP.File, Data: []byte(`{"mcpServers":{"api":{"headers":{"Authorization":"Bearer ` + v + `"}}}}`), Merge: true}}

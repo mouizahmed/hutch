@@ -21,6 +21,7 @@ import (
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/durable"
 	"github.com/mouizahmed/hutch/internal/guestproto"
+	"github.com/mouizahmed/hutch/internal/keys"
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
@@ -64,6 +65,8 @@ type Server struct {
 
 	// keysMu orders changes to the keys proxy's state and the pushes of its table.
 	keysMu sync.Mutex
+	// keyProxy holds the whole keys table, to sign and refresh for workers' proxies.
+	keyProxy *keys.Proxy
 
 	// linkWake re-checks whether the link port should listen; backupNow backs up
 	// without waiting for backup.interval.
@@ -86,6 +89,8 @@ type workerConn struct {
 	id   string
 	sess *yamux.Session
 	info api.Worker
+	// keys is its part of the keys table; guarded by Server.mu.
+	keys keys.Table
 	// projects whose keys the worker was given, and boxes it has yet to upload;
 	// guarded by Server.mu.
 	projects  map[string]bool
@@ -109,6 +114,10 @@ func New(cfg Config) (*Server, error) {
 	}
 	s := &Server{started: time.Now(), cfg: cfg, store: st, master: master, workers: map[string]*workerConn{}, linkWake: make(chan struct{}, 1), backupNow: make(chan struct{}, 1), pending: map[string]int{}, placing: map[string]int{}, wakes: map[string]*wakeCall{}, peaks: map[string]int{}, relieving: map[string]bool{}, threadStates: map[string]map[int]api.ThreadState{},
 		gitStates: map[string]guestproto.GitStatus{}, events: newHub()}
+	s.keyProxy = keys.NewProxy()
+	s.keyProxy.Refreshed = func(ctx context.Context, login string, changes []keys.Change) error {
+		return s.keysRefreshed(ctx, api.KeysRefreshedParams{Adapter: login, Changes: changes})
+	}
 	st.onChange = s.changed
 	st.onLogin = func() {
 		select {
@@ -260,6 +269,16 @@ func rpcCall(ctx context.Context, w *workerConn, method string, params any) erro
 	return rpc.Call(ctx, w.sess, method, params, nil)
 }
 
+// workerKeys is a connected worker's part of the keys table.
+func (s *Server) workerKeys(id string) keys.Table {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if w := s.workers[id]; w != nil {
+		return w.keys
+	}
+	return keys.Table{}
+}
+
 func (s *Server) worker(id string) (*workerConn, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -273,12 +292,35 @@ func (s *Server) worker(id string) (*workerConn, error) {
 // workerMux serves calls a worker makes to the server.
 func (s *Server) workerMux(workerID string) rpc.Mux {
 	return rpc.Mux{
-		api.WorkerKeysRefreshed: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
-			var p api.KeysRefreshedParams
+		api.WorkerKeysCert: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+			var p api.KeysCertParams
 			if err := rpc.Decode(params, &p); err != nil {
 				return nil, err
 			}
-			return nil, s.keysRefreshed(ctx, p)
+			if !s.workerKeys(workerID).Intercepts(p.Host) {
+				return nil, fmt.Errorf("%s isn't a host of this machine's logins", p.Host)
+			}
+			return s.keyProxy.SignCert(p.Host, p.Public)
+		},
+		api.WorkerKeysIdentity: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+			var p api.KeysIdentityParams
+			if err := rpc.Decode(params, &p); err != nil {
+				return nil, err
+			}
+			if !s.workerKeys(workerID).Identifies(p.Box, p.Host) {
+				return nil, fmt.Errorf("%s doesn't get an identity for %s on this machine", p.Box, p.Host)
+			}
+			return s.keyProxy.SignIdentity(p.Box, p.Host)
+		},
+		api.WorkerKeysRefresh: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
+			var c keys.RefreshCall
+			if err := rpc.Decode(params, &c); err != nil {
+				return nil, err
+			}
+			if _, ok := s.workerKeys(workerID).Projects[c.Box]; !ok {
+				return nil, fmt.Errorf("%s isn't on this machine", c.Box)
+			}
+			return s.keyProxy.Refresh(ctx, c)
 		},
 		api.WorkerReport: func(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
 			var r api.Report

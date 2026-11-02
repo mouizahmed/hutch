@@ -272,7 +272,7 @@ func (s *Server) keysTable() (keys.Table, error) {
 	}
 	t := keys.Table{Grants: grants, CACert: cert, CAKey: key, Reuse: c.Duration("keys.refresh_reuse"),
 		RefreshTimeout: c.Duration("keys.refresh_timeout"), IdentityHosts: c.List("keys.identity_hosts")}
-	t.IdentitySeed = s.identitySeed()
+	t.IdentitySeed, t.IdentityRenew = s.identitySeed(), c.Duration("keys.identity_renew")
 	t.Projects = map[string]string{}
 	boxes, err := s.store.boxes()
 	if err != nil {
@@ -325,32 +325,73 @@ func (s *Server) keysTable() (keys.Table, error) {
 	return t, nil
 }
 
-// pushKeys sends the keys proxy's table to one worker, or with nil to all. Pushes
-// are one at a time, so a worker never gets an older table after a newer one.
+// pushKeys sends each worker, or with only just that one, its part of the keys
+// table, and keeps the whole table in the lead's own proxy, which signs and
+// refreshes for theirs. Pushes are one at a time, so a worker never gets an
+// older table after a newer one.
 func (s *Server) pushKeys(ctx context.Context, only *workerConn) {
 	s.keysMu.Lock()
 	defer s.keysMu.Unlock()
 	t, err := s.keysTable()
+	if err == nil {
+		err = s.keyProxy.Set(t)
+	}
+	if err != nil {
+		log.Printf("keys: %v", err)
+		return
+	}
+	boxes, err := s.store.boxes()
 	if err != nil {
 		log.Printf("keys: %v", err)
 		return
 	}
 	s.mu.Lock()
-	workers := slices.Collect(maps.Values(s.workers))
+	var workers []*workerConn
+	tables := map[*workerConn]keys.Table{}
+	for _, w := range s.workers {
+		tables[w] = workerTable(t, boxes, w)
+		w.keys = tables[w]
+		if only == nil || w == only {
+			workers = append(workers, w)
+		}
+	}
 	s.mu.Unlock()
 	for _, w := range workers {
-		if only != nil && w != only {
-			continue
-		}
 		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		if err := rpc.Call(ctx, w.sess, api.WorkerKeys, t, nil); err != nil {
+		if err := rpc.Call(ctx, w.sess, api.WorkerKeys, tables[w], nil); err != nil {
 			log.Printf("worker %s: keys: %v", w.id, err)
 		}
 		cancel()
 	}
 }
 
-// keysRefreshed stores a login's new real values after the proxy refreshed it.
+// workerTable is the part of t a worker gets: the boxes it has or hosts the
+// projects of, and the logins they're granted, without the CA's key or the
+// identity seed. Called with mu held.
+func workerTable(t keys.Table, boxes []api.Box, w *workerConn) keys.Table {
+	out := keys.Table{CACert: t.CACert, Reuse: t.Reuse, RefreshTimeout: t.RefreshTimeout, IdentityHosts: t.IdentityHosts,
+		IdentityRenew: t.IdentityRenew, Grants: map[string][]string{}, Projects: map[string]string{}}
+	for _, b := range boxes {
+		if b.Worker == w.id || w.projects[b.Project] {
+			out.Projects[b.ID] = t.Projects[b.ID]
+			if g, ok := t.Grants[b.ID]; ok {
+				out.Grants[b.ID] = g
+			}
+		}
+	}
+	for _, l := range t.Logins {
+		for _, g := range out.Grants {
+			if keys.Granted(g, l.Adapter) {
+				out.Logins = append(out.Logins, l)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// keysRefreshed stores a login's new real values after the lead's proxy
+// refreshed it.
 func (s *Server) keysRefreshed(ctx context.Context, p api.KeysRefreshedParams) error {
 	if strings.Contains(p.Adapter, "/") {
 		return fmt.Errorf("%s doesn't refresh", p.Adapter)

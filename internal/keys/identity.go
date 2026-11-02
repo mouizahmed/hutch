@@ -1,6 +1,7 @@
 package keys
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -66,8 +67,12 @@ func identityToken(seed []byte, box, project, host string, now time.Time) (strin
 func (p *Proxy) identifies(box, host string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	_, exists := p.table.Projects[box]
-	return exists && len(p.table.IdentitySeed) == ed25519.SeedSize && identityHost(p.table.IdentityHosts, host)
+	return p.identityOn(box, host)
+}
+
+// identityOn is called with mu held.
+func (p *Proxy) identityOn(box, host string) bool {
+	return (p.Lead != nil || len(p.table.IdentitySeed) == ed25519.SeedSize) && p.table.Identifies(box, host)
 }
 
 func identityHost(hosts []string, host string) bool {
@@ -81,19 +86,40 @@ func identityHost(hosts []string, host string) bool {
 
 // addIdentity removes a box's attempted identity before signing its actual one.
 // It never replaces the service's own Authorization header.
-func (p *Proxy) addIdentity(h http.Header, box, host string, now time.Time) error {
+func (p *Proxy) addIdentity(ctx context.Context, h http.Header, box, host string, now time.Time) error {
 	h.Del(IdentityHeader)
 	p.mu.Lock()
 	seed, project := p.table.IdentitySeed, p.table.Projects[box]
-	_, exists := p.table.Projects[box]
-	enabled := exists && len(seed) == ed25519.SeedSize && identityHost(p.table.IdentityHosts, host)
+	enabled := p.identityOn(box, host)
+	key := [2]string{box, host}
+	cached, renew := p.identities[key], p.table.IdentityRenew
 	p.mu.Unlock()
 	if !enabled {
 		return nil
 	}
-	token, err := identityToken(seed, box, project, host, now)
-	if err == nil {
-		h.Set(IdentityHeader, token)
+	if p.Lead == nil {
+		token, err := identityToken(seed, box, project, host, now)
+		if err == nil {
+			h.Set(IdentityHeader, token)
+		}
+		return err
 	}
-	return err
+	if now.Before(cached.Expires.Add(-renew)) {
+		h.Set(IdentityHeader, cached.Token)
+		return nil
+	}
+	t, err := p.Lead.Identity(ctx, box, host)
+	if err != nil {
+		return err
+	}
+	p.mu.Lock()
+	for k, old := range p.identities {
+		if !now.Before(old.Expires) {
+			delete(p.identities, k)
+		}
+	}
+	p.identities[key] = t
+	p.mu.Unlock()
+	h.Set(IdentityHeader, t.Token)
+	return nil
 }

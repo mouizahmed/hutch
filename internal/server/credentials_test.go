@@ -75,7 +75,7 @@ func TestManagedCapturePreservesStoredLogin(t *testing.T) {
 	go rpc.Serve(ctx, worker, rpc.Mux{api.BoxExec: func(_ context.Context, _ json.RawMessage, out *rpc.Out) (any, error) {
 		return rpc.ExitCode(0), out.Stdout([]byte(`{"tokens":{"access_token":"known-placeholder"}}`))
 	}}, nil)
-	s := &Server{store: st, workers: map[string]*workerConn{"fixture": {id: "fixture", sess: client}}}
+	s := &Server{store: st, workers: map[string]*workerConn{"fixture": {id: "fixture", sess: client}}, keyProxy: keys.NewProxy()}
 	a := agents.Builtin()["codex"]
 	data, _ := json.Marshal([]guestproto.File{{Path: a.Credentials[0].File, Data: []byte(`{"tokens":{"access_token":"real-provider-token"}}`)}})
 	if _, _, err := st.putLayerPart(credentialsPrefix+a.Name, 0, data); err != nil {

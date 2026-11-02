@@ -65,6 +65,8 @@ type Proxy struct {
 	// Refreshed stores a refresh's new real values and placeholders. Writes are
 	// retried in refresh order; the server pushes the new table with Set.
 	Refreshed func(ctx context.Context, login string, changes []Change) error
+	// Lead, on a worker, signs and refreshes for it.
+	Lead Lead
 
 	mu        sync.Mutex
 	table     Table
@@ -76,23 +78,22 @@ type Proxy struct {
 	transport *http.Transport
 	// pending holds refreshes not yet in a table from the server, by login: they
 	// stay applied over whatever older table arrives until it has them.
-	pending map[string][]Change
+	pending    map[string][]Change
+	identities map[[2]string]Token // from the lead, by box and host
 }
 
 // refreshState is a login's last refresh, answered again within the reuse window.
 type refreshState struct {
 	sync.Mutex
 	at      time.Time
-	status  int
-	header  http.Header
-	body    []byte
+	answer  RefreshAnswer
 	refresh string // the real refresh token it left current
 	storeMu sync.Mutex
 	queue   [][]Change
 }
 
 func NewProxy() *Proxy {
-	p := &Proxy{certs: map[string]*tls.Certificate{}, listeners: map[string]net.Listener{}, refreshes: map[string]*refreshState{}, pending: map[string][]Change{}}
+	p := &Proxy{certs: map[string]*tls.Certificate{}, listeners: map[string]net.Listener{}, refreshes: map[string]*refreshState{}, pending: map[string][]Change{}, identities: map[[2]string]Token{}}
 	p.transport = &http.Transport{
 		DialContext:         dialer(nil),
 		ForceAttemptHTTP2:   true,
@@ -107,11 +108,19 @@ func (p *Proxy) Set(t Table) error {
 	if len(t.IdentitySeed) != 0 && len(t.IdentitySeed) != ed25519.SeedSize {
 		return fmt.Errorf("keys proxy: invalid identity seed")
 	}
-	ca, err := tls.X509KeyPair(t.CACert, t.CAKey)
-	if err != nil {
-		return fmt.Errorf("keys proxy CA: %w", err)
+	var ca *tls.Certificate
+	if len(t.CAKey) > 0 {
+		pair, err := tls.X509KeyPair(t.CACert, t.CAKey)
+		if err != nil {
+			return fmt.Errorf("keys proxy CA: %w", err)
+		}
+		ca = &pair
 	}
-	caCert, err := x509.ParseCertificate(ca.Certificate[0])
+	block, _ := pem.Decode(t.CACert)
+	if block == nil {
+		return errors.New("keys proxy CA: no certificate")
+	}
+	caCert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
 		return err
 	}
@@ -120,7 +129,7 @@ func (p *Proxy) Set(t Table) error {
 	if p.caCert == nil || !p.caCert.Equal(caCert) {
 		p.certs = map[string]*tls.Certificate{}
 	}
-	p.table, p.ca, p.caCert = t, &ca, caCert
+	p.table, p.ca, p.caCert = t, ca, caCert
 	p.applyPending()
 	return nil
 }
@@ -268,7 +277,7 @@ func (p *Proxy) intercept(conn net.Conn, box, host, hostport string, allow []str
 	_, port, _ := net.SplitHostPort(hostport)
 	tc := tls.Server(conn, &tls.Config{
 		NextProtos:     []string{"http/1.1"},
-		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return p.cert(host) },
+		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) { return p.cert(hello.Context(), host) },
 	})
 	if err := tc.Handshake(); err != nil {
 		log.Printf("keys proxy: %s: TLS with %s: %v (does the box trust the machine's CA?)", box, host, err)
@@ -319,7 +328,7 @@ func (p *Proxy) intercept(conn net.Conn, box, host, hostport string, allow []str
 		// same host can't replay its token at the one it's for.
 		if port != "443" {
 			r.Header.Del(IdentityHeader)
-		} else if err := p.addIdentity(r.Header, box, host, time.Now()); err != nil {
+		} else if err := p.addIdentity(r.Context(), r.Header, box, host, time.Now()); err != nil {
 			http.Error(w, "could not sign the box's identity", http.StatusBadGateway)
 			return
 		}
@@ -343,35 +352,29 @@ type responseScrubberKey struct{}
 // so a box could otherwise grow it without end.
 const maxCerts = 1024
 
-// cert returns a certificate for host signed by the machine's CA.
-func (p *Proxy) cert(host string) (*tls.Certificate, error) {
+// cert returns a certificate for host signed by the machine's CA, by the lead
+// on a worker.
+func (p *Proxy) cert(ctx context.Context, host string) (*tls.Certificate, error) {
 	p.mu.Lock()
-	c, ca, caCert := p.certs[host], p.ca, p.caCert
+	c, caCert := p.certs[host], p.caCert
 	p.mu.Unlock()
 	if c != nil && time.Until(c.Leaf.NotAfter) > time.Hour {
 		return c, nil
-	}
-	if ca == nil {
-		return nil, errors.New("no CA yet")
 	}
 	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
 	}
-	serial, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
-	tmpl := &x509.Certificate{
-		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: host},
-		DNSNames:     []string{host},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(7 * 24 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	pub, err := x509.MarshalPKIXPublicKey(&k.PublicKey)
+	if err != nil {
+		return nil, err
 	}
-	if ip := net.ParseIP(host); ip != nil {
-		tmpl.DNSNames, tmpl.IPAddresses = nil, []net.IP{ip}
+	var der []byte
+	if p.Lead != nil {
+		der, err = p.Lead.Cert(ctx, host, pub)
+	} else {
+		der, err = p.SignCert(host, pub)
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &k.PublicKey, ca.PrivateKey)
 	if err != nil {
 		return nil, err
 	}
@@ -487,10 +490,37 @@ func refreshRequest(r *http.Request, host, port string, logins []Login) (Login, 
 	return Login{}, nil, false
 }
 
-// refresh handles a box's token refresh for login l, one at a time per login:
-// within reuse of the last one it answers from that; otherwise it refreshes the
-// real login upstream, has the new values stored, and answers with placeholders.
+// refresh answers a box's token refresh for login l. A worker's proxy has the
+// lead perform it, so two machines never race a rotating refresh token.
 func (p *Proxy) refresh(w http.ResponseWriter, r *http.Request, box, hostport string, l Login, body []byte, reuse time.Duration, transport *http.Transport) {
+	var a RefreshAnswer
+	var err error
+	if p.Lead != nil {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), p.refreshTimeout())
+		a, err = p.Lead.Refresh(ctx, RefreshCall{Box: box, Login: l.Name, HostPort: hostport, URI: r.URL.RequestURI(), Header: r.Header, Body: body})
+		cancel()
+		if err == nil && len(a.Changes) > 0 {
+			p.mu.Lock()
+			p.pending[l.Name] = append(p.pending[l.Name], a.Changes...)
+			p.applyPending()
+			p.mu.Unlock()
+		}
+	} else {
+		a, err = p.refreshed(r.Context(), box, hostport, l, r, body, reuse, transport)
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	copyHeader(w.Header(), a.Header)
+	w.WriteHeader(a.Status)
+	w.Write(a.Body)
+}
+
+// refreshed performs a refresh for login l, one at a time per login: within
+// reuse of the last one it answers from that; otherwise it refreshes the real
+// login upstream, has the new values stored, and answers with placeholders.
+func (p *Proxy) refreshed(ctx context.Context, box, hostport string, l Login, r *http.Request, body []byte, reuse time.Duration, transport *http.Transport) (RefreshAnswer, error) {
 	p.mu.Lock()
 	st := p.refreshes[l.Name]
 	if st == nil {
@@ -509,9 +539,8 @@ func (p *Proxy) refresh(w http.ResponseWriter, r *http.Request, box, hostport st
 	}
 	sec, _ := l.refreshSecret()
 	current := sec.Real
-	if st.body != nil && time.Since(st.at) < reuse && st.refresh == current {
-		writeCached(w, st)
-		return
+	if st.answer.Body != nil && time.Since(st.at) < reuse && st.refresh == current {
+		return st.answer, nil
 	}
 	// Only the refresh token becomes real, as sent (JSON or form-encoded).
 	swaps := map[string]string{}
@@ -521,12 +550,11 @@ func (p *Proxy) refresh(w http.ResponseWriter, r *http.Request, box, hostport st
 	}
 	// Once sent, the provider may rotate the refresh token: the answer must be
 	// read and kept whatever the box does meanwhile.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), p.refreshTimeout())
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.refreshTimeout())
 	defer cancel()
 	out, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+hostport+r.URL.RequestURI(), bytes.NewReader(Replace(body, swaps)))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
+		return RefreshAnswer{}, err
 	}
 	out.Header = r.Header.Clone()
 	out.Header.Set("Accept-Encoding", "identity")
@@ -535,24 +563,20 @@ func (p *Proxy) refresh(w http.ResponseWriter, r *http.Request, box, hostport st
 	swapHeaders(out.Header, []Login{l})
 	resp, err := transport.RoundTrip(out)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
+		return RefreshAnswer{}, err
 	}
 	defer resp.Body.Close()
 	decoded, err := decodedResponse(resp)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
+		return RefreshAnswer{}, err
 	}
 	defer decoded.Close()
 	data, err := io.ReadAll(io.LimitReader(decoded, (1<<20)+1))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
+		return RefreshAnswer{}, err
 	}
 	if len(data) > 1<<20 {
-		http.Error(w, "upstream refresh response is too large", http.StatusBadGateway)
-		return
+		return RefreshAnswer{}, errors.New("upstream refresh response is too large")
 	}
 	var m map[string]any
 	if resp.StatusCode != http.StatusOK || json.Unmarshal(data, &m) != nil {
@@ -560,11 +584,10 @@ func (p *Proxy) refresh(w http.ResponseWriter, r *http.Request, box, hostport st
 		// values, and the agent asks to log in again.
 		log.Printf("keys proxy: %s's refresh for %s refused upstream (%d): hutch login %s", l.Name, box, resp.StatusCode, l.Adapter)
 		scrub := scrubberOf(append([]Login{l}, p.allLogins()...))
-		copyHeader(w.Header(), resp.Header)
-		scrub.header(w.Header())
-		w.WriteHeader(resp.StatusCode)
-		w.Write(scrub.bytes(data))
-		return
+		h := http.Header{}
+		copyHeader(h, resp.Header)
+		scrub.header(h)
+		return RefreshAnswer{Status: resp.StatusCode, Header: h, Body: scrub.bytes(data)}, nil
 	}
 	changes := Placeholdered(m, l)
 	if len(changes) > 0 {
@@ -580,14 +603,14 @@ func (p *Proxy) refresh(w http.ResponseWriter, r *http.Request, box, hostport st
 	// both generations, after substituting the top-level OAuth token fields.
 	scrub := scrubberOf(append([]Login{l, {Secrets: ApplyChanges(l.Secrets, changes)}}, p.allLogins()...))
 	data, _ = ReplaceFile("refresh.json", data, scrub.reals)
-	st.at, st.status, st.body, st.refresh = time.Now(), resp.StatusCode, data, current
+	st.at, st.refresh = time.Now(), current
 	for _, c := range changes {
 		if c.Key == Norm("refresh_token") {
 			st.refresh = c.New
 		}
 	}
-	st.header = http.Header{"Content-Type": {resp.Header.Get("Content-Type")}}
-	writeCached(w, st)
+	st.answer = RefreshAnswer{Status: resp.StatusCode, Header: http.Header{"Content-Type": {resp.Header.Get("Content-Type")}}, Body: data, Changes: changes}
+	return st.answer, nil
 }
 
 // queueStore preserves refresh order while allowing the box to use the new
@@ -674,12 +697,6 @@ func Placeholdered(m map[string]any, l Login) []Change {
 		}
 	}
 	return changes
-}
-
-func writeCached(w http.ResponseWriter, st *refreshState) {
-	copyHeader(w.Header(), st.header)
-	w.WriteHeader(st.status)
-	w.Write(st.body)
 }
 
 func copyHeader(dst, src http.Header) {
