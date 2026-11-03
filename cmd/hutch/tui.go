@@ -127,6 +127,7 @@ type tui struct {
 	confirmDo func() tea.Cmd
 	search    searchState
 	forwards  map[string]*forward
+	draft     string // a failed task's prompt, for the next task form
 
 	taskLines, diffLimit int
 	cancelGrace          time.Duration

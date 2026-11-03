@@ -42,6 +42,7 @@ type task struct {
 	cmd       *exec.Cmd
 	done      chan struct{} // closed when cmd has exited
 	canceling bool
+	draft     string // the form's prompt, given back if it fails
 }
 
 func (t *task) running() bool { return t.State == taskRunning }
@@ -128,10 +129,14 @@ func (m *tui) taskDone(msg taskDoneMsg) tea.Cmd {
 	}
 	t.cmd = nil
 	var after tea.Cmd
+	again := ""
+	if t.draft != "" && (msg.err != nil || t.canceling) {
+		m.draft, again = t.draft, " (n or N brings back what you wrote)"
+	}
 	switch {
 	case t.canceling:
 		t.State, t.Err = taskCanceled, "canceled here: the machine may have done some or all of it; check before running it again"
-		m.setStatus(t.Title + ": canceled")
+		m.setStatus(t.Title + ": canceled" + again)
 	case msg.err == nil:
 		m.tasks = slices.DeleteFunc(m.tasks, func(x *task) bool { return x == t })
 		if t.open != "" {
@@ -163,7 +168,7 @@ func (m *tui) taskDone(msg taskDoneMsg) tea.Cmd {
 		if t.Err == "" {
 			t.Err = msg.err.Error()
 		}
-		m.setStatus(t.Title + " failed: " + t.Err)
+		m.setStatus(t.Title + " failed: " + t.Err + again)
 	}
 	m.build()
 	m.openPending()

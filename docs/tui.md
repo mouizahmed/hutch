@@ -8,7 +8,7 @@
 - **?** lists the keys.
 - **/** narrows the open project's list to boxes and terminals whose names, agents, branches, or machines hold what you type; **Esc** clears it. Searching never wakes or starts anything.
 
-Commands the TUI runs for you (a new box, a move, a push) show as rows at the top of the list, with their output in the pane. One that ends well leaves the list and says what it did; one that fails stays, with its error, until **d** dismisses it. **d** on a running one cancels it, asked first: it stops here, but the machine may already have done some of it. Quitting cancels what's still running, and stops it for good after `tui.cancel_grace`.
+Commands the TUI runs for you (a new box, a move, a push) show as rows at the top of the list, with their output in the pane. One that ends well leaves the list and says what it did; one that fails stays, with its error, until **d** dismisses it. When a new box or terminal fails, the next **n** or **N** opens with the prompt you wrote. **d** on a running one cancels it, asked first: it stops here, but the machine may already have done some of it. Quitting cancels what's still running, and stops it for good after `tui.cancel_grace`.
 
 The footer always says where your keys go: the list, a view, or the terminal you're typing in. **Enter** types into the selected terminal (waking a sleeping box first) and **ctrl+]** gives the keys back.
 

@@ -101,6 +101,7 @@ func (m *tui) openForm(box string) tea.Cmd {
 	f.prompt.Placeholder = "What should the agent do? (empty opens it to type in)"
 	f.prompt.CharLimit = 0
 	f.prompt.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter", "alt+enter", "ctrl+j"))
+	f.prompt.SetValue(m.draft)
 	if project, ok := strings.CutPrefix(box, "template:"); ok {
 		f.boxes, f.box, f.project, f.dir = []string{box}, 0, project, m.checkout(project)
 	}
@@ -311,7 +312,20 @@ func (m *tui) submitForm() tea.Cmd {
 			args = append(args, prompt)
 		}
 	}
-	m.form = nil
+	m.form, m.draft = nil, ""
+	return m.keepDraft(f.prompt.Value(), m.submitRun(f, box, args))
+}
+
+// keepDraft has the task just started give its prompt back to the form if it
+// fails, so a failed new box doesn't lose what was written.
+func (m *tui) keepDraft(prompt string, cmd tea.Cmd) tea.Cmd {
+	if len(m.tasks) > 0 {
+		m.tasks[len(m.tasks)-1].draft = prompt
+	}
+	return cmd
+}
+
+func (m *tui) submitRun(f *taskForm, box string, args []string) tea.Cmd {
 	if project, ok := strings.CutPrefix(box, "template:"); ok {
 		return m.run(f.dir, runLabel(m.agent)+" on the "+m.projectName(project)+" template", "", append([]string{"terminal", "template"}, args...)...)
 	}

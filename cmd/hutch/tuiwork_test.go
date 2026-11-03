@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -263,5 +264,42 @@ func TestGitViewKeepsItsTarget(t *testing.T) {
 	press(t, m, "u")
 	if v.busy != "" {
 		t.Fatalf("u on the unstaged diff did %q", v.busy)
+	}
+}
+
+// A new box that fails gives its prompt back to the next form; one sent again
+// doesn't linger.
+func TestFailedTaskKeepsPrompt(t *testing.T) {
+	m := testTUI(t)
+	m.exe = filepath.Join(t.TempDir(), "missing") // the command can't start
+	m.openForm("")
+	m.form.dir = t.TempDir()
+	m.form.prompt.SetValue("fix the flaky login test\nand add a regression test")
+	cmd := m.submitForm()
+	if cmd == nil {
+		t.Fatalf("a command that can't start reported nothing (form: %q)", m.form.err)
+	}
+	m.Update(cmd())
+	if len(m.tasks) != 1 || m.tasks[0].State != taskFailed || !strings.Contains(m.status, "brings back") {
+		t.Fatalf("tasks %+v, status %q", m.tasks, m.status)
+	}
+	m.openForm("")
+	if got := m.form.prompt.Value(); got != "fix the flaky login test\nand add a regression test" {
+		t.Fatalf("the form came back with %q", got)
+	}
+	press(t, m, "esc")
+	m.openForm("")
+	if m.form.prompt.Value() == "" {
+		t.Fatal("esc lost the kept prompt")
+	}
+	// Sent again, it's no longer kept; failing again keeps it again.
+	m.form.dir = t.TempDir()
+	cmd = m.submitForm()
+	if m.draft != "" {
+		t.Fatal("a prompt sent again is still kept")
+	}
+	m.Update(cmd())
+	if m.openForm(""); m.form.prompt.Value() == "" {
+		t.Fatal("the second failure didn't keep the prompt")
 	}
 }
