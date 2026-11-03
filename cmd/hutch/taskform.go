@@ -41,19 +41,23 @@ const (
 	fieldAgent = iota
 	fieldModel
 	fieldBox
+	fieldMachine
 	fieldName
 	fieldPrompt
 	fieldCount
 )
 
 type taskForm struct {
-	field  int
-	boxes  []string // "" is a new box
-	box    int
-	model  textinput.Model
-	name   textinput.Model // a new box's name; empty for a generated one
-	prompt textarea.Model
-	err    string
+	field int
+	boxes []string // "" is a new box
+	box   int
+	// machines a new box can go on; "" is the scheduler's choice.
+	machines []string
+	machine  int
+	model    textinput.Model
+	name     textinput.Model // a new box's name; empty for a generated one
+	prompt   textarea.Model
+	err      string
 	// project and dir are where a new box goes.
 	project, dir string
 }
@@ -65,7 +69,12 @@ var (
 
 // openForm opens the task form, on a new box or on box.
 func (m *tui) openForm(box string) tea.Cmd {
-	f := &taskForm{field: fieldPrompt, boxes: []string{""}}
+	f := &taskForm{field: fieldPrompt, boxes: []string{""}, machines: []string{""}}
+	for _, w := range m.liveWorkers() {
+		if w.Online {
+			f.machines = append(f.machines, w.Name)
+		}
+	}
 	f.project, f.dir = m.newProject()
 	for _, b := range m.boxes {
 		if b.Kind == "" && m.inTab(b) {
@@ -157,6 +166,9 @@ func (m *tui) formKey(msg tea.KeyPressMsg) tea.Cmd {
 		case fieldBox:
 			f.box = (f.box + d + len(f.boxes)) % len(f.boxes)
 			return nil
+		case fieldMachine:
+			f.machine = (f.machine + d + len(f.machines)) % len(f.machines)
+			return nil
 		}
 	}
 	var cmd tea.Cmd
@@ -221,7 +233,9 @@ func (m *tui) formPaste(msg tea.PasteMsg) tea.Cmd {
 func (m *tui) formFocus(i, d int) tea.Cmd {
 	f := m.form
 	skip := func(i int) bool {
-		return i == fieldModel && !m.hasModels() || i == fieldName && f.boxes[f.box] != "" || i == fieldPrompt && m.agent == runShell
+		newBox := f.boxes[f.box] == ""
+		return i == fieldModel && !m.hasModels() || i == fieldName && !newBox || i == fieldPrompt && m.agent == runShell ||
+			i == fieldMachine && (!newBox || len(f.machines) < 3)
 	}
 	i = (i + d + fieldCount) % fieldCount
 	for d != 0 && skip(i) {
@@ -310,7 +324,11 @@ func (m *tui) submitForm() tea.Cmd {
 		if name == "" {
 			name = names.New(taken)
 		}
-		return m.run(f.dir, "new box "+name, "", append([]string{"new", "--name", name}, args...)...)
+		flags := []string{"new", "--name", name}
+		if on := f.machines[f.machine]; on != "" {
+			flags = append(flags, "--on", on)
+		}
+		return m.run(f.dir, "new box "+name, "", append(flags, args...)...)
 	}
 	dir := m.cwd
 	for _, b := range m.boxes {
@@ -402,6 +420,17 @@ func (m *tui) formView() string {
 	}
 	lines := []string{styleBold.Render(title), "", row(fieldAgent, "Run", agentRow), row(fieldModel, "Model", modelRow),
 		row(fieldBox, "Box", boxRow)}
+	if box == "" && len(f.machines) > 2 {
+		lines = append(lines, row(fieldMachine, "Machine", choice(fieldMachine, f.machines, f.machine, func(s string) string {
+			if s == "" {
+				return "auto"
+			}
+			return s
+		})))
+		if on := f.machines[f.machine]; on != "" {
+			lines = append(lines, styleDim.Render(truncate("  Placed on "+on+", or queued there until it has room; never moved elsewhere.", w)))
+		}
+	}
 	if box == "" {
 		nameRow := "  " + f.name.View()
 		if f.field == fieldName {

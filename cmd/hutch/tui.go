@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,7 +11,6 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -55,27 +53,11 @@ type tuiRow struct {
 	project string // rowTemplate's
 }
 
-// A task is a hutch command the TUI runs in the background: its output, and the
-// step it's on.
-type task struct {
-	id, title string
-	open      string // what to select when it ends well
-	lines     []string
-	step      string
-	err       string
-	ended     bool
-	started   time.Time
-	// report: lines worth keeping in the footer when it ends well; after: what to
-	// fetch then.
-	report []string
-	after  tea.Cmd
-}
-
 // key identifies a row across refreshes.
 func (r tuiRow) key() string {
 	switch r.kind {
 	case rowTask:
-		return "task " + r.task.id
+		return "task " + r.task.ID
 	case rowTemplate:
 		return "template " + r.project
 	case rowThread:
@@ -132,6 +114,32 @@ type tui struct {
 	statusAt    time.Time
 
 	read map[string]bool // threads you've looked at since they last worked
+
+	// The view in the workspace pane (viewNone: the terminal), and each view's state.
+	view       viewKind
+	gitv       *gitView
+	portv      *portsView
+	infov      *infoView
+	taskv      *tasksView
+	setv       *settingsView
+	machinev   int
+	helpScroll int
+
+	menu      *menu   // the action palette, or a choice
+	prompt    *prompt // values an action asks for
+	confirmDo func() tea.Cmd
+	search    searchState
+	filter    filterState
+	forwards  map[string]*forward
+
+	pin      string // the terminal in the second pane
+	focus2   bool   // keys go to the second pane
+	splitPct int
+
+	taskLines, taskHistory, diffLimit int
+	taskExpiry, cancelGrace           time.Duration
+
+	offline bool // tests: terminals aren't connected
 
 	active  string   // the open tab's project, as last chosen here
 	closed  []string // tabs closed here
@@ -196,7 +204,10 @@ func runTUI(cmd *cobra.Command, _ []string) error {
 		agent: cfg.String("default_agent"), adapters: agents.Builtin(), models: map[string]string{},
 		listWidth: int(cfg.Int("tui.list_width")), kept: int(cfg.Int("tui.kept_panes")), reconnect: cfg.Duration("tui.reconnect"),
 		projects: map[string]string{}, templates: map[string][]api.Template{}, panes: map[string]*pane{},
-		read: map[string]bool{}}
+		read: map[string]bool{}, forwards: map[string]*forward{}, splitPct: 50,
+		taskLines: int(cfg.Int("tui.task_lines")), taskHistory: int(cfg.Int("tui.task_history")),
+		taskExpiry: cfg.Duration("tui.task_expiry"), cancelGrace: cfg.Duration("tui.cancel_grace"), diffLimit: int(cfg.Size("tui.diff_limit"))}
+	m.loadTasks()
 	if repo, _ := config.FindRepo(cwd); repo != nil {
 		m.here = repo.ID
 	}
@@ -205,6 +216,9 @@ func runTUI(cmd *cobra.Command, _ []string) error {
 	m.shown.Store("")
 	m.prog = tea.NewProgram(m, tea.WithContext(ctx))
 	_, err = m.prog.Run()
+	m.stopTasks()
+	m.saveTasks()
+	m.stopForwards()
 	for _, p := range m.panes {
 		p.close()
 	}
@@ -255,9 +269,15 @@ func (m *tui) fetchProjects() tea.Cmd {
 	}
 }
 
-// layout is where the pane goes: beside the list, below it, or the whole screen
-// but the footer.
+// layout is where the workspace pane is drawn.
 func (m *tui) layout() (x, y, w, h int) {
+	r, _, _, _ := m.panes2()
+	return r.x, r.y, r.w, r.h
+}
+
+// layout0 is the workspace area: beside the list, below it, or the whole screen
+// but the footer.
+func (m *tui) layout0() (x, y, w, h int) {
 	switch {
 	case m.zoom:
 		return 0, 1, m.w, max(m.h-2, 1)
@@ -338,55 +358,51 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for k := range m.panes {
 			m.drop(k)
 		}
+		m.restartForwards()
 		return m, tea.Batch(m.watch(), m.fetchProjects())
 	case taskLineMsg:
-		if t := m.task(msg.id); t != nil {
-			t.lines = append(t.lines, msg.line)
-			if len(t.lines) > 500 {
-				t.lines = t.lines[len(t.lines)-500:]
-			}
-			if step, ok := strings.CutPrefix(strings.TrimSpace(msg.line), "==> "); ok {
-				t.step = step
-			}
-		}
+		m.taskLine(msg)
 	case taskDoneMsg:
-		if t := m.task(msg.id); t != nil {
-			t.ended = true
-			var after tea.Cmd
-			if msg.err == nil {
-				m.tasks = slices.DeleteFunc(m.tasks, func(x *task) bool { return x == t })
-				if t.open != "" {
-					m.open = t.open
-				}
-				// What new and thread report starting: "<box>/<n> [<agent>] started …".
-				for _, l := range t.lines {
-					if f := strings.Fields(l); len(f) > 1 && strings.Contains(f[0], "/") && slices.Contains(f[1:min(len(f), 3)], "started") {
-						m.open = f[0]
-					}
-				}
-				var kept []string
-				for _, l := range t.lines {
-					for _, r := range t.report {
-						if strings.HasPrefix(strings.TrimSpace(l), r) {
-							kept = append(kept, strings.TrimSpace(l))
-						}
-					}
-				}
-				if len(kept) > 0 {
-					m.setStatus(t.title + ": " + strings.Join(kept, " · "))
-				}
-				after = t.after
-			} else {
-				t.err = lastLine(t.lines)
-				if t.err == "" {
-					t.err = msg.err.Error()
-				}
-				m.setStatus(t.title + " failed: " + t.err)
-			}
-			m.build()
-			m.openPending()
-			return m, after
+		return m, m.taskDone(msg)
+	case gitStatusMsg, gitDiffMsg, gitDoneMsg:
+		return m, m.gitMsg(msg)
+	case gitRefreshMsg:
+		if m.gitv != nil && m.gitv.box.ID == msg.box {
+			return m, m.gitRefresh()
 		}
+	case portsMsg:
+		if v := m.portv; v != nil && v.box.ID == msg.box {
+			v.err, v.read = "", time.Now()
+			if msg.err != nil {
+				v.err = msg.err.Error()
+			} else {
+				v.ports = msg.status.Ports
+			}
+		}
+	case infoMsg:
+		if v := m.infov; v != nil && v.box.ID == msg.box {
+			if msg.err != nil {
+				v.err = msg.err.Error()
+			} else {
+				st := msg.status
+				v.live = &st
+			}
+		}
+	case settingsMsg:
+		if v := m.setv; v != nil {
+			v.loading, v.err = false, ""
+			if msg.err != nil {
+				v.err = msg.err.Error()
+			}
+			if msg.cfg != nil {
+				v.cfg = msg.cfg
+			}
+			if msg.user != nil {
+				v.user = msg.user
+			}
+		}
+	case interactiveDoneMsg:
+		return m, m.interactiveDone(msg)
 	case doneMsg:
 		if msg.status != "" {
 			m.setStatus(msg.status)
@@ -396,14 +412,17 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.openPending()
 		}
 	case tea.PasteMsg:
-		if m.form != nil {
+		switch {
+		case m.form != nil:
 			return m, m.formPaste(msg)
+		case m.prompt != nil:
+			return m, m.promptPaste(msg)
 		}
-		if p := m.shownPane(); m.typing && p != nil {
+		if p := m.inputPane(); m.typing && p != nil {
 			p.withEmu(func(e *vt.Emulator) { e.Paste(msg.Content) })
 		}
 	case tea.MouseMsg:
-		if m.form != nil || m.confirm != "" || m.picker != nil {
+		if m.form != nil || m.confirm != "" || m.picker != nil || m.menu != nil || m.prompt != nil {
 			return m, nil // a popup has the mouse too
 		}
 		return m, m.mouse(msg)
@@ -413,6 +432,10 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.pickerKey(msg)
 		case m.form != nil:
 			return m, m.formKey(msg)
+		case m.prompt != nil:
+			return m, m.promptKey(msg)
+		case m.menu != nil:
+			return m, m.menuKey(msg)
 		case m.confirm != "":
 			return m, m.confirmKey(msg)
 		case m.typing:
@@ -420,11 +443,15 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.typing = false
 				return m, nil
 			}
-			if p := m.shownPane(); p != nil {
+			if p := m.inputPane(); p != nil {
 				k := uv.KeyPressEvent(uv.Key(msg))
 				p.withEmu(func(e *vt.Emulator) { e.SendKey(k) })
 			}
 			return m, nil
+		case m.search.typing:
+			return m, m.searchKey(msg)
+		case m.view != viewNone:
+			return m, m.viewKey(msg)
 		}
 		return m, m.key(msg)
 	}
@@ -511,68 +538,80 @@ func (m *tui) setStatus(s string) { m.status, m.statusAt = s, time.Now() }
 
 func (m *tui) key(msg tea.KeyPressMsg) tea.Cmd {
 	r := m.selected()
-	switch msg.String() {
+	k := msg.String()
+	switch k {
 	case "q", "ctrl+c":
-		return tea.Quit
+		return m.quit()
 	case "j", "down":
 		m.move(1)
+		return nil
 	case "k", "up":
 		m.move(-1)
+		return nil
 	case "enter":
 		return m.enter(r)
-	case "N", "b", "S", "i":
-		if p := templateOf(r); p != "" {
-			return m.templateKey(p, msg.String())
+	case "space", ":":
+		return m.openPalette()
+	case "esc":
+		if m.filtering() {
+			m.clearFilters()
 		}
+		return nil
 	case "[":
 		m.stepTab(-1)
 		return nil
 	case "]":
 		m.stepTab(1)
 		return nil
-	case "p":
-		m.openPicker()
-		return nil
-	case "x":
-		m.closeTab(m.project())
-		return nil
-	}
-	switch msg.String() {
-	case "n":
-		return m.openForm("")
-	case "N":
-		return m.openForm(r.box.ID)
-	case "s":
-		if r.box.ID != "" {
-			return m.sleepWake(r.box)
+	case "N", "b", "S", "i":
+		// On a template's row these act on the template.
+		if p := templateOf(r); p != "" {
+			return m.templateKey(p, k)
 		}
-	case "d":
-		if r.kind == rowTask {
-			if r.task.ended {
-				m.tasks = slices.DeleteFunc(m.tasks, func(x *task) bool { return x == r.task })
-				m.build()
-				m.sync()
-			} else {
-				m.setStatus(r.task.title + " is still running")
-			}
+	}
+	cmd, _ := m.actionKey(k)
+	return cmd
+}
+
+// viewKey handles a key in a view; the palette and help work in every one.
+func (m *tui) viewKey(msg tea.KeyPressMsg) tea.Cmd {
+	switch msg.String() {
+	case ":":
+		return m.openPalette()
+	case "?":
+		if m.view != viewHelp {
+			m.setView(viewHelp)
 			return nil
 		}
-		if r.box.ID != "" {
-			m.confirm = r.key()
-			what := "box " + r.box.ID + " and its terminals"
-			switch r.kind {
-			case rowThread:
-				what = "terminal " + r.key() + " (" + r.thread.Title + ")"
-			}
-			m.confirmText = "Remove " + what + "?"
-			m.confirmHint = "y removes · any other key keeps it"
+	case "ctrl+c":
+		return m.quit()
+	case "w":
+		if m.pin != "" && m.view != viewHelp {
+			m.swapFocus()
+			return nil
 		}
-	case "\\":
-		m.below = !m.below
-		m.resize()
-	case "z":
-		m.zoom = !m.zoom
-		m.resize()
+	case "enter":
+		// With the second pane focused, Enter types into its terminal.
+		if m.pin != "" && m.focus2 {
+			m.typing = true
+			return nil
+		}
+	}
+	switch m.view {
+	case viewGit:
+		return m.gitKey(msg)
+	case viewPorts:
+		return m.portsKey(msg)
+	case viewInfo:
+		return m.infoKey(msg)
+	case viewMachines:
+		return m.machinesKey(msg)
+	case viewTasks:
+		return m.tasksKey(msg)
+	case viewSettings:
+		return m.settingsKey(msg)
+	case viewHelp:
+		return m.helpKey(msg)
 	}
 	return nil
 }
@@ -580,6 +619,14 @@ func (m *tui) key(msg tea.KeyPressMsg) tea.Cmd {
 // enter wakes a sleeping box (saying so), reconnects a dropped terminal, or types
 // into a live one.
 func (m *tui) enter(r tuiRow) tea.Cmd {
+	if m.pin != "" && m.focus2 {
+		m.typing = true
+		return nil
+	}
+	if r.kind == rowTask {
+		m.openTasks(r.task)
+		return nil
+	}
 	if r.box.ID == "" {
 		return nil
 	}
@@ -647,10 +694,13 @@ func (m *tui) nextAgent(forward bool) string {
 }
 
 func (m *tui) confirmKey(msg tea.KeyPressMsg) tea.Cmd {
-	key := m.confirm
-	m.confirm = ""
+	key, do := m.confirm, m.confirmDo
+	m.confirm, m.confirmDo = "", nil
 	if msg.String() != "y" {
 		return nil
+	}
+	if key == "ask" {
+		return do()
 	}
 	for _, verb := range []string{"build", "snapshot"} {
 		if project, ok := strings.CutPrefix(key, verb+" "); ok {
@@ -677,68 +727,6 @@ func (m *tui) confirmKey(msg tea.KeyPressMsg) tea.Cmd {
 	return nil
 }
 
-// run runs a hutch command in the background, in dir, as a task row at the top of
-// the list whose pane shows its output; it goes when the command ends well, and
-// open is selected. A failed task stays, with its output, until d dismisses it.
-func (m *tui) run(dir, title, open string, args ...string) tea.Cmd {
-	return m.start(dir, title, open, exec.Command(m.exe, args...))
-}
-
-// start runs c as a task (see run).
-func (m *tui) start(dir, title, open string, c *exec.Cmd) tea.Cmd {
-	m.taskN++
-	t := &task{id: strconv.Itoa(m.taskN), title: title, open: open, step: "starting", started: time.Now()}
-	m.tasks = append(m.tasks, t)
-	m.build()
-	m.selectKey("task " + t.id)
-	m.sync()
-	prog := m.prog
-	c.Dir = dir
-	c.Env = append(os.Environ(), "NO_COLOR=1")
-	go func() {
-		r, w, err := os.Pipe()
-		if err != nil {
-			prog.Send(taskDoneMsg{t.id, err})
-			return
-		}
-		c.Stdout, c.Stderr = w, w
-		err = c.Start()
-		w.Close()
-		if err != nil {
-			r.Close()
-			prog.Send(taskDoneMsg{t.id, err})
-			return
-		}
-		sc := bufio.NewScanner(r)
-		sc.Buffer(make([]byte, 64<<10), 1<<20)
-		for sc.Scan() {
-			prog.Send(taskLineMsg{t.id, ansi.Strip(sc.Text())})
-		}
-		r.Close()
-		prog.Send(taskDoneMsg{t.id, c.Wait()})
-	}()
-	return nil
-}
-
-func (m *tui) task(id string) *task {
-	for _, t := range m.tasks {
-		if t.id == id {
-			return t
-		}
-	}
-	return nil
-}
-
-// lastLine is a command's last line of output, its error when it fails.
-func lastLine(lines []string) string {
-	for i := len(lines) - 1; i >= 0; i-- {
-		if l := strings.TrimSpace(strings.TrimPrefix(lines[i], "hutch: ")); l != "" {
-			return l
-		}
-	}
-	return ""
-}
-
 func (m *tui) projectName(id string) string {
 	if name := m.projects[id]; name != "" {
 		return name
@@ -748,29 +736,29 @@ func (m *tui) projectName(id string) string {
 
 func (m *tui) mouse(msg tea.MouseMsg) tea.Cmd {
 	mo := msg.Mouse()
-	px, py, pw, ph := m.layout()
-	inPane := mo.X >= px && mo.X < px+pw && mo.Y >= py && mo.Y < py+ph
-	if p := m.shownPane(); inPane && p != nil && !p.ended.Load() {
-		if _, click := msg.(tea.MouseClickMsg); click && !m.typing {
-			m.typing = true
+	main, second, split, _ := m.panes2()
+	if split && second.has(mo.X, mo.Y) {
+		if _, click := msg.(tea.MouseClickMsg); click {
+			m.focus2, m.typing = true, true
+			m.markHidden()
 		}
-		e := uv.Mouse{X: mo.X - px, Y: mo.Y - py, Button: mo.Button, Mod: mo.Mod}
-		var ev vt.Mouse
-		switch msg.(type) {
-		case tea.MouseClickMsg:
-			ev = uv.MouseClickEvent(e)
-		case tea.MouseReleaseMsg:
-			ev = uv.MouseReleaseEvent(e)
-		case tea.MouseWheelMsg:
-			ev = uv.MouseWheelEvent(e)
-		case tea.MouseMotionMsg:
-			ev = uv.MouseMotionEvent(e)
-		}
-		if ev != nil {
-			p.withEmu(func(em *vt.Emulator) { em.SendMouse(ev) })
+		if p := m.panes[m.pin]; p != nil && !p.ended.Load() {
+			e := uv.Mouse{X: mo.X - second.x, Y: mo.Y - second.y, Button: mo.Button, Mod: mo.Mod}
+			m.sendMouse(p, msg, e)
 		}
 		return nil
 	}
+	px, py, pw, ph := main.x, main.y, main.w, main.h
+	inPane := main.has(mo.X, mo.Y)
+	if p := m.shownPane(); inPane && p != nil && !p.ended.Load() && m.view == viewNone {
+		if _, click := msg.(tea.MouseClickMsg); click && (!m.typing || m.focus2) {
+			m.typing, m.focus2 = true, false
+			m.markHidden()
+		}
+		m.sendMouse(p, msg, uv.Mouse{X: mo.X - px, Y: mo.Y - py, Button: mo.Button, Mod: mo.Mod})
+		return nil
+	}
+	_, _ = pw, ph
 	if _, click := msg.(tea.MouseClickMsg); click && mo.Y == 0 {
 		return m.clickTab(mo.X)
 	}
@@ -792,6 +780,23 @@ func (m *tui) mouse(msg tea.MouseMsg) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+func (m *tui) sendMouse(p *pane, msg tea.MouseMsg, e uv.Mouse) {
+	var ev vt.Mouse
+	switch msg.(type) {
+	case tea.MouseClickMsg:
+		ev = uv.MouseClickEvent(e)
+	case tea.MouseReleaseMsg:
+		ev = uv.MouseReleaseEvent(e)
+	case tea.MouseWheelMsg:
+		ev = uv.MouseWheelEvent(e)
+	case tea.MouseMotionMsg:
+		ev = uv.MouseMotionEvent(e)
+	}
+	if ev != nil {
+		p.withEmu(func(em *vt.Emulator) { em.SendMouse(ev) })
+	}
 }
 
 // changes forgets that you read threads that are working again.
@@ -826,7 +831,7 @@ func (m *tui) ring(t api.Thread) tea.Cmd {
 	return tea.Raw(fmt.Sprintf("\a\x1b]9;hutch: %s %s: %s\a", key, verb, strings.ReplaceAll(t.Title, "\a", "")))
 }
 
-func (m *tui) looking(key string) bool { return m.focused && m.shown.Load().(string) == key }
+func (m *tui) looking(key string) bool { return m.focused && m.visible(key) }
 
 // build lays out the rows: running tasks, then the open tab's boxes, most
 // recently started first, with their threads, and its template last.
@@ -835,7 +840,7 @@ func (m *tui) build() {
 	project := m.project()
 	var boxes []api.Box
 	for _, b := range m.boxes {
-		if b.Kind != api.BoxVersion && m.inTab(b) {
+		if b.Kind != api.BoxVersion && (m.inTab(b) || m.search.all && m.search.query != "") {
 			boxes = append(boxes, b)
 		}
 	}
@@ -847,20 +852,33 @@ func (m *tui) build() {
 	})
 	m.rows = nil
 	for _, t := range m.tasks {
-		m.rows = append(m.rows, tuiRow{kind: rowTask, label: t.title, task: t})
+		if t.listed() {
+			m.rows = append(m.rows, tuiRow{kind: rowTask, label: t.Title, task: t})
+		}
 	}
+	filtering := m.filtering()
 	templateBox := false
 	for _, b := range boxes {
 		label := b.ID
 		if b.Kind == api.BoxTemplate {
 			label, templateBox = m.templateLabel(b.Project), true
 		}
-		m.rows = append(m.rows, tuiRow{kind: rowBox, box: b, label: label})
-		for _, t := range b.Threads {
-			m.rows = append(m.rows, tuiRow{kind: rowThread, box: b, thread: t, label: t.Title})
+		if m.search.all && b.Project != project {
+			label = m.projectName(b.Project) + " · " + label
 		}
+		var threads []tuiRow
+		for _, t := range b.Threads {
+			if !filtering || m.threadMatches(b, t) {
+				threads = append(threads, tuiRow{kind: rowThread, box: b, thread: t, label: t.Title})
+			}
+		}
+		if filtering && len(threads) == 0 && !m.boxMatches(b) {
+			continue
+		}
+		m.rows = append(m.rows, tuiRow{kind: rowBox, box: b, label: label})
+		m.rows = append(m.rows, threads...)
 	}
-	if project != "" && project != otherTab && !templateBox {
+	if project != "" && project != otherTab && !templateBox && !filtering {
 		m.rows = append(m.rows, tuiRow{kind: rowTemplate, project: project, label: m.templateLabel(project)})
 	}
 	if !m.selectKey(selected) {
@@ -947,6 +965,13 @@ func (m *tui) sync() {
 			m.drop(k)
 		}
 	}
+	if m.pin != "" && !live[m.pin] {
+		m.pin, m.focus2 = "", false
+		m.resize()
+	}
+	if m.pin != "" && m.focused && m.visible(m.pin) {
+		m.read[m.pin] = true
+	}
 	key := ""
 	if box, n, ok := m.target(m.selected()); ok {
 		key = paneKey(box, n)
@@ -955,13 +980,21 @@ func (m *tui) sync() {
 		}
 		m.order = append(slices.DeleteFunc(m.order, func(k string) bool { return k == key }), key)
 		for len(m.order) > m.kept {
-			m.drop(m.order[0])
+			old := m.order[0]
+			if old == m.pin {
+				m.order = append(m.order[1:], old)
+				if len(m.order) <= 1 {
+					break
+				}
+				old = m.order[0]
+			}
+			m.drop(old)
 		}
-		if n > 0 && m.focused {
+		if n > 0 && m.focused && m.view == viewNone {
 			m.read[key] = true
 		}
 	}
-	if m.shown.Load().(string) != key {
+	if m.shown.Load().(string) != key && !(m.pin != "" && m.focus2) {
 		m.typing = false
 	}
 	m.shown.Store(key)
@@ -973,8 +1006,12 @@ func (m *tui) connect(box string, n int) {
 	p := newPane(box, n, w, h)
 	key := paneKey(box, n)
 	m.panes[key] = p
+	if m.offline {
+		return
+	}
+	pinned := func() bool { return key == m.pin }
 	changed := func() {
-		if m.shown.Load().(string) == key && m.dirty.CompareAndSwap(false, true) {
+		if (m.shown.Load().(string) == key || pinned()) && m.dirty.CompareAndSwap(false, true) {
 			go m.prog.Send(paneMsg{})
 		}
 	}
@@ -992,6 +1029,9 @@ func (m *tui) drop(key string) {
 // markHidden tells each kept thread terminal whether you see it: off screen, the
 // box may sleep; on screen while the terminal isn't focused, you aren't looking.
 func (m *tui) markHidden() {
+	if m.offline {
+		return
+	}
 	for key, p := range m.panes {
 		p.setHidden(m.ctx, m.sess, m.hiddenMark(key))
 	}
@@ -999,7 +1039,7 @@ func (m *tui) markHidden() {
 
 func (m *tui) hiddenMark(key string) string {
 	switch {
-	case m.shown.Load().(string) != key:
+	case !m.visible(key):
 		return guestproto.HiddenOff
 	case !m.focused:
 		return guestproto.HiddenAway
@@ -1009,45 +1049,109 @@ func (m *tui) hiddenMark(key string) string {
 
 func (m *tui) shownPane() *pane { return m.panes[m.shown.Load().(string)] }
 
-func (m *tui) resize() {
-	_, _, w, h := m.layout()
-	for _, p := range m.panes {
-		p.resize(w, h)
-	}
-}
+func (m *tui) resize() { m.resizePanes() }
 
 func (m *tui) View() tea.View {
-	px, py, pw, ph := m.layout()
-	screen, cursor := m.paneView(pw, ph)
+	ax, ay, aw, ah := m.layout0()
+	main, second, split, collapsed := m.panes2()
+	var screen string
+	var cursor *uv.Position
+	switch {
+	case collapsed && m.focus2:
+		screen = lipgloss.NewStyle().Width(aw).Height(ah).MaxWidth(aw).MaxHeight(ah).Render(m.pinnedView(aw, ah))
+		if p := m.panes[m.pin]; p != nil {
+			_, cursor = p.render()
+		}
+	default:
+		screen, cursor = m.workspaceView(main.w, main.h)
+		if m.view != viewNone || (m.pin != "" && m.focus2) {
+			cursor = nil
+		}
+	}
+	if split {
+		second2 := lipgloss.NewStyle().Width(second.w).Height(second.h).MaxWidth(second.w).MaxHeight(second.h).Render(m.pinnedView(second.w, second.h))
+		if m.focus2 {
+			if p := m.panes[m.pin]; p != nil {
+				_, cursor = p.render()
+			}
+		}
+		if second.x > main.x {
+			sep := styleRule.Render(strings.TrimSuffix(strings.Repeat("│\n", main.h), "\n"))
+			if m.focus2 {
+				sep = styleUnread.Render(strings.TrimSuffix(strings.Repeat("│\n", main.h), "\n"))
+			}
+			screen = lipgloss.JoinHorizontal(lipgloss.Top, screen, sep, second2)
+		} else {
+			rule := styleRule
+			if m.focus2 {
+				rule = styleUnread
+			}
+			screen = lipgloss.JoinVertical(lipgloss.Left, screen, rule.Render(strings.Repeat("─", main.w)), second2)
+		}
+	}
 	var body string
 	switch {
 	case m.zoom:
 		body = screen
 	case m.below:
-		lh := py - 2
+		lh := ay - 2
 		body = lipgloss.JoinVertical(lipgloss.Left, m.listView(m.w, lh), styleRule.Render(strings.Repeat("─", m.w)), screen)
 	default:
-		sep := styleRule.Render(strings.TrimSuffix(strings.Repeat("│\n", ph), "\n"))
-		body = lipgloss.JoinHorizontal(lipgloss.Top, m.listView(px-1, ph), sep, screen)
+		sep := styleRule.Render(strings.TrimSuffix(strings.Repeat("│\n", ah), "\n"))
+		body = lipgloss.JoinHorizontal(lipgloss.Top, m.listView(ax-1, ah), sep, screen)
 	}
-	screen = lipgloss.JoinVertical(lipgloss.Left, m.tabBar(m.w), body, m.footer())
+	full := lipgloss.JoinVertical(lipgloss.Left, m.tabBar(m.w), body, m.footer())
 	switch {
 	case m.picker != nil:
-		screen = m.overlay(screen, m.pickerView())
+		full = m.overlay(full, m.pickerView())
 	case m.form != nil:
-		screen = m.overlay(screen, m.formView())
+		full = m.overlay(full, m.formView())
+	case m.prompt != nil:
+		full = m.overlay(full, m.promptView())
+	case m.menu != nil:
+		full = m.overlay(full, m.menuView())
 	case m.confirm != "":
-		screen = m.overlay(screen, m.confirmView())
+		full = m.overlay(full, m.confirmView())
 	}
-	v := tea.NewView(screen)
+	v := tea.NewView(full)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 	v.ReportFocus = true
 	v.WindowTitle = "hutch"
 	if m.typing && cursor != nil {
-		v.Cursor = tea.NewCursor(px+cursor.X, py+cursor.Y)
+		r := m.inputRect()
+		if collapsed {
+			r = main
+		}
+		v.Cursor = tea.NewCursor(r.x+cursor.X, r.y+cursor.Y)
 	}
 	return v
+}
+
+// workspaceView is the workspace pane: a view, or the selected row's terminal.
+func (m *tui) workspaceView(w, h int) (string, *uv.Position) {
+	if m.view == viewNone {
+		return m.paneView(w, h)
+	}
+	box := lipgloss.NewStyle().Width(w).Height(h).MaxWidth(w).MaxHeight(h)
+	var s string
+	switch m.view {
+	case viewGit:
+		s = m.gitView(w, h)
+	case viewPorts:
+		s = m.portsView(w, h)
+	case viewInfo:
+		s = m.infoView(w, h)
+	case viewMachines:
+		s = m.machinesView(w, h)
+	case viewTasks:
+		s = m.tasksView(w, h)
+	case viewSettings:
+		s = m.settingsView(w, h)
+	case viewHelp:
+		s = m.helpView(w, h)
+	}
+	return box.Render(s), nil
 }
 
 func (m *tui) paneView(w, h int) (string, *uv.Position) {
@@ -1056,6 +1160,8 @@ func (m *tui) paneView(w, h int) (string, *uv.Position) {
 	p := m.shownPane()
 	exited, _ := shownThread(r)
 	switch {
+	case len(m.rows) == 0 && m.filtering():
+		return box.Render(styleDim.Render("\n  Nothing matches " + m.filterLine() + ". Running tasks stay in t.")), nil
 	case len(m.rows) == 0:
 		if m.project() == "" {
 			return box.Render(styleDim.Render("\n  No projects yet. p adds a checkout.")), nil
@@ -1084,12 +1190,12 @@ func (m *tui) paneView(w, h int) (string, *uv.Position) {
 		return box.Render(styleDim.Render(strings.Join(lines, "\n"))), nil
 	case r.kind == rowTask:
 		t := r.task
-		head := styleBold.Render(t.title) + styleDim.Render(fmt.Sprintf(" · %s · %s", t.step, time.Since(t.started).Round(time.Second)))
-		if t.ended {
-			head = styleError.Render(t.title+" failed") + styleDim.Render(" · d dismisses")
+		head := styleBold.Render(t.Title) + styleDim.Render(fmt.Sprintf(" · %s · %s · enter: all its output", t.Step, time.Since(t.Started).Round(time.Second)))
+		if !t.running() {
+			head = styleError.Render(t.Title+" "+string(t.State)) + styleDim.Render(" · enter: its output, retry · d dismisses")
 		}
 		var lines []string
-		for _, l := range t.lines[max(len(t.lines)-max(h-2, 0), 0):] {
+		for _, l := range t.Lines[max(len(t.Lines)-max(h-2, 0), 0):] {
 			lines = append(lines, truncate(l, w-1))
 		}
 		return box.Render(head + "\n\n" + strings.Join(lines, "\n")), nil
@@ -1117,6 +1223,12 @@ func (m *tui) listView(w, h int) string {
 	}
 	m.offset = max(min(m.offset, len(m.rows)-rows), 0)
 	lines := []string{m.machineLine(w)}
+	if f := m.filterLine(); f != "" {
+		lines = append(lines, styleWorking.Render(truncate(" "+f, w)))
+		if m.cursor < m.offset+1 && m.offset > 0 {
+			m.offset--
+		}
+	}
 	for i := m.offset; i < len(m.rows) && len(lines) < h; i++ {
 		line := m.rowView(m.rows[i], w)
 		if i == m.cursor {
@@ -1215,12 +1327,12 @@ func (m *tui) rowView(r tuiRow, w int) string {
 		return spread(" "+styleDim.Render(r.label), styleDim.Render(right), w)
 	case rowTask:
 		t := r.task
-		dot, step := styleWorking.Render(spinner[m.frame%len(spinner)]), t.step
-		if t.ended {
-			dot, step = styleError.Render("!"), "failed"
+		dot, step := styleWorking.Render(spinner[m.frame%len(spinner)]), t.Step
+		if !t.running() {
+			dot, step = taskMark(t), string(t.State)
 		}
 		right := styleDim.Render(truncate(step, w/2))
-		return spread(" "+dot+" "+truncate(t.title, w-lipgloss.Width(right)-5), right, w)
+		return spread(" "+dot+" "+truncate(t.Title, w-lipgloss.Width(right)-5), right, w)
 	}
 	t := r.thread
 	key := r.key()
@@ -1249,20 +1361,36 @@ func (m *tui) rowView(r tuiRow, w int) string {
 }
 
 func (m *tui) footer() string {
+	var mode string
 	switch {
-	case m.status != "":
-		return " " + styleDim.Render(truncate(m.status, m.w-2))
+	case m.search.typing:
+		return " " + m.search.input.View() + styleDim.Render("  enter keeps it · tab every project · esc clears")
 	case m.typing:
-		return styleTyping.Render(" typing ") + styleDim.Render(" ctrl+] gives the keys back")
+		where := m.shown.Load().(string)
+		if m.pin != "" && m.focus2 {
+			where = m.pin
+		}
+		mode = styleTyping.Render(" typing in "+where+" ") + styleDim.Render(" ctrl+] gives the keys back")
+	case m.view != viewNone:
+		mode = styleTyping.Render(" " + viewNames[m.view] + " ")
+	default:
+		mode = styleTyping.Render(" list ")
 	}
-	keys := "n new box · N new terminal · enter type · [ ] p tabs · s sleep/wake · d rm · \\ move · z zoom · q quit"
-	if p := templateOf(m.selected()); p != "" {
-		keys = "N new terminal · b build · S snapshot · n new box · [ ] p tabs · q quit"
-		if m.projects[p] == "" || !m.hasRecipe(p) {
-			keys = "i set up (hutch init) · [ ] p tabs · q quit"
+	if m.pin != "" && !m.typing {
+		focus := "workspace"
+		if m.focus2 {
+			focus = m.pin
+		}
+		mode += styleDim.Render(" focus: " + focus)
+	}
+	rest := m.status
+	if rest == "" && !m.typing {
+		rest = "space actions · ? help · / search · n new box · N terminal · g git · o ports · i details · t tasks · q quit"
+		if m.view != viewNone {
+			rest = ": actions · ? help · esc back"
 		}
 	}
-	return styleDim.Render(" " + truncate(keys, m.w-2))
+	return mode + " " + styleDim.Render(truncate(rest, m.w-lipgloss.Width(mode)-2))
 }
 
 // highlight puts bg behind a styled line of width w, keeping its colors.

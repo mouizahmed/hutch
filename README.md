@@ -43,7 +43,7 @@ hutch                                 # TUI: projects, boxes, and terminals
 
 Setup explains its storage plan before formatting a blank disk or making an XFS image. With no backup bucket, losing the machine loses its boxes. A project needs a Git origin reachable from the machine; the GitHub login supplies access to private GitHub repositories.
 
-See the [VPS quick start](docs/quickstart.md), [several machines](docs/machines.md), [configuration](docs/configuration.md), [security model](docs/security.md), and [release preparation](docs/releases.md).
+See the [VPS quick start](docs/quickstart.md), [the TUI](docs/tui.md), [several machines](docs/machines.md), [configuration](docs/configuration.md), [security model](docs/security.md), and [release preparation](docs/releases.md).
 
 ## License
 
