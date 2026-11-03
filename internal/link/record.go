@@ -179,6 +179,9 @@ func StillAlive(ctx context.Context, b bucket.Bucket, id, name string) error {
 	if err != nil {
 		return fmt.Errorf("reading the bucket's clock: %w", err)
 	}
+	if now.IsZero() || o.Modified.IsZero() {
+		return fmt.Errorf("the bucket doesn't say when %s last wrote its heartbeat, so it can't be told down", name)
+	}
 	age := now.Sub(o.Modified)
 	if limit := 3 * h.Every; age < limit {
 		return fmt.Errorf("%s wrote to the bucket %s ago, so it isn't down: it may be cut off from you and the other machines but still working. Stop it, or if it is down, wait %s and try again",

@@ -208,7 +208,8 @@ func (s *Server) hostProject(ctx context.Context, w *workerConn, project string)
 	}
 }
 
-// runNoBoxes sets machine.run_boxes = false in machine id's own config, once.
+// runNoBoxes sets machine.run_boxes = false in machine id's own config, which
+// has no box runtime; set to true, it's set back on its next connection.
 func (s *Server) runNoBoxes(id string) error {
 	c, err := s.settingsOn(id)
 	if err != nil || !c.Bool("machine.run_boxes") {

@@ -156,5 +156,7 @@ func linkFromWorkers(ctx context.Context, sess *yamux.Session, checks []api.Chec
 
 // linkProbe prints the lead address a worker dials, and fails, printing
 // "unreachable <address>", when it can't open a connection to it.
-const linkProbe = `lead=$(sudo -n cat /var/lib/hutch/link/lead)
-if timeout 5 bash -c "exec 3<>/dev/tcp/${lead%:*}/${lead##*:}" 2>/dev/null; then echo "$lead"; else echo "unreachable $lead"; exit 1; fi`
+const linkProbe = `lead=$(sudo -n cat /var/lib/hutch/link/lead 2>/dev/null || true)
+[ -n "$lead" ] || { echo "no lead address recorded in /var/lib/hutch/link/lead"; exit 2; }
+host=${lead%:*}; host=${host#[}; host=${host%]}
+if timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2"' sh "$host" "${lead##*:}" 2>/dev/null; then echo "$lead"; else echo "unreachable $lead"; exit 1; fi`

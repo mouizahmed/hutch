@@ -33,9 +33,6 @@ type Config struct {
 	// another machine leads. Nil in tests.
 	Restart func()
 	Fence   func(why string)
-	// NoBoxes: this machine only coordinates, so its own machine config says
-	// machine.run_boxes = false.
-	NoBoxes bool
 }
 
 type Server struct {
@@ -201,11 +198,7 @@ func (s *Server) AttachWorker(ctx context.Context, id, name string, conn net.Con
 	s.mu.Lock()
 	s.local = id
 	s.mu.Unlock()
-	if s.cfg.NoBoxes {
-		if err := s.runNoBoxes(id); err != nil {
-			log.Printf("machine.run_boxes: %v", err)
-		}
-	}
+
 	s.attach(ctx, id, name, conn, false)
 }
 
@@ -245,6 +238,11 @@ func (s *Server) attach(ctx context.Context, id, name string, conn net.Conn, lin
 		return
 	}
 	info.ID, info.Online = id, true
+	if info.NoBoxes {
+		if err := s.runNoBoxes(id); err != nil {
+			log.Printf("worker %s: machine.run_boxes: %v", id, err)
+		}
+	}
 	if err := s.store.workerSeen(id, info); err != nil {
 		log.Printf("worker %s: %v", id, err)
 		return

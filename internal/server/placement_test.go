@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/hashicorp/yamux"
+	"net"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/mouizahmed/hutch/internal/api"
+	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
 // Each machine is placed by its own machine config, in placement.order, and a
@@ -189,7 +192,7 @@ func TestSettingsCached(t *testing.T) {
 // A machine set up with --no-boxes marks itself coordinate-only in its own
 // machine config, once, keeping what else is set there.
 func TestRunNoBoxes(t *testing.T) {
-	s, err := New(Config{Dir: t.TempDir(), NoBoxes: true})
+	s, err := New(Config{Dir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,5 +221,39 @@ func TestRunNoBoxes(t *testing.T) {
 	}
 	if err := s.checkFits(t.Context(), need{memMiB: 1024, vcpus: 1}); err == nil || !strings.Contains(err.Error(), "hutch machine add") {
 		t.Fatalf("a box with no machine that runs boxes: %v", err)
+	}
+}
+
+// A machine set up with --no-boxes says so when it connects, whether it leads
+// or is a worker, and the lead keeps boxes off it.
+func TestNoBoxesFromHello(t *testing.T) {
+	s, err := New(Config{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	left, right := net.Pipe()
+	go func() {
+		sess, err := yamux.Server(right, yamux.DefaultConfig())
+		if err != nil {
+			return
+		}
+		ok := func(context.Context, json.RawMessage, *rpc.Out) (any, error) { return nil, nil }
+		rpc.Serve(ctx, sess, rpc.Mux{
+			api.WorkerHello: func(context.Context, json.RawMessage, *rpc.Out) (any, error) {
+				return api.Worker{Name: "coord", Link: api.LinkProtocol, NoBoxes: true}, nil
+			},
+			api.WorkerSettings: ok, api.WorkerKeys: ok,
+		}, nil)
+	}()
+	go s.AttachWorker(ctx, "w-coord", "coord", left)
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if c, err := s.settingsOn("w-coord"); err == nil && !c.Bool("machine.run_boxes") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("machine.run_boxes wasn't set false for a machine with no box runtime")
+		}
 	}
 }

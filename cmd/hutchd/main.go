@@ -362,7 +362,7 @@ func run(ctx context.Context, root, fcVersion, socket string, args []string) err
 		a.Fence(ctx, why)
 		return a.ServeCLI(ctx, socket, "")
 	}
-	s, err := server.New(server.Config{Dir: filepath.Join(root, "state"), Socket: socket, Restart: restart, NoBoxes: worker.NoBoxes(root),
+	s, err := server.New(server.Config{Dir: filepath.Join(root, "state"), Socket: socket, Restart: restart,
 		Fence: func(why string) { writeFenced(root, why); restart() }})
 	if err != nil {
 		return err

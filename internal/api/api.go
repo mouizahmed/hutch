@@ -679,6 +679,9 @@ type Worker struct {
 	Link int `json:"link,omitempty"`
 	// SSH is the host it was added with, which a fence reaches it through.
 	SSH string `json:"ssh,omitempty"`
+	// NoBoxes: set up to only coordinate (hutch setup --no-boxes); it has no
+	// box runtime.
+	NoBoxes bool `json:"no_boxes,omitempty"`
 }
 
 // Disk is a worker's data volume, in bytes.

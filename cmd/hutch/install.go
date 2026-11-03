@@ -172,7 +172,7 @@ echo "boxes=$(sudo -n ls /var/lib/hutch/boxes 2>/dev/null | tr '\n' ' ')"
 # DER bytes): the one it trusts as a worker, and those of lead state it keeps aside.
 cas=""
 for f in $(sudo -n sh -c 'ls /var/lib/hutch/link/ca.pem /var/lib/hutch/state/*/ca.pem' 2>/dev/null); do
-  cas="$cas $(sudo -n sed '/-----/d' "$f" 2>/dev/null | base64 -d 2>/dev/null | sha256sum | cut -c1-64)"
+  cas="$cas $( { sudo -n sed '/-----/d' "$f" | base64 -d | sha256sum | cut -c1-64; } 2>/dev/null || true)"
 done
 echo "link_ca=$cas"
 `
@@ -598,8 +598,8 @@ func prepare(ctx context.Context, host string, f installFlags) (remote, probe, a
 		return r, p, artifacts{}, storagePlan{}, err
 	}
 	if f.noBoxes {
-		if p.get("state") == "yes" && p.get("noboxes") != "yes" {
-			return r, p, artifacts{}, storagePlan{}, fmt.Errorf("%s already runs boxes; --no-boxes is for a new machine (hutch config set --on <it> machine.run_boxes false stops new boxes there)", host)
+		if p.get("noboxes") != "yes" && (p.get("state") == "yes" || p.get("worker") == "yes" || strings.TrimSpace(p.get("boxes")) != "") {
+			return r, p, artifacts{}, storagePlan{}, fmt.Errorf("%s already runs boxes or belongs to a Hutch setup; --no-boxes is for a new machine (hutch config set --on <it> machine.run_boxes false stops new boxes there)", host)
 		}
 		p.values["noboxes"] = "yes"
 	}
@@ -746,7 +746,11 @@ skipped and named.`,
 				fmt.Printf("\n%s (%s)\n", w.Name, target)
 				// A worker refuses the CLI while its lead is up: the lead says
 				// what it runs.
-				if err := upgradeHost(cmd, target, f, w.Version); err != nil {
+				running := ""
+				if w.Online {
+					running = w.Version
+				}
+				if err := upgradeHost(cmd, target, f, running); err != nil {
 					fmt.Printf("  ! %v\n", err)
 					skipped = append(skipped, w.Name)
 					continue

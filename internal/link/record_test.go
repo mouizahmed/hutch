@@ -91,3 +91,16 @@ func TestStillAlive(t *testing.T) {
 		t.Fatalf("probes left in the bucket: %v", objs)
 	}
 }
+
+// A bucket that gives no time for a heartbeat can't show a machine is down.
+func TestStillAliveWithoutTimes(t *testing.T) {
+	ctx := t.Context()
+	b := bucket.NewMem()
+	b.Now = func() time.Time { return time.Time{} }
+	if err := PutAlive(ctx, b, "w-a", 30*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := StillAlive(ctx, b, "w-a", "a"); err == nil || !strings.Contains(err.Error(), "can't be told down") {
+		t.Fatalf("a heartbeat with no time: %v", err)
+	}
+}
