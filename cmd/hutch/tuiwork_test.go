@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/mouizahmed/hutch/internal/agents"
 	"github.com/mouizahmed/hutch/internal/api"
@@ -380,5 +382,132 @@ func TestFailedTaskKeepsPrompt(t *testing.T) {
 			t.Fatalf("the form came back with %q, want %q", m.form.prompt.Value(), want)
 		}
 		press(t, m, "esc")
+	}
+}
+
+// The template's row says where the template stands and the one key that takes
+// it on, whether or not a template box exists.
+func TestTemplatePane(t *testing.T) {
+	m := testTUI(t)
+	const app = "github.com/a/app"
+	m.here = app
+	m.tmplInfo = map[string]templateInfo{}
+	m.projectInfo = map[string]api.Project{}
+	m.build()
+	m.selectKey("template " + app)
+	r := m.selected()
+	if r.kind != rowTemplate {
+		t.Fatalf("selected %s", r.key())
+	}
+	pane := func() string {
+		s, _ := m.paneView(100, 30)
+		return ansi.Strip(s)
+	}
+	expect := func(stage string, want ...string) {
+		t.Helper()
+		got := pane()
+		for _, w := range want {
+			if !strings.Contains(got, w) {
+				t.Fatalf("%s: no %q in\n%s", stage, w, got)
+			}
+		}
+	}
+	expect("not set up", "no .hutch/ yet", "next  i sets it up")
+
+	os.MkdirAll(filepath.Join(m.cwd, ".hutch"), 0o755)
+	os.WriteFile(filepath.Join(m.cwd, ".hutch", "Dockerfile"), []byte("FROM x\n"), 0o644)
+	expect("set up, unread", "✓ set up", "recipe        reading")
+
+	m.tmplInfo[app] = templateInfo{since: -1, cpu: 2, memMiB: 4096, disk: "20G"}
+	expect("unconfirmed", "not built yet", "not confirmed", "next  b or S first asks you to confirm the size")
+	// b goes to the CLI, which asks for the size, rather than building in the background.
+	m.templateKey(app, "b")
+	if strings.Contains(m.status, "checking") || len(m.tasks) > 0 {
+		t.Fatalf("b built without asking for the size: %q", m.status)
+	}
+
+	m.tmplInfo[app] = templateInfo{changed: 1, since: -1, cpu: 2, memMiB: 4096, disk: "20G", confirmed: true}
+	m.projectInfo[app] = api.Project{ID: app, Peaks: &api.Peaks{MemMiB: 2150, CPUs: 1.3, OfVCPUs: 2, OfMiB: 4096}}
+	expect("changed", "1 uncommitted change(s)", "2 vCPU · 4.0 GB · 20G disk", "at most 1.3 of 2 vCPUs", "next  b builds and checks")
+	m.templateKey(app, "b")
+	if !strings.Contains(m.status, "checking") {
+		t.Fatalf("a confirmed size didn't build in the background: %q", m.status)
+	}
+
+	m.templates[app] = []api.Template{{Version: 3, Created: time.Now()}}
+	m.tmplInfo[app] = templateInfo{cpu: 2, memMiB: 4096, disk: "20G", confirmed: true}
+	expect("up to date", "v3 ·", "as v3", "next  up to date")
+
+	// With a template box, its row is the template's, and Enter there opens the
+	// agent waiting in it.
+	m.boxes = append(m.boxes, api.Box{ID: "app-template", Project: app, Kind: api.BoxTemplate, State: "running", Worker: "w-1",
+		Threads: []api.Thread{{Box: "app-template", N: 1, Agent: "claude", State: api.ThreadWaiting}, {Box: "app-template", N: 2, State: api.ThreadWorking}}})
+	m.build()
+	m.selectKey("app-template")
+	expect("template box", "app-template awake", "1 claude waiting", "Enter opens terminal 1")
+	press(t, m, "enter")
+	if got := m.selected().key(); got != "app-template/1" {
+		t.Fatalf("Enter on the template box selected %s", got)
+	}
+}
+
+// Machines are labelled by role; an old hutchd that doesn't say which leads
+// isn't called a worker.
+func TestMachineRoles(t *testing.T) {
+	m := testTUI(t)
+	one := []api.Worker{{ID: "a", Name: "a"}}
+	if got := m.role(one[0], one); got != "lead" {
+		t.Fatalf("a lone machine: %q", got)
+	}
+	two := []api.Worker{{ID: "a", Name: "a"}, {ID: "b", Name: "b"}}
+	if got := m.role(two[0], two); !strings.Contains(got, "unknown") {
+		t.Fatalf("two machines, no lead said: %q", got)
+	}
+	two[1].Lead = true
+	if m.role(two[0], two) != "worker" || m.role(two[1], two) != "lead" {
+		t.Fatal("roles from the lead field")
+	}
+}
+
+// What changed in the recipe since a version: hutch.toml, read here and never
+// built from, doesn't count.
+func TestRecipeChanges(t *testing.T) {
+	dir := t.TempDir()
+	run := func(args ...string) string {
+		t.Helper()
+		out, err := git(dir, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	write := func(name, text string) {
+		os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0o755)
+		os.WriteFile(filepath.Join(dir, name), []byte(text), 0o644)
+	}
+	run("init", "-q", "-b", "main")
+	run("config", "user.email", "t@example.com")
+	run("config", "user.name", "t")
+	write(".hutch/Dockerfile", "FROM a\n")
+	write(".hutch/hutch.toml", "version = 1\n")
+	run("add", "-A")
+	run("commit", "-qm", "v1")
+	v1 := run("rev-parse", "HEAD")
+	if c, s := recipeChanges(dir, v1); c != 0 || s != 0 {
+		t.Fatalf("as built: %d changed, %d since", c, s)
+	}
+	write(".hutch/hutch.toml", "version = 1\nsize.cpu = 4\n")
+	write("main.go", "package main\n")
+	if c, _ := recipeChanges(dir, v1); c != 0 {
+		t.Fatalf("hutch.toml or code counted as recipe changes: %d", c)
+	}
+	write(".hutch/Dockerfile", "FROM b\n")
+	run("commit", "-qam", "newer base")
+	write(".hutch/on-create.sh", "true\n")
+	if c, s := recipeChanges(dir, v1); c != 1 || s != 1 {
+		t.Fatalf("one commit and one new file: %d changed, %d since", c, s)
+	}
+	if _, s := recipeChanges(dir, "0123456789abcdef0123456789abcdef01234567"); s != -1 {
+		t.Fatalf("a version commit that isn't here: %d since", s)
 	}
 }

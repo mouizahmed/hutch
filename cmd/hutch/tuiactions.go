@@ -152,6 +152,13 @@ func (m *tui) actions() []action {
 	add("Settings", "", "Edit your config", "", func() tea.Cmd { return m.interactive(m.cwd, "config", "edit") })
 	add("Settings", "", "Edit the machine config", "", func() tea.Cmd { return m.interactive(m.cwd, "config", "edit", "--machine") })
 	add("Settings", "", "Edit the project's settings", noCheckout, func() tea.Cmd { return m.interactive(dir, "config", "edit", "--project") })
+	add("Settings", "", "Show the effective config, with where each value comes from", "", func() tea.Cmd {
+		where := m.cwd
+		if dir != "" {
+			where = dir
+		}
+		return m.interactive(where, "config", "explain")
+	})
 	add("Settings", "", "Check every config layer", "", func() tea.Cmd { return m.interactive(m.cwd, "config", "validate") })
 	add("Settings", "", "Show grants", "", func() tea.Cmd { return m.interactive(m.cwd, "config", "grants") })
 	add("Settings", "", "Revoke what's granted to this project", noCheckout, func() tea.Cmd {

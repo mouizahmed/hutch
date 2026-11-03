@@ -419,7 +419,9 @@ func templateWork(ctx context.Context, sess *yamux.Session, project, root string
 		return nil, err
 	}
 	i := slices.IndexFunc(boxes, func(b api.Box) bool { return b.Kind == api.BoxTemplate && b.Project == project })
-	if i < 0 {
+	// A failed one never ran or died before a snapshot: there's nothing to read,
+	// and the build replaces it.
+	if i < 0 || boxes[i].State == "failed" {
 		return nil, nil
 	}
 	box := boxes[i].ID

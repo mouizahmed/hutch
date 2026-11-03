@@ -25,11 +25,16 @@ import (
 
 // loadConfig resolves every layer for the project in the current directory.
 func loadConfig(ctx context.Context, sess *yamux.Session) (*config.Config, error) {
-	return loadConfigOn(ctx, sess, "")
+	return loadConfigIn(ctx, sess, "", ".")
 }
 
 // loadConfigOn resolves them with one machine's own machine config, when on names one.
 func loadConfigOn(ctx context.Context, sess *yamux.Session, on string) (*config.Config, error) {
+	return loadConfigIn(ctx, sess, on, ".")
+}
+
+// loadConfigIn is loadConfigOn for the repository at dir.
+func loadConfigIn(ctx context.Context, sess *yamux.Session, on, dir string) (*config.Config, error) {
 	var docs api.Configs
 	if err := rpc.Call(ctx, sess, api.ConfigGet, struct{}{}, &docs); err != nil {
 		return nil, err
@@ -53,7 +58,7 @@ func loadConfigOn(ctx context.Context, sess *yamux.Session, on string) (*config.
 	if err != nil {
 		return nil, err
 	}
-	repo, err := config.FindRepo(".")
+	repo, err := config.FindRepo(dir)
 	if err != nil {
 		return nil, err
 	}

@@ -85,9 +85,14 @@ type tui struct {
 		workers []api.Worker
 	} // the current state as it arrives, before synced
 	projects map[string]string // id → slug
-	rows     []tuiRow
-	cursor   int
-	offset   int
+	// projectInfo is each project as the lead last listed it; tmplInfo is what
+	// its template's row read, for the project tmplFor.
+	projectInfo map[string]api.Project
+	tmplInfo    map[string]templateInfo
+	tmplFor     string
+	rows        []tuiRow
+	cursor      int
+	offset      int
 
 	panes map[string]*pane
 	order []string // pane keys, most recently shown last
@@ -197,7 +202,7 @@ func runTUI(cmd *cobra.Command, _ []string) error {
 	m := &tui{ctx: ctx, sess: sess, exe: exe, cwd: cwd, focused: true, w: 120, h: 40,
 		agent: cfg.String("default_agent"), adapters: agents.Builtin(), models: map[string]string{},
 		listWidth: int(cfg.Int("tui.list_width")), kept: int(cfg.Int("tui.kept_panes")), reconnect: cfg.Duration("tui.reconnect"),
-		projects: map[string]string{}, templates: map[string][]api.Template{}, panes: map[string]*pane{},
+		projects: map[string]string{}, projectInfo: map[string]api.Project{}, tmplInfo: map[string]templateInfo{}, templates: map[string][]api.Template{}, panes: map[string]*pane{},
 		read: map[string]bool{}, forwards: map[string]*forward{},
 		taskLines: int(cfg.Int("tui.task_lines")), cancelGrace: cfg.Duration("tui.cancel_grace"), diffLimit: int(cfg.Size("tui.diff_limit"))}
 	if repo, _ := config.FindRepo(cwd); repo != nil {
@@ -283,6 +288,8 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.FocusMsg:
 		m.focused = true
 		m.markHidden()
+		m.tmplFor = "" // the recipe may have been edited elsewhere
+		m.refreshTemplateInfo()
 	case tea.BlurMsg:
 		m.focused = false
 		m.markHidden()
@@ -300,9 +307,9 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.adapters = agents.Set(msg)
 	case projectsMsg:
 		var cmds []tea.Cmd
-		m.projects = map[string]string{}
+		m.projects, m.projectInfo = map[string]string{}, map[string]api.Project{}
 		for _, p := range msg {
-			m.projects[p.ID] = p.Slug
+			m.projects[p.ID], m.projectInfo[p.ID] = p.Slug, p
 			cmds = append(cmds, m.fetchTemplates(p.ID))
 		}
 		for id := range m.templates {
@@ -319,6 +326,10 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case templatesMsg:
 		m.templates[msg.project] = msg.versions
 		m.build()
+		m.tmplFor = "" // read again: what's new is measured against the newest version
+		m.refreshTemplateInfo()
+	case templateInfoMsg:
+		m.tmplInfo[msg.project] = msg.info
 	case eventMsg:
 		return m, m.event(api.Event(msg))
 	case lostMsg:
@@ -573,6 +584,15 @@ func (m *tui) enter(r tuiRow) tea.Cmd {
 	}
 	if r.box.State != "running" {
 		return m.sleepWake(r.box)
+	}
+	if r.kind == rowBox && r.box.Kind == api.BoxTemplate {
+		t := waitingThread(r.box)
+		if t.N == 0 {
+			return nil
+		}
+		m.selectKey(paneKey(r.box.ID, t.N))
+		m.sync()
+		return m.enter(m.selected())
 	}
 	if t, ok := shownThread(r); ok && t.State == api.ThreadExited && t.Agent != "" {
 		ctx, sess, target := m.ctx, m.sess, api.ThreadTarget{Box: r.box.ID, N: t.N}
@@ -863,7 +883,7 @@ func shownThread(r tuiRow) (api.Thread, bool) {
 	switch {
 	case r.kind == rowThread:
 		return r.thread, true
-	case r.kind == rowBox && len(r.box.Threads) > 0:
+	case r.kind == rowBox && len(r.box.Threads) > 0 && r.box.Kind != api.BoxTemplate: // a template box's row shows the template
 		return r.box.Threads[len(r.box.Threads)-1], true
 	}
 	return api.Thread{}, false
@@ -910,6 +930,17 @@ func (m *tui) sync() {
 	}
 	m.shown.Store(key)
 	m.markHidden()
+	m.refreshTemplateInfo()
+}
+
+// refreshTemplateInfo reads the selected template row's info, if it hasn't been
+// since the row was selected.
+func (m *tui) refreshTemplateInfo() {
+	if r := m.selected(); r.kind != rowThread && templateOf(r) != "" {
+		m.loadTemplateInfo(templateOf(r))
+	} else {
+		m.tmplFor = ""
+	}
 }
 
 func (m *tui) connect(box string, n int) {
@@ -1063,18 +1094,12 @@ func (m *tui) paneView(w, h int) (string, *uv.Position) {
 		s, _ := p.render()
 		lines := strings.Split(s, "\n")
 		return box.Render(strings.Join(lines[:min(len(lines), h-1)], "\n") + "\n" + truncate(hint, w)), nil
-	case r.kind == rowTemplate:
-		lines := []string{"", "  The " + m.projectName(r.project) + " template: new boxes start from its newest version.", ""}
-		for i, v := range m.templates[r.project] {
-			if i == 5 {
-				break
-			}
-			lines = append(lines, fmt.Sprintf("  v%d  %.12s  %s", v.Version, v.Commit, ago(v.Created)))
+	case r.kind != rowThread && templateOf(r) != "":
+		var tb *api.Box
+		if r.kind == rowBox {
+			tb = &r.box
 		}
-		lines = append(lines, "", "  N  a terminal on the template: an agent (\"add Playwright browsers\"), a shell, a command",
-			"  b  build: brings the template box's work here, commits and pushes .hutch/, builds that",
-			"  S  snapshot the build as the next version")
-		return box.Render(styleDim.Render(strings.Join(lines, "\n"))), nil
+		return box.Render(m.templatePane(templateOf(r), tb, w)), nil
 	case r.kind == rowTask:
 		t := r.task
 		head := styleBold.Render(t.Title) + styleDim.Render(fmt.Sprintf(" · %s · %s · d cancels", t.Step, time.Since(t.Started).Round(time.Second)))

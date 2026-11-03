@@ -21,6 +21,20 @@ func (m *tui) openMachines() {
 	m.setView(viewMachines)
 }
 
+// role is a machine's role as shown. A hutchd older than the lead field says
+// nothing: alone, a machine leads; among several, which one does is unknown.
+func (m *tui) role(wk api.Worker, ws []api.Worker) string {
+	switch {
+	case wk.Lead:
+		return "lead"
+	case slices.ContainsFunc(ws, func(w api.Worker) bool { return w.Lead }):
+		return "worker"
+	case len(ws) == 1:
+		return "lead"
+	}
+	return "role unknown: its hutchd is older than this hutch (u upgrades)"
+}
+
 func (m *tui) liveWorkers() []api.Worker {
 	var ws []api.Worker
 	for _, w := range m.workers {
@@ -45,10 +59,7 @@ func (m *tui) machinesView(w, h int) string {
 	m.machinev = max(min(m.machinev, len(ws)-1), 0)
 	lines := []string{styleBold.Render("Machines") + styleDim.Render(fmt.Sprintf("  %d", len(ws))), ""}
 	for i, wk := range ws {
-		role := "worker"
-		if wk.Lead {
-			role = "lead"
-		}
+		role := m.role(wk, ws)
 		state := styleRead.Render("online")
 		if !wk.Online {
 			state = styleError.Render("offline since " + shortAge(wk.LastSeen))
@@ -112,7 +123,8 @@ func (m *tui) machinesKey(msg tea.KeyPressMsg) tea.Cmd {
 		if wk.ID == "" {
 			return nil
 		}
-		if wk.Lead && msg.String() != "l" {
+		lead := m.role(wk, ws) == "lead"
+		if lead && msg.String() != "l" {
 			m.setStatus(wk.Name + " leads: hand the lead to another machine first (l on it)")
 			return nil
 		}
@@ -126,7 +138,7 @@ func (m *tui) machinesKey(msg tea.KeyPressMsg) tea.Cmd {
 				return m.interactive(m.cwd, "machine", "rm", "--lost", wk.Name)
 			})
 		case "l":
-			if wk.Lead {
+			if lead {
 				m.setStatus(wk.Name + " already leads")
 				return nil
 			}
