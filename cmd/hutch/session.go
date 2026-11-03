@@ -78,7 +78,7 @@ func openShell(ctx context.Context, sess *yamux.Session, box string) error {
 	if err := rpc.Call(ctx, sess, api.ThreadNew, api.ThreadParams{Box: box, Cmd: "bash"}, &t); err != nil {
 		return err
 	}
-	return terminal(ctx, sess, box, viewArgv(t.N))
+	return terminal(ctx, sess, box, shellViewArgv(t.N))
 }
 
 // terminal runs argv on a pseudo-terminal in the box, connected to this terminal.
@@ -236,4 +236,16 @@ func viewArgv(n int) []string {
 	name := "view-" + hex.EncodeToString(b)
 	return []string{"tmux", "new-session", "-t", agentSession, "-s", name,
 		";", "set-option", "destroy-unattached", "on", ";", "select-window", "-t", name + ":" + strconv.Itoa(n)}
+}
+
+// shellViewArgv is viewArgv for a shell: when the shell exits and its window
+// closes, the view ends too, instead of tmux showing another of the box's
+// terminals in its place.
+func shellViewArgv(n int) []string {
+	view := viewArgv(n)
+	name := view[5]
+	script := `w=$(tmux display-message -p -t "$1:$2" '#{window_id}') || exit
+shift 2
+exec "$@" \; set-hook -t "$name" window-unlinked "if -F '#{==:#{hook_window},$w}' 'kill-session -t $name'"`
+	return append([]string{"sh", "-c", "name=" + name + "\n" + script, "sh", agentSession, strconv.Itoa(n)}, view...)
 }

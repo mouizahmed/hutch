@@ -87,3 +87,34 @@ func TestRmLost(t *testing.T) {
 		t.Fatal("a box never uploaded is still listed")
 	}
 }
+
+// Doctor tells a machine that was added but never connected (its link port
+// is likely blocked) from one that went offline.
+func TestDoctorNeverConnected(t *testing.T) {
+	s, err := New(Config{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.store.enrollWorker("w-new", "new", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.store.enrollWorker("w-old", "old", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.store.workerSeen("w-old", api.Worker{Version: "v0.2.0"}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.doctor(t.Context(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := map[string]string{}
+	for _, c := range res.(api.DoctorResult).Checks {
+		if c.Name == "state" {
+			states[c.Area] = c.Detail
+		}
+	}
+	if !strings.Contains(states["machine new"], "never connected") || !strings.Contains(states["machine old"], "offline since") {
+		t.Fatalf("states: %v", states)
+	}
+}

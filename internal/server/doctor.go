@@ -99,6 +99,11 @@ func (s *Server) doctor(ctx context.Context, params json.RawMessage, _ *rpc.Out)
 		}
 		conn, err := s.worker(w.ID)
 		switch {
+		case err != nil && w.Version == "":
+			// Its hello never arrived: it never reached the link port.
+			warn(area, "state", "added, but it has never connected to this machine",
+				"its hutchd must reach this machine's link port (machine.link_port): hutch doctor tries it from there over SSH; see journalctl -u hutchd there")
+			continue
 		case err != nil:
 			warn(area, "state", fmt.Sprintf("offline since %s", w.LastSeen.Format(time.DateTime)),
 				"start hutchd there: sudo systemctl start hutchd; if the machine is gone for good, hutch machine rm --lost "+w.Name)

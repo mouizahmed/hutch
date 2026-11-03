@@ -1,9 +1,14 @@
 package main
 
 import (
+	"cmp"
+	"context"
 	"fmt"
 	"os"
+	"slices"
+	"strings"
 
+	"github.com/hashicorp/yamux"
 	"github.com/spf13/cobra"
 
 	"github.com/mouizahmed/hutch/internal/api"
@@ -58,6 +63,7 @@ func doctorCommandFor(target string) *cobra.Command {
 						Detail: "hutch " + version.String() + ", hutchd " + r.Version, Fix: "use the same Hutch version on both"})
 				}
 				checks = append(checks, r.Checks...)
+				checks = linkFromWorkers(cmd.Context(), sess, checks)
 				if template {
 					var result api.DoctorResult
 					checkErr := func() error {
@@ -105,3 +111,50 @@ func doctorCommandFor(target string) *cobra.Command {
 	c.Flags().BoolVar(&template, "template", false, "build the committed project twice in temporary boxes, compare fingerprints, and check declared MCP servers")
 	return c
 }
+
+// linkFromWorkers tries the lead's link port from each worker that isn't
+// connected, over SSH: a firewall or security group between them is the usual
+// reason. Its result goes with that machine's checks.
+func linkFromWorkers(ctx context.Context, sess *yamux.Session, checks []api.Check) []api.Check {
+	var ws []api.Worker
+	if rpc.Call(ctx, sess, api.WorkerList, struct{}{}, &ws) != nil {
+		return checks
+	}
+	live := 0
+	for _, w := range ws {
+		if !w.Gone {
+			live++
+		}
+	}
+	for _, w := range ws {
+		if w.Gone || w.Online || w.Lead || live < 2 {
+			continue
+		}
+		c := api.Check{Area: "machine " + w.Name, Name: "link port from there", Status: "ok"}
+		out, err := remote{cmp.Or(w.SSH, w.Name)}.cmd(linkProbe).CombinedOutput()
+		lead := strings.TrimSpace(string(out))
+		switch {
+		case err == nil:
+			c.Detail = "reaches the lead at " + lead
+		case strings.HasPrefix(lead, "unreachable "):
+			c.Status, c.Detail = "fail", "can't reach the lead at "+strings.TrimPrefix(lead, "unreachable ")
+			c.Fix = "open the lead's link port (machine.link_port) to this machine in the lead's firewall or security group"
+		default:
+			c.Status, c.Detail = "warn", "couldn't test it over SSH ("+cmp.Or(lead, err.Error())+")"
+			c.Fix = "make ssh " + cmp.Or(w.SSH, w.Name) + " work, or check the machine is running"
+		}
+		i := len(checks)
+		for j := range checks {
+			if checks[j].Area == c.Area {
+				i = j + 1
+			}
+		}
+		checks = slices.Insert(checks, i, c)
+	}
+	return checks
+}
+
+// linkProbe prints the lead address a worker dials, and fails, printing
+// "unreachable <address>", when it can't open a connection to it.
+const linkProbe = `lead=$(sudo -n cat /var/lib/hutch/link/lead)
+if timeout 5 bash -c "exec 3<>/dev/tcp/${lead%:*}/${lead##*:}" 2>/dev/null; then echo "$lead"; else echo "unreachable $lead"; exit 1; fi`
