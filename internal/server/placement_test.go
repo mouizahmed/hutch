@@ -209,4 +209,14 @@ func TestRunNoBoxes(t *testing.T) {
 	if d, _ := s.store.config(machineDoc("w-lead")); d.Version != 2 {
 		t.Fatalf("written %d times, want once", d.Version-1)
 	}
+	// With no machine that runs boxes, a box says to add one.
+	if err := s.store.ensureWorker("w-lead", "lead"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.store.workerSeen("w-lead", api.Worker{Name: "lead", CPUs: 2, MemMiB: 2048}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.checkFits(t.Context(), need{memMiB: 1024, vcpus: 1}); err == nil || !strings.Contains(err.Error(), "hutch machine add") {
+		t.Fatalf("a box with no machine that runs boxes: %v", err)
+	}
 }

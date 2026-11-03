@@ -318,6 +318,9 @@ func (s *Server) checkFits(ctx context.Context, n need) error {
 	if !known {
 		return nil // nothing to judge by until a worker connects
 	}
+	if len(candidates) == 0 {
+		return errors.New("no machine runs boxes (machine.run_boxes = false on every one): add one with hutch machine add <ssh-host>")
+	}
 	return fmt.Errorf("a %s box doesn't fit any machine (%s); choose a smaller size, or add a bigger machine",
 		n, strings.Join(candidates, "; "))
 }
