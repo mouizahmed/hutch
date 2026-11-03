@@ -221,7 +221,7 @@ func (m *tui) gitKey(msg tea.KeyPressMsg) tea.Cmd {
 		} else {
 			v.pos = max(v.pos-1, 0)
 		}
-	case "pgdown", "space", "ctrl+d":
+	case "pgdown", "ctrl+d":
 		v.scroll += max(h-6, 1)
 	case "pgup", "ctrl+u":
 		v.scroll = max(v.scroll-max(h-6, 1), 0)

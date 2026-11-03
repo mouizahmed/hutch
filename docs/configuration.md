@@ -36,7 +36,7 @@ hutch config validate
 | `placement.order` | machine | `fill` | With several machines: `fill` the fullest that fits, or `spread` to the emptiest |
 | `machine.max_boxes` | machine | `0` (no cap) | Awake boxes one machine may run; set per machine with `--on` |
 | `machine.run_boxes` | machine | `true` | `false` makes a machine coordinate only |
-| `tui.task_history` / `tui.task_lines` / `tui.task_expiry` | user | `50` / `2000` / `7d` | Finished TUI tasks kept, output lines per task, and how long they're kept |
+| `tui.task_lines` | user | `2000` | Output lines kept for each command the TUI runs; earlier ones are dropped, and it says so |
 | `tui.cancel_grace` | user | `5s` | How long a canceled TUI task (or one running when you quit) has to stop before it's stopped for good |
 | `tui.diff_limit` | user | `2M` | The most of one diff the TUI's Git view reads |
 

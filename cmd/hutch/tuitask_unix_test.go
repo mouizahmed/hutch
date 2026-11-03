@@ -47,11 +47,8 @@ func TestCancelStopsTheGroup(t *testing.T) {
 		t.Fatal("what the command started kept running after cancel")
 	}
 	m.taskDone(taskDoneMsg{tk.ID, errors.New("signal: terminated")})
-	if tk.State != taskCanceled || !strings.Contains(tk.Err, "may have done") || tk.Ended.IsZero() {
-		t.Fatalf("state %s, %q, ended %v", tk.State, tk.Err, tk.Ended)
-	}
-	if m.trimTasks(); len(m.tasks) != 1 {
-		t.Fatal("the canceled task was forgotten at once")
+	if tk.State != taskCanceled || !strings.Contains(tk.Err, "may have done") || len(m.tasks) != 1 {
+		t.Fatalf("state %s, %q, %d tasks", tk.State, tk.Err, len(m.tasks))
 	}
 }
 

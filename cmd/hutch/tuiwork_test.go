@@ -1,10 +1,8 @@
 package main
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -25,7 +23,7 @@ func testTUI(t *testing.T) *tui {
 	m := &tui{w: 120, h: 40, focused: true, listWidth: 44, kept: 4, reached: true, synced: true,
 		projects: map[string]string{"github.com/a/app": "app", "github.com/b/api": "api"}, templates: map[string][]api.Template{},
 		panes: map[string]*pane{}, read: map[string]bool{}, forwards: map[string]*forward{}, models: map[string]string{},
-		adapters: agents.Builtin(), agent: "claude", splitPct: 50, taskLines: 5, taskHistory: 3, taskExpiry: time.Hour,
+		adapters: agents.Builtin(), agent: "claude", taskLines: 5,
 		active: "github.com/a/app", cwd: t.TempDir(), offline: true}
 	m.shown.Store("")
 	m.workers = []api.Worker{{ID: "w-1", Name: "lead", Online: true, Lead: true}, {ID: "w-2", Name: "gpu", Online: false}}
@@ -96,10 +94,9 @@ func TestActionKeysUnique(t *testing.T) {
 	}
 }
 
-// Searching and filtering narrow the list without touching the machine (it
-// has none here), keep the selection by identity, say what narrows it, and
-// clear back to everything.
-func TestSearchAndFilter(t *testing.T) {
+// Search narrows the open tab's list without touching the machine (it has none
+// here), keeps the selection by identity, and esc clears it back to everything.
+func TestSearch(t *testing.T) {
 	m := testTUI(t)
 	all := rowKeys(m)
 	m.selectKey("quiet-fox/1")
@@ -111,45 +108,18 @@ func TestSearchAndFilter(t *testing.T) {
 	if m.selected().key() != "quiet-fox/1" {
 		t.Fatalf("the selection moved to %s", m.selected().key())
 	}
-	press(t, m, "enter")
-	if !strings.Contains(m.filterLine(), `"login"`) {
-		t.Fatalf("filter line: %q", m.filterLine())
+	press(t, m, "enter", "esc")
+	if got := rowKeys(m); strings.Join(got, ",") != strings.Join(all, ",") || m.search.query != "" {
+		t.Fatalf("cleared: %v, want %v", got, all)
 	}
-
-	// Every project: a box in another project is found, and enter opens its tab.
+	// Machines match by name; another project's boxes don't show.
+	press(t, m, "/", "gpu")
+	if got := rowKeys(m); strings.Join(got, ",") != "bold-owl,bold-owl/1" {
+		t.Fatalf("search gpu: %v", got)
+	}
 	press(t, m, "esc", "/", "metrics")
 	if len(m.rows) != 0 {
-		t.Fatalf("metrics in this project only: %v", rowKeys(m))
-	}
-	press(t, m, "tab")
-	if got := rowKeys(m); strings.Join(got, ",") != "wise-elk,wise-elk/2" {
-		t.Fatalf("metrics in every project: %v", got)
-	}
-	press(t, m, "down", "enter")
-	if m.project() != "github.com/b/api" || m.selected().key() != "wise-elk/2" || m.filtering() {
-		t.Fatalf("jump: tab %s, selected %s, filtering %v", m.project(), m.selected().key(), m.filtering())
-	}
-
-	m.switchTab("github.com/a/app")
-	m.read = map[string]bool{} // selecting it above read it
-	m.filter = filterState{state: "unread"}
-	m.build()
-	if got := rowKeys(m); strings.Join(got, ",") != "quiet-fox,quiet-fox/1" {
-		t.Fatalf("unread: %v", got)
-	}
-	m.filter = filterState{state: "asleep"}
-	m.build()
-	if got := rowKeys(m); strings.Join(got, ",") != "bold-owl,bold-owl/1" {
-		t.Fatalf("asleep: %v", got)
-	}
-	m.filter = filterState{state: "unreachable"}
-	m.build()
-	if got := rowKeys(m); strings.Join(got, ",") != "bold-owl,bold-owl/1" {
-		t.Fatalf("on an offline machine: %v", got)
-	}
-	press(t, m, "F")
-	if got := rowKeys(m); strings.Join(got, ",") != strings.Join(all, ",") || m.filtering() {
-		t.Fatalf("cleared: %v, want %v", got, all)
+		t.Fatalf("another project's box showed: %v", rowKeys(m))
 	}
 }
 
@@ -184,7 +154,7 @@ func TestPalette(t *testing.T) {
 // and the footer always says the mode.
 func TestScreensFit(t *testing.T) {
 	m := testTUI(t)
-	m.tasks = []*task{{ID: "1", Title: "move quiet-fox", State: taskFailed, Args: []string{"move", "quiet-fox"}, Lines: []string{"a", "b"}, Ended: time.Now()}}
+	m.tasks = []*task{{ID: "1", Title: "move quiet-fox", State: taskFailed, Lines: []string{"a", "b"}, Err: "b"}}
 	m.build()
 	for _, size := range [][2]int{{80, 24}, {200, 60}} {
 		m.w, m.h = size[0], size[1]
@@ -192,12 +162,8 @@ func TestScreensFit(t *testing.T) {
 		for _, open := range []func(){
 			func() { m.setView(viewNone) },
 			func() { m.setView(viewHelp) },
-			func() { m.openTasks(nil) },
-			func() { m.openTasks(m.tasks[0]) },
 			func() { m.openMachines() },
-			func() { m.infov = &infoView{box: m.boxes[1]}; m.setView(viewInfo) },
 			func() { m.portv = &portsView{box: m.boxes[1]}; m.setView(viewPorts) },
-			func() { m.setv = &settingsView{}; m.setView(viewSettings) },
 			func() { m.openPalette() },
 		} {
 			m.menu = nil
@@ -221,101 +187,52 @@ func TestScreensFit(t *testing.T) {
 	m.setView(viewHelp)
 	help := m.helpView(200, 1000)
 	for _, a := range m.actions() {
-		if !strings.Contains(help, a.name) {
+		if a.key != "" && !strings.Contains(help, a.name) {
 			t.Errorf("help leaves out %q", a.name)
 		}
 	}
 }
 
-// Two panes side by side when there's room, stacked when it's tall, and one
-// (the focused) when there's room for neither.
-func TestSplitLayout(t *testing.T) {
+// A terminal under a view isn't on screen: it doesn't count as seen, and its
+// box may sleep.
+func TestViewHidesTheTerminal(t *testing.T) {
 	m := testTUI(t)
-	m.pin = "quiet-fox/1"
-	for _, c := range []struct {
-		w, h             int
-		split, collapsed bool
-		beside           bool
-	}{
-		{200, 50, true, false, true},
-		{100, 50, true, false, false},
-		{90, 12, false, true, false},
-	} {
-		m.w, m.h = c.w, c.h
-		main, second, split, collapsed := m.panes2()
-		if split != c.split || collapsed != c.collapsed {
-			t.Fatalf("%dx%d: split %v collapsed %v", c.w, c.h, split, collapsed)
-		}
-		if split && (second.x > main.x) != c.beside {
-			t.Fatalf("%dx%d: main %+v second %+v", c.w, c.h, main, second)
-		}
-		if split && (main.w < minPaneW && c.beside || second.w < minPaneW && c.beside) {
-			t.Fatalf("%dx%d: a pane narrower than %d", c.w, c.h, minPaneW)
-		}
+	m.shown.Store("quiet-fox/1")
+	if !m.visible("quiet-fox/1") {
+		t.Fatal("the shown terminal isn't visible")
 	}
-	// What's visible: the pinned pane when split; when collapsed, only the
-	// focused one. A hidden terminal neither marks read nor keeps its box awake.
-	m.w, m.h = 200, 50
-	m.shown.Store("wise-elk/2")
-	if !m.visible("quiet-fox/1") || !m.visible("wise-elk/2") {
-		t.Fatal("split: both panes should be visible")
-	}
-	m.w, m.h, m.focus2 = 90, 12, false
-	if m.visible("quiet-fox/1") || !m.visible("wise-elk/2") {
-		t.Fatal("collapsed, workspace focused: only the workspace is visible")
-	}
-	m.focus2 = true
-	if !m.visible("quiet-fox/1") || m.visible("wise-elk/2") {
-		t.Fatal("collapsed, second focused: only the second is visible")
+	m.setView(viewHelp)
+	if m.visible("quiet-fox/1") || m.hiddenMark("quiet-fox/1") == "" {
+		t.Fatal("a terminal under a view counts as seen")
 	}
 }
 
-// Task output keeps its newest lines and counts the rest; history keeps the
-// newest finished tasks within their expiry; kept tasks come back after a
-// restart, and one that was running comes back as unknown.
-func TestTaskHistory(t *testing.T) {
+// A task keeps its newest output lines and counts the rest; one that ends well
+// leaves the list, and one that failed stays until d dismisses it.
+func TestTaskRows(t *testing.T) {
 	m := testTUI(t)
 	tk := &task{ID: "1", Title: "long", State: taskRunning, Started: time.Now()}
-	m.tasks = append(m.tasks, tk)
+	ok := &task{ID: "2", Title: "quick", State: taskRunning, Started: time.Now()}
+	m.tasks = append(m.tasks, tk, ok)
 	for i := range 8 {
 		m.taskLine(taskLineMsg{"1", fmt.Sprintf("line %d", i)})
 	}
 	if len(tk.Lines) != 5 || tk.Dropped != 3 || tk.Lines[0] != "line 3" {
 		t.Fatalf("kept %v, dropped %d", tk.Lines, tk.Dropped)
 	}
-	for i := range 4 {
-		m.tasks = append(m.tasks, &task{ID: fmt.Sprint(10 + i), Title: "old", State: taskOK, Ended: time.Now().Add(-time.Duration(4-i) * time.Minute)})
+	m.taskDone(taskDoneMsg{"1", errors.New("exit status 1")})
+	m.taskDone(taskDoneMsg{"2", nil})
+	if len(m.tasks) != 1 || m.tasks[0] != tk || tk.State != taskFailed || tk.Err != "line 7" {
+		t.Fatalf("after ending: %+v", m.tasks)
 	}
-	m.tasks = append(m.tasks, &task{ID: "expired", State: taskFailed, Ended: time.Now().Add(-2 * time.Hour)})
-	m.trimTasks()
-	var ids []string
-	for _, t := range m.tasks {
-		ids = append(ids, t.ID)
+	m.cursor = 0
+	if r := m.selected(); r.kind != rowTask {
+		t.Fatalf("the failed task isn't listed first: %+v", r)
 	}
-	if strings.Join(ids, ",") != "1,11,12,13" {
-		t.Fatalf("after trimming: %v", ids)
+	press(t, m, "d")
+	if len(m.tasks) != 0 {
+		t.Fatal("d didn't dismiss the failed task")
 	}
-	m2 := testTUI(t)
-	m2.taskHistory, m2.taskExpiry = 10, time.Hour
-	m2.tasks = nil
-	// Write one running task as an old version would have, then load.
-	m.tasks = []*task{{ID: "x", Title: "was running", State: taskRunning, Started: time.Now(), Ended: time.Now()}}
-	if err := writeTasksForTest(m.tasks); err != nil {
-		t.Fatal(err)
-	}
-	m2.loadTasks()
-	if len(m2.tasks) != 1 || m2.tasks[0].State != taskUnknown || m2.tasks[0].listed() {
-		t.Fatalf("loaded: %+v", m2.tasks)
-	}
-}
-
-func writeTasksForTest(ts []*task) error {
-	data, err := json.Marshal(ts)
-	if err != nil {
-		return err
-	}
-	os.MkdirAll(filepath.Dir(tasksFile()), 0o700)
-	return os.WriteFile(tasksFile(), data, 0o600)
 }
 
 // The Git view's keys act on the diff shown, as staging regroups the list

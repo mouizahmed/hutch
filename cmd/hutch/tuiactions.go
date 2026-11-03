@@ -17,7 +17,7 @@ import (
 
 // Actions are everything the TUI can do, each with its key, where it applies,
 // and why not when it doesn't. One list drives the keys, the action palette
-// (space or :), and the help view (?), so they can't disagree.
+// (space), and the help view (?), so they can't disagree.
 
 type viewKind int
 
@@ -25,15 +25,11 @@ const (
 	viewNone viewKind = iota
 	viewGit
 	viewPorts
-	viewInfo
 	viewMachines
-	viewTasks
-	viewSettings
 	viewHelp
 )
 
-var viewNames = map[viewKind]string{viewGit: "Git", viewPorts: "Ports", viewInfo: "Details", viewMachines: "Machines",
-	viewTasks: "Tasks", viewSettings: "Settings", viewHelp: "Help"}
+var viewNames = map[viewKind]string{viewGit: "Git", viewPorts: "Ports", viewMachines: "Machines", viewHelp: "Help"}
 
 // setView shows a view in the workspace pane, or with viewNone, the terminal
 // again. The list keeps its selection either way.
@@ -41,6 +37,7 @@ func (m *tui) setView(v viewKind) {
 	m.view = v
 	m.typing = false
 	m.resize()
+	m.markHidden()
 }
 
 type action struct {
@@ -108,10 +105,9 @@ func (m *tui) actions() []action {
 	if r.kind == rowTask {
 		removeWhy = ""
 	}
-	add("Box", "d", "Remove the box or terminal (on a task: dismiss it)", removeWhy, func() tea.Cmd { return m.removeRow(r) })
+	add("Box", "d", "Remove the box or terminal (on a task: cancel or dismiss it)", removeWhy, func() tea.Cmd { return m.removeRow(r) })
 	add("Box", "g", "Git: review changes, stage, commit, push", noRepo, func() tea.Cmd { return m.openGit(b) })
 	add("Box", "o", "Ports: forward a service here", noBox, func() tea.Cmd { return m.openPorts(b) })
-	add("Box", "i", "Details", noBox, func() tea.Cmd { return m.openInfo(b) })
 	add("Box", "", "Move to another machine", noBox, func() tea.Cmd { return m.moveBox(b) })
 	add("Box", "", "Resize: CPUs, memory, disk", noBox, func() tea.Cmd { return m.resizeBox(b) })
 	add("Box", "", "Open a pull request", noRepo, func() tea.Cmd {
@@ -120,11 +116,8 @@ func (m *tui) actions() []action {
 	add("Box", "", "Bring its work into this computer's checkout (hutch local)", boxCheckout, func() tea.Cmd {
 		return m.interactive(m.checkout(b.Project), "local", b.ID)
 	})
-	add("Box", "", "Serial console", noBox, func() tea.Cmd { return m.interactive(m.cwd, "console", b.ID) })
+	add("Box", "", "Serial console (for a broken guest)", noBox, func() tea.Cmd { return m.interactive(m.cwd, "console", b.ID) })
 	add("Terminal", "r", "Rename the terminal", noTerm, func() tea.Cmd { return m.renameTerminal(r) })
-	add("Terminal", "", "Send a message to the terminal", noTerm, func() tea.Cmd { return m.sendToTerminal(r) })
-	add("Terminal", "v", "Show it in a second pane (v again closes)", "", func() tea.Cmd { return m.toggleSplit() })
-	add("Terminal", "w", "Switch pane focus", m.noSplit(), func() tea.Cmd { m.swapFocus(); return nil })
 	add("Terminal", "z", "Zoom the pane", "", func() tea.Cmd { m.zoom = !m.zoom; m.resize(); return nil })
 	add("Terminal", "\\", "Put the pane beside or below the list", "", func() tea.Cmd { m.below = !m.below; m.resize(); return nil })
 
@@ -135,21 +128,17 @@ func (m *tui) actions() []action {
 	add("Project", "b", "Build the template", noTmpl, func() tea.Cmd { return m.templateKey(tmpl, "b") })
 	add("Project", "S", "Snapshot the template as a new version", noTmpl, func() tea.Cmd { return m.templateKey(tmpl, "S") })
 	add("Project", "", "Send this computer's work to a new box (hutch cloud)", noCheckout, func() tea.Cmd { return m.interactive(dir, "cloud") })
-	add("Project", "", "Template versions", noCheckout, func() tea.Cmd { return m.run(dir, "template versions", "", "template", "versions") })
+	add("Project", "", "Template versions", noCheckout, func() tea.Cmd { return m.interactive(dir, "template", "versions") })
 	add("Project", "", "Check the template twice (doctor --template)", noCheckout, func() tea.Cmd {
-		return m.run(dir, "doctor --template", "", "doctor", "--template")
+		return m.interactive(dir, "doctor", "--template")
 	})
 	add("Project", "", "Remove the project's templates and secrets from the machine", noCheckout, func() tea.Cmd {
 		return m.confirmRun("Remove "+m.projectName(project)+"'s templates and secrets from the machine?\n\nIts boxes stay; new boxes need a new template.", dir, "remove project "+m.projectName(project), "project", "rm")
 	})
 
 	// Views.
-	add("View", "/", "Search boxes and terminals (tab: every project)", "", func() tea.Cmd { return m.startSearch() })
-	add("View", "f", "Filter the list", "", func() tea.Cmd { return m.filterMenu() })
-	add("View", "F", "Clear the search and filters", m.noFilters(), func() tea.Cmd { m.clearFilters(); return nil })
-	add("View", "t", "Tasks: output, cancel, retry", "", func() tea.Cmd { m.openTasks(nil); return nil })
+	add("View", "/", "Search this project's boxes and terminals", "", func() tea.Cmd { return m.startSearch() })
 	add("View", "m", "Machines", "", func() tea.Cmd { m.openMachines(); return nil })
-	add("View", ",", "Settings, logins, grants", "", func() tea.Cmd { return m.openSettings() })
 	add("View", "?", "Help: every key and action", "", func() tea.Cmd { m.setView(viewHelp); return nil })
 	add("View", "[ ]", "Previous or next project tab", "", func() tea.Cmd { m.stepTab(1); return nil })
 
@@ -159,13 +148,13 @@ func (m *tui) actions() []action {
 	add("Settings", "", "Edit your config", "", func() tea.Cmd { return m.interactive(m.cwd, "config", "edit") })
 	add("Settings", "", "Edit the machine config", "", func() tea.Cmd { return m.interactive(m.cwd, "config", "edit", "--machine") })
 	add("Settings", "", "Edit the project's settings", noCheckout, func() tea.Cmd { return m.interactive(dir, "config", "edit", "--project") })
-	add("Settings", "", "Check every config layer", "", func() tea.Cmd { return m.run(m.cwd, "config validate", "", "config", "validate") })
-	add("Settings", "", "Show grants", "", func() tea.Cmd { return m.run(m.cwd, "grants", "", "config", "grants") })
+	add("Settings", "", "Check every config layer", "", func() tea.Cmd { return m.interactive(m.cwd, "config", "validate") })
+	add("Settings", "", "Show grants", "", func() tea.Cmd { return m.interactive(m.cwd, "config", "grants") })
 	add("Settings", "", "Revoke what's granted to this project", noCheckout, func() tea.Cmd {
 		return m.confirmRun("Revoke everything granted to "+m.projectName(project)+"?\n\nIts boxes keep what they have until they're recreated.", dir, "revoke grants for "+m.projectName(project), "config", "grants", "--revoke")
 	})
-	add("Machine", "", "Doctor: check everything, with fixes", "", func() tea.Cmd { return m.run(m.cwd, "doctor", "", "doctor") })
-	add("Machine", "", "Box sizes and how many fit", "", func() tea.Cmd { return m.run(m.cwd, "sizes", "", "sizes") })
+	add("Machine", "", "Doctor: check everything, with fixes", "", func() tea.Cmd { return m.interactive(m.cwd, "doctor") })
+	add("Machine", "", "Box sizes and how many fit", "", func() tea.Cmd { return m.interactive(m.cwd, "sizes") })
 	add("Machine", "", "Add a machine", "", func() tea.Cmd { return m.addMachine() })
 	add("Machine", "", "Upgrade every machine", "", func() tea.Cmd { return m.interactive(m.cwd, "machine", "upgrade") })
 	add("Machine", "", "Backup bucket", "", func() tea.Cmd { return m.interactive(m.cwd, "machine", "bucket") })
@@ -491,7 +480,7 @@ func (m *tui) interactiveDone(msg interactiveDoneMsg) tea.Cmd {
 		m.setStatus(msg.what + ": done")
 	}
 	m.resize()
-	return tea.Batch(m.fetchProjects(), m.reloadSettings())
+	return m.fetchProjects()
 }
 
 func (m *tui) loginMenu() tea.Cmd {
@@ -514,14 +503,20 @@ func (m *tui) addMachine() tea.Cmd {
 	return nil
 }
 
-// removeRow asks before removing a box or a terminal, or dismisses a task.
+// removeRow asks before removing a box or a terminal or canceling a task, and
+// dismisses a task that ended.
 func (m *tui) removeRow(r tuiRow) tea.Cmd {
 	if r.kind == rowTask {
-		if r.task.running() {
-			m.setStatus(r.task.Title + " is still running: t then c cancels it")
+		t := r.task
+		if t.running() {
+			m.ask("Cancel "+t.Title+"?\n\nIt stops here, but the machine may already have done some or all of it.",
+				"y cancels · any other key lets it run", func() tea.Cmd {
+					m.cancelTask(t)
+					return nil
+				})
 			return nil
 		}
-		r.task.dismissed = true
+		m.tasks = slices.DeleteFunc(m.tasks, func(x *task) bool { return x == t })
 		m.build()
 		m.sync()
 		return nil
@@ -561,7 +556,7 @@ func (m *tui) quit() tea.Cmd {
 	return nil
 }
 
-// helpView lists every key, by where it works, then every action.
+// helpView lists the keys: by view, then every action that has one.
 func (m *tui) helpView(w, h int) string {
 	lines := []string{styleBold.Render("Help") + styleDim.Render("  j/k scroll · esc back"), ""}
 	section := func(title string, rows ...string) {
@@ -572,14 +567,12 @@ func (m *tui) helpView(w, h int) string {
 		lines = append(lines, "")
 	}
 	section("Everywhere",
-		"space or :   action palette: everything that applies here, and why not",
+		"space        action palette: every action, and why one doesn't apply",
 		"?            this help",
 		"esc          back: closes a view, popup, or search",
 		"ctrl+]       while typing into a terminal: give the keys back to Hutch")
 	section("The list",
-		"j k ↑ ↓      move     enter  type into the terminal (wakes a sleeping box)",
-		"/            search   f      filter   F  clear search and filters",
-		"[ ] p x      tabs: previous, next, projects, close")
+		"j k ↑ ↓      move")
 	section("Git (g)",
 		"j k          files    enter/l  open the diff    tab  task diff vs base",
 		"a / u        stage / unstage the file    A / U  stage / unstage the hunk",
@@ -588,22 +581,13 @@ func (m *tui) helpView(w, h int) string {
 	section("Ports (o)",
 		"j k          ports    enter  forward it here (or stop it)",
 		"a            forward a port by number    y  copy its address    O  open it")
-	section("Tasks (t)",
-		"enter        output   / n  search   y  copy   c  cancel   R  retry   d  dismiss")
-	section("Two panes",
-		"v            show the selected terminal in a second pane (again closes it)",
-		"w            switch focus    z  zoom    \\  beside or below the list")
-	group := ""
+	section("Tasks (rows at the top of the list)",
+		"d            cancel a running task (asked first), or dismiss one that ended")
+	lines = append(lines, styleLabel.Render("Keys")+styleDim.Render("  (every other action is in the palette)"))
 	for _, a := range m.actions() {
-		if a.group != group {
-			group = a.group
-			lines = append(lines, styleLabel.Render("Actions: "+group))
+		if a.key != "" {
+			lines = append(lines, fmt.Sprintf("  %-12s %s", a.key, a.name))
 		}
-		k := a.key
-		if k == "" {
-			k = "palette"
-		}
-		lines = append(lines, fmt.Sprintf("  %-12s %s", k, a.name))
 	}
 	return scrollLines(lines, &m.helpScroll, w, h)
 }
@@ -624,9 +608,9 @@ func (m *tui) helpKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.helpScroll++
 	case "k", "up":
 		m.helpScroll--
-	case "pgdown", "space":
+	case "pgdown", "ctrl+d":
 		m.helpScroll += 10
-	case "pgup":
+	case "pgup", "ctrl+u":
 		m.helpScroll -= 10
 	case "esc", "q", "?":
 		m.setView(viewNone)
