@@ -55,6 +55,9 @@ its own. Several machines need a bucket.`,
 			if p.get("state") == "yes" {
 				return fmt.Errorf("%s has Hutch state of its own in /var/lib/hutch/state: it's a machine of its own, not one to add", host)
 			}
+			if err := leftoverBoxes(p, host, tok.Token); err != nil {
+				return err
+			}
 			if err := install(r, p, a, st, false); err != nil {
 				return err
 			}
@@ -308,4 +311,25 @@ func forgetStaleCommand() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// emptySHA256 is what the probe prints for a machine without a link CA.
+const emptySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+// leftoverBoxes refuses a machine holding boxes from another Hutch setup: as a
+// worker they would be adopted as this lead's. A machine added here before
+// (it trusts this lead's CA) is fine: its copies are reconciled, and stale ones
+// kept asleep as <box>-returned.
+func leftoverBoxes(p probe, host, token string) error {
+	boxes := strings.Fields(p.get("boxes"))
+	if len(boxes) == 0 {
+		return nil
+	}
+	fp, _, _ := strings.Cut(token, ".")
+	if ca := p.get("link_ca"); ca != "" && ca != emptySHA256 && ca == fp {
+		return nil
+	}
+	return fmt.Errorf("%s holds boxes from another Hutch setup (%s); as a worker here they'd be taken for this machine's.\n"+
+		"Move their work somewhere you keep it, then remove them on %s with sudo hutchd box rm <box>, and add it again",
+		host, strings.Join(boxes, ", "), host)
 }

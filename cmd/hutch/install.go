@@ -164,6 +164,9 @@ if [ -f /var/lib/hutch/images/base/image.json ]; then echo base=yes; fi
 for f in kernel/vmlinux layer/hutch-guest layer/tmux-$(uname -m) layer/terminfo.tar; do echo "sum_$(basename $f)=$(sudo -n sha256sum /var/lib/hutch/$f 2>/dev/null | cut -c1-64)"; done
 if [ -n "$(sudo -n ls /var/lib/hutch/state/hutch.db 2>/dev/null)" ]; then echo state=yes; fi
 if [ -n "$(sudo -n ls /var/lib/hutch/link/lead 2>/dev/null)" ]; then echo worker=yes; fi
+echo "boxes=$(sudo -n ls /var/lib/hutch/boxes 2>/dev/null | tr '\n' ' ')"
+# The CA a worker trusts, as enrollment tokens name it: sha256 of its DER bytes.
+echo "link_ca=$(sudo -n sed '/-----/d' /var/lib/hutch/link/ca.pem 2>/dev/null | base64 -d 2>/dev/null | sha256sum | cut -c1-64)"
 `
 
 type probe struct {
