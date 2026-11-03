@@ -6,6 +6,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/sha256"
+	"debug/buildinfo"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -377,7 +379,37 @@ func findArtifacts(ctx context.Context, arch, hutchd, images string) (artifacts,
 			return a, fmt.Errorf("%s: build it with make linux images, or pass --hutchd and --images", f)
 		}
 	}
+	if !explicit {
+		for _, f := range []string{a.hutchd, a.guest} {
+			if err := sameCommit(f); err != nil {
+				return a, err
+			}
+		}
+	}
 	return a, nil
+}
+
+// sameCommit refuses a local build of a machine binary from another commit than
+// this CLI: a stale make linux would install an older hutchd than the version
+// this CLI checked the machine against.
+func sameCommit(path string) error {
+	revision := func(settings []debug.BuildSetting) string {
+		for _, s := range settings {
+			if s.Key == "vcs.revision" {
+				return s.Value
+			}
+		}
+		return ""
+	}
+	self, ok := debug.ReadBuildInfo()
+	bi, err := buildinfo.ReadFile(path)
+	if !ok || err != nil {
+		return nil
+	}
+	if mine, theirs := revision(self.Settings), revision(bi.Settings); mine != "" && theirs != "" && mine != theirs {
+		return fmt.Errorf("%s was built from commit %.7s and this hutch from %.7s: run make linux (or pass --hutchd)", path, theirs, mine)
+	}
+	return nil
 }
 
 // install puts hutchd on the machine as a service: packages, storage, Firecracker,
