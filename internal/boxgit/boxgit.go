@@ -24,6 +24,10 @@ type Run func(ctx context.Context, argv, env []string) (stdout, stderr []byte, c
 // from running anything the repository configures.
 var readEnv = []string{"GIT_OPTIONAL_LOCKS=0", "GIT_EXTERNAL_DIFF=", "GIT_PAGER=cat", "LC_ALL=C"}
 
+// literal makes every path a name, never a pattern: a file called *.go is that
+// file alone.
+const literal = "GIT_LITERAL_PATHSPECS=1"
+
 // Kind is which change a diff shows.
 type Kind int
 
@@ -55,6 +59,7 @@ type Status struct {
 	Ahead    int
 	Behind   int
 	Files    []File
+	Index    string // changes whenever what's staged does
 }
 
 // Staged reports whether anything is staged to commit.
@@ -68,7 +73,7 @@ func (s Status) Staged() bool {
 }
 
 func git(ctx context.Context, run Run, env []string, args ...string) ([]byte, error) {
-	out, errOut, code, err := run(ctx, append([]string{"git"}, args...), env)
+	out, errOut, code, err := run(ctx, append([]string{"git"}, args...), append([]string{literal}, env...))
 	if err != nil {
 		return nil, err
 	}
@@ -101,6 +106,7 @@ func GetStatus(ctx context.Context, run Run) (Status, error) {
 
 func parseStatus(out []byte) (Status, error) {
 	var s Status
+	index := sha256.New()
 	fields := strings.Split(string(out), "\x00")
 	for i := 0; i < len(fields); i++ {
 		e := fields[i]
@@ -136,6 +142,7 @@ func parseStatus(out []byte) (Status, error) {
 			x, y := f[1][0], f[1][1]
 			if x != '.' {
 				s.Files = append(s.Files, File{Path: path, Orig: orig, Kind: Staged, Code: x})
+				fmt.Fprintf(index, "%c %s %s %s\x00%s\x00", x, f[4], f[7], path, orig)
 			}
 			if y != '.' {
 				s.Files = append(s.Files, File{Path: path, Kind: Unstaged, Code: y})
@@ -146,10 +153,12 @@ func parseStatus(out []byte) (Status, error) {
 				return s, fmt.Errorf("unexpected status entry %q", e)
 			}
 			s.Files = append(s.Files, File{Path: f[10], Kind: Conflict, Code: 'U'})
+			fmt.Fprintf(index, "u %s\x00", f[10])
 		case strings.HasPrefix(e, "? "):
 			s.Files = append(s.Files, File{Path: e[2:], Kind: Untracked, Code: '?'})
 		}
 	}
+	s.Index = hex.EncodeToString(index.Sum(nil)[:8])
 	return s, nil
 }
 
@@ -185,7 +194,7 @@ func GetDiff(ctx context.Context, run Run, f File, limit int) (Diff, error) {
 	default:
 		args = append(append([]string{"diff"}, base...), "--", f.Path)
 	}
-	out, errOut, code, err := run(ctx, append([]string{"git"}, args...), readEnv)
+	out, errOut, code, err := run(ctx, append([]string{"git"}, args...), append([]string{literal}, readEnv...))
 	if err != nil {
 		return Diff{}, err
 	}
@@ -341,10 +350,21 @@ func isRenameLine(l string) bool {
 	return strings.HasPrefix(l, "rename from ") || strings.HasPrefix(l, "copy from ")
 }
 
-// Commit commits the index with message; nothing else is staged or added.
-func Commit(ctx context.Context, run Run, message string) (string, error) {
+// ErrStaleIndex is a commit of an index that changed since it was shown.
+var ErrStaleIndex = errors.New("what's staged changed since it was shown; look again")
+
+// Commit commits the index with message, if it's still index (Status.Index);
+// nothing else is staged or added.
+func Commit(ctx context.Context, run Run, message, index string) (string, error) {
 	if strings.TrimSpace(message) == "" {
 		return "", errors.New("write a commit message")
+	}
+	s, err := GetStatus(ctx, run)
+	if err != nil {
+		return "", err
+	}
+	if s.Index != index {
+		return "", ErrStaleIndex
 	}
 	if _, err := git(ctx, run, nil, "commit", "--quiet", "--message", message); err != nil {
 		return "", err

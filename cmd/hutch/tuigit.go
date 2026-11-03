@@ -36,12 +36,14 @@ type gitView struct {
 	busy    string
 	at      time.Time // when status was read
 	want    int       // the diff read last asked for; an earlier one's reply is dropped
+	asked   int       // likewise for the status
 	loading bool
 }
 
 type (
 	gitStatusMsg struct {
 		box    string
+		asked  int
 		status boxgit.Status
 		err    error
 	}
@@ -82,18 +84,21 @@ func (m *tui) openGit(b api.Box) tea.Cmd {
 
 func (m *tui) gitRefresh() tea.Cmd {
 	v := m.gitv
-	ctx, run, box := m.ctx, boxRun(m.sess, v.box.ID), v.box.ID
+	m.gitN++
+	v.asked = m.gitN
+	ctx, run, box, asked := m.ctx, boxRun(m.sess, v.box.ID), v.box.ID, v.asked
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		s, err := boxgit.GetStatus(ctx, run)
-		return gitStatusMsg{box: box, status: s, err: err}
+		return gitStatusMsg{box: box, asked: asked, status: s, err: err}
 	}
 }
 
 func (m *tui) gitLoadDiff(f boxgit.File, branch bool) tea.Cmd {
 	v := m.gitv
-	v.want, v.loading = v.want+1, true
+	m.gitN++
+	v.want, v.loading = m.gitN, true
 	ctx, run, box, limit, base, want := m.ctx, boxRun(m.sess, v.box.ID), v.box.ID, m.diffLimit, v.box.Base, v.want
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(ctx, time.Minute)
@@ -137,7 +142,7 @@ func (m *tui) gitMsg(msg tea.Msg) tea.Cmd {
 	}
 	switch msg := msg.(type) {
 	case gitStatusMsg:
-		if msg.box != v.box.ID {
+		if msg.box != v.box.ID || msg.asked != v.asked {
 			return nil
 		}
 		v.loaded, v.at = true, time.Now()
@@ -194,15 +199,15 @@ func (m *tui) gitKey(msg tea.KeyPressMsg) tea.Cmd {
 	f, ok := v.selected()
 	b := v.box
 	inDiff := v.diff != nil
-	if inDiff && !v.branch {
-		f, ok = v.diffFor, true // keys act on the file shown
+	if inDiff {
+		f, ok = v.diffFor, !v.branch // keys act on the file shown, and the task diff is none
 	}
 	_, _, _, h := m.layout()
 	switch msg.String() {
 	case "esc", "q", "h", "left":
 		if inDiff || v.loading {
-			v.diff, v.branch, v.loading = nil, false, false
-			v.want++ // a diff still being read stays closed
+			m.gitN++ // a diff still being read stays closed
+			v.diff, v.branch, v.loading, v.want = nil, false, false, m.gitN
 			return nil
 		}
 		m.setView(viewNone)
@@ -279,19 +284,28 @@ func (m *tui) gitKey(msg tea.KeyPressMsg) tea.Cmd {
 			m.setStatus("nothing staged to commit: a stages a file, A a hunk")
 			return nil
 		}
+		index := v.status.Index
 		m.writeMessage("Commit the staged changes in "+b.ID, "The commit message", func(text string) (tea.Cmd, string) {
 			if strings.TrimSpace(text) == "" {
 				return nil, "write a commit message"
 			}
 			return m.gitDoSay("committing", func(ctx context.Context, run boxgit.Run) (string, error) {
-				line, err := boxgit.Commit(ctx, run, text)
+				line, err := boxgit.Commit(ctx, run, text, index)
 				return "committed " + line, err
 			}), ""
 		})
 	case "f":
 		return m.gitTask("fetch", "exec", b.ID, "--", "git", "-C", workspace, "fetch")
 	case "p":
-		return m.gitRemote("pull", "Pull "+v.status.Upstream+" into "+v.status.Branch+" in "+b.ID+", fast-forward only?\n\nIf the branches diverged it stops and says so; nothing is merged or rebased.",
+		switch {
+		case v.status.Branch == "":
+			m.setStatus("HEAD is detached in " + b.ID + ": check out a branch in a terminal first")
+			return nil
+		case v.status.Upstream == "":
+			m.setStatus(v.status.Branch + " in " + b.ID + " has no upstream to pull from: P pushes it and sets one")
+			return nil
+		}
+		return m.gitRemote("pull", "y pulls", "Pull "+v.status.Upstream+" into "+v.status.Branch+" in "+b.ID+", fast-forward only?\n\nIf the branches diverged it stops and says so; nothing is merged or rebased.",
 			"exec", b.ID, "--", "git", "-C", workspace, "pull", "--ff-only")
 	case "P":
 		if v.status.Branch == "" {
@@ -299,18 +313,18 @@ func (m *tui) gitKey(msg tea.KeyPressMsg) tea.Cmd {
 			return nil
 		}
 		if v.status.Upstream == "" {
-			return m.gitRemote("push", "Push "+v.status.Branch+" from "+b.ID+" to origin, and track it there?\n\nIt has no upstream yet.",
+			return m.gitRemote("push", "y pushes", "Push "+v.status.Branch+" from "+b.ID+" to origin, and track it there?\n\nIt has no upstream yet.",
 				"exec", b.ID, "--", "git", "-C", workspace, "push", "--set-upstream", "origin", "HEAD")
 		}
-		return m.gitRemote("push", fmt.Sprintf("Push %s from %s to %s?\n\n%d commit(s) ahead, %d behind (as of the last fetch). Nothing is forced.",
+		return m.gitRemote("push", "y pushes", fmt.Sprintf("Push %s from %s to %s?\n\n%d commit(s) ahead, %d behind (as of the last fetch). Nothing is forced.",
 			v.status.Branch, b.ID, v.status.Upstream, v.status.Ahead, v.status.Behind),
 			"exec", b.ID, "--", "git", "-C", workspace, "push")
 	}
 	return nil
 }
 
-func (m *tui) gitRemote(verb, question string, args ...string) tea.Cmd {
-	m.ask(question, "y "+verb+"es · any other key doesn't", func() tea.Cmd { return m.gitTask(verb, args...) })
+func (m *tui) gitRemote(verb, yes, question string, args ...string) tea.Cmd {
+	m.ask(question, yes+" · any other key doesn't", func() tea.Cmd { return m.gitTask(verb, args...) })
 	return nil
 }
 

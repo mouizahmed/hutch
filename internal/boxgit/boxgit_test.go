@@ -173,10 +173,22 @@ func TestHunksAndStale(t *testing.T) {
 		t.Fatalf("after unstaging the hunk: %+v", s.Files)
 	}
 
-	if _, err := Commit(ctx, run, "  "); err == nil {
+	if _, err := Commit(ctx, run, "  ", s.Index); err == nil {
 		t.Fatal("an empty message committed")
 	}
-	got, err := Commit(ctx, run, "move old to new")
+	// Something staged after the index was shown stops the commit.
+	write(t, dir, "late.txt", "late\n")
+	if _, err := git(ctx, run, nil, "add", "late.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Commit(ctx, run, "move old to new", s.Index); !errors.Is(err, ErrStaleIndex) {
+		t.Fatalf("a commit of a changed index: %v", err)
+	}
+	if _, err := git(ctx, run, nil, "rm", "--cached", "-q", "late.txt"); err != nil {
+		t.Fatal(err)
+	}
+	s, _ = GetStatus(ctx, run)
+	got, err := Commit(ctx, run, "move old to new", s.Index)
 	if err != nil || !strings.HasSuffix(got, "move old to new") {
 		t.Fatalf("commit: %q %v", got, err)
 	}
@@ -246,5 +258,39 @@ func TestUnstageHunkOfRename(t *testing.T) {
 	}
 	if _, ok := find(s, "b.txt", Unstaged); !ok {
 		t.Fatalf("the edit should be unstaged now: %+v", s.Files)
+	}
+}
+
+// A file whose name looks like a pattern is that file alone.
+func TestPatternNames(t *testing.T) {
+	ctx := t.Context()
+	dir, run := repo(t)
+	for _, name := range []string{"*.txt", "a.txt"} {
+		write(t, dir, name, "old\n")
+	}
+	git(ctx, run, nil, "add", "--all")
+	git(ctx, run, nil, "commit", "-qm", "base")
+	for _, name := range []string{"*.txt", "a.txt"} {
+		write(t, dir, name, "new\n")
+	}
+	s, _ := GetStatus(ctx, run)
+	f, _ := find(s, "*.txt", Unstaged)
+	if d, err := GetDiff(ctx, run, f, 0); err != nil || strings.Contains(d.Text, "a.txt") {
+		t.Fatalf("the diff of *.txt: %q %v", d.Text, err)
+	}
+	if err := StageFile(ctx, run, f); err != nil {
+		t.Fatal(err)
+	}
+	s, _ = GetStatus(ctx, run)
+	if _, ok := find(s, "a.txt", Staged); ok {
+		t.Fatalf("staging *.txt staged a.txt: %+v", s.Files)
+	}
+	f, _ = find(s, "*.txt", Staged)
+	git(ctx, run, nil, "add", "a.txt")
+	if err := UnstageFile(ctx, run, f, false); err != nil {
+		t.Fatal(err)
+	}
+	if s, _ = GetStatus(ctx, run); !s.Staged() {
+		t.Fatalf("unstaging *.txt unstaged a.txt: %+v", s.Files)
 	}
 }

@@ -163,8 +163,8 @@ func parsePorts(s string) (remote, local int, err error) {
 	return remote, local, nil
 }
 
-// startForward forwards box:remote to this computer's local port; when that's
-// taken, it asks for another.
+// startForward forwards box:remote to this computer's local port, or with 0 a
+// free one; when that's taken, it asks for another.
 func (m *tui) startForward(box string, remote, local int) tea.Cmd {
 	key := forwardKey(box, remote)
 	if f := m.forwards[key]; f != nil {
@@ -173,7 +173,10 @@ func (m *tui) startForward(box string, remote, local int) tea.Cmd {
 	}
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", local))
 	if err != nil {
-		m.input(fmt.Sprintf("localhost:%d is taken here. Forward %s:%d to which local port?", local, box, remote), "a free port", "", func(s string) tea.Cmd {
+		m.input(fmt.Sprintf("localhost:%d is taken here. Forward %s:%d to which local port?", local, box, remote), "a port, or empty for any free one", "", func(s string) tea.Cmd {
+			if strings.TrimSpace(s) == "" {
+				return m.startForward(box, remote, 0)
+			}
 			l, err := strconv.Atoi(strings.TrimSpace(s))
 			if err != nil || l < 1 || l > 65535 {
 				m.setStatus("invalid port " + strconv.Quote(s))
@@ -183,6 +186,7 @@ func (m *tui) startForward(box string, remote, local int) tea.Cmd {
 		})
 		return nil
 	}
+	local = ln.Addr().(*net.TCPAddr).Port
 	ctx, cancel := context.WithCancel(m.ctx)
 	f := &forward{box: box, remote: remote, local: local, ln: ln, cancel: cancel, started: time.Now()}
 	m.forwards[key] = f

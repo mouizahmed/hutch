@@ -118,6 +118,7 @@ type tui struct {
 	// The view in the workspace pane (viewNone: the terminal), and each view's state.
 	view       viewKind
 	gitv       *gitView
+	gitN       int // numbers Git view reads, so only the latest reply counts
 	portv      *portsView
 	machinev   int
 	helpScroll int
@@ -127,7 +128,7 @@ type tui struct {
 	confirmDo func() tea.Cmd
 	search    searchState
 	forwards  map[string]*forward
-	draft     string // a failed task's prompt, for the next task form
+	drafts    []string // failed tasks' prompts, each for one next task form
 
 	taskLines, diffLimit int
 	cancelGrace          time.Duration
@@ -700,7 +701,11 @@ func (m *tui) mouse(msg tea.MouseMsg) tea.Cmd {
 		}
 	case tea.MouseClickMsg:
 		m.typing = false
-		if i := m.offset + mo.Y - 2; mo.Y > 1 && i < len(m.rows) {
+		top := 2 // under the tabs and the machine line, and the search's line
+		if m.search.query != "" {
+			top++
+		}
+		if i := m.offset + mo.Y - top; mo.Y >= top && i < len(m.rows) {
 			m.cursor = i
 			m.sync()
 		}

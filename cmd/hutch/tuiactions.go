@@ -94,7 +94,11 @@ func (m *tui) actions() []action {
 
 	// Boxes and terminals.
 	add("Box", "n", "New box", "", func() tea.Cmd { return m.openForm("") })
-	add("Box", "N", "New terminal in this box", noBox, func() tea.Cmd { return m.openForm(b.ID) })
+	newTerm, noNewTerm := func() tea.Cmd { return m.openForm(b.ID) }, noBox
+	if tmpl != "" { // as N does on a template's row
+		newTerm, noNewTerm = func() tea.Cmd { return m.templateKey(tmpl, "N") }, ""
+	}
+	add("Box", "N", "New terminal in this box", noNewTerm, newTerm)
 	add("Box", "enter", "Type into the terminal, or wake its box (ctrl+] returns)", noBox, func() tea.Cmd { return m.enter(r) })
 	sleepName := "Sleep"
 	if b.ID != "" && b.State != "running" {
@@ -240,13 +244,13 @@ func (m *tui) menuKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.menu = nil
 		return nil
 	case "down", "ctrl+n", "tab":
-		mn.cursor = min(mn.cursor+1, len(items)-1)
+		mn.cursor = max(min(mn.cursor+1, len(items)-1), 0)
 		return nil
 	case "up", "ctrl+p", "shift+tab":
 		mn.cursor = max(mn.cursor-1, 0)
 		return nil
 	case "enter":
-		if mn.cursor >= len(items) {
+		if mn.cursor < 0 || mn.cursor >= len(items) {
 			return nil
 		}
 		it := items[mn.cursor]
@@ -352,6 +356,13 @@ func (m *tui) writeMessage(title, placeholder string, submit func(string) (tea.C
 		submit: func([]string) (tea.Cmd, string) { return submit(a.Value()) }}
 }
 
+// closePrompt closes p, unless what it submitted opened another prompt.
+func (m *tui) closePrompt(p *prompt) {
+	if m.prompt == p {
+		m.prompt = nil
+	}
+}
+
 func (m *tui) promptKey(msg tea.KeyPressMsg) tea.Cmd {
 	p := m.prompt
 	k := msg.String()
@@ -366,7 +377,7 @@ func (m *tui) promptKey(msg tea.KeyPressMsg) tea.Cmd {
 				p.err = why
 				return nil
 			}
-			m.prompt = nil
+			m.closePrompt(p)
 			return cmd
 		}
 		a, cmd := p.area.Update(msg)
@@ -384,7 +395,7 @@ func (m *tui) promptKey(msg tea.KeyPressMsg) tea.Cmd {
 			p.err = why
 			return nil
 		}
-		m.prompt = nil
+		m.closePrompt(p)
 		return cmd
 	case "tab", "down", "shift+tab", "up":
 		d := 1
@@ -577,7 +588,7 @@ func (m *tui) helpView(w, h int) string {
 		"j k          files    enter/l  open the diff    tab  task diff vs base",
 		"a / u        stage / unstage the file    A / U  stage / unstage the hunk",
 		"[ ]          previous / next hunk        c  commit the staged files",
-		"f P p        fetch, pull (fast-forward only), push     r  refresh")
+		"f p P        fetch, pull (fast-forward only), push     r  refresh")
 	section("Ports (o)",
 		"j k          ports    enter  forward it here (or stop it)",
 		"a            forward a port by number    y  copy its address    O  open it")

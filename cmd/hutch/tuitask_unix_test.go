@@ -17,12 +17,12 @@ import (
 func TestCancelStopsTheGroup(t *testing.T) {
 	m := testTUI(t)
 	c := exec.Command("sh", "-c", "sleep 60 & echo $!; wait")
-	ownGroup(c)
 	out, err := c.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Start(); err != nil {
+	g, err := startGroup(c)
+	if err != nil {
 		t.Fatal(err)
 	}
 	buf := make([]byte, 32)
@@ -31,7 +31,7 @@ func TestCancelStopsTheGroup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tk := &task{ID: "1", Title: "slow", State: taskRunning, cmd: c, Started: time.Now()}
+	tk := &task{ID: "1", Title: "slow", State: taskRunning, group: g, Started: time.Now()}
 	m.tasks = []*task{tk}
 	m.cancelTask(tk)
 	done := make(chan error, 1)
@@ -59,16 +59,16 @@ func TestQuitStopsStubbornTasks(t *testing.T) {
 	m.cancelGrace = 300 * time.Millisecond
 	for i := range 2 {
 		c := exec.Command("sh", "-c", `trap "" TERM; echo ready; while :; do sleep 1; done`)
-		ownGroup(c)
 		out, err := c.StdoutPipe()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := c.Start(); err != nil {
+		g, err := startGroup(c)
+		if err != nil {
 			t.Fatal(err)
 		}
 		out.Read(make([]byte, 8))
-		tk := &task{ID: strconv.Itoa(i), Title: "stubborn", State: taskRunning, cmd: c, done: make(chan struct{}), Started: time.Now()}
+		tk := &task{ID: strconv.Itoa(i), Title: "stubborn", State: taskRunning, group: g, done: make(chan struct{}), Started: time.Now()}
 		go func() { c.Wait(); close(tk.done) }()
 		m.tasks = append(m.tasks, tk)
 	}
@@ -85,6 +85,35 @@ func TestQuitStopsStubbornTasks(t *testing.T) {
 		}
 		if tk.State != taskCanceled {
 			t.Fatalf("state %s", tk.State)
+		}
+	}
+}
+
+// A command that ends on the gentle signal but leaves something stubborn behind
+// doesn't end the wait: Hutch exits right after, and that would outlive it.
+func TestQuitStopsWhatATaskLeft(t *testing.T) {
+	m := testTUI(t)
+	m.cancelGrace = time.Second
+	c := exec.Command("sh", "-c", `(trap "" TERM; echo ready; exec >/dev/null 2>&1; while :; do sleep 1; done) & wait`)
+	out, err := c.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := startGroup(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out.Read(make([]byte, 8))
+	tk := &task{ID: "1", Title: "leaves one", State: taskRunning, group: g, done: make(chan struct{}), Started: time.Now()}
+	go func() { c.Wait(); close(tk.done) }()
+	m.tasks = []*task{tk}
+	m.stopTasks()
+	// Less than the grace, so cancel's own late kill can't be what stopped it;
+	// what's killed lingers only until it's reaped.
+	for end := time.Now().Add(300 * time.Millisecond); g.alive(); time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(end) {
+			g.signal(true)
+			t.Fatal("quitting left what the task started running")
 		}
 	}
 }

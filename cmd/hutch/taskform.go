@@ -101,8 +101,10 @@ func (m *tui) openForm(box string) tea.Cmd {
 	f.prompt.Placeholder = "What should the agent do? (empty opens it to type in)"
 	f.prompt.CharLimit = 0
 	f.prompt.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter", "alt+enter", "ctrl+j"))
-	f.prompt.SetValue(m.draft)
-	m.draft = ""
+	if n := len(m.drafts); n > 0 {
+		f.prompt.SetValue(m.drafts[n-1])
+		m.drafts = m.drafts[:n-1]
+	}
 	if project, ok := strings.CutPrefix(box, "template:"); ok {
 		f.boxes, f.box, f.project, f.dir = []string{box}, 0, project, m.checkout(project)
 	}

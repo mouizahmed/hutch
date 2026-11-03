@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -242,8 +243,8 @@ func TestGitViewKeepsItsTarget(t *testing.T) {
 	m := testTUI(t)
 	m.openGit(m.boxes[0])
 	a, b := boxgit.File{Path: "a.go", Kind: boxgit.Unstaged}, boxgit.File{Path: "b.go", Kind: boxgit.Unstaged}
-	m.Update(gitStatusMsg{box: "quiet-fox", status: boxgit.Status{Branch: "main", Files: []boxgit.File{a, b}}})
 	v := m.gitv
+	m.Update(gitStatusMsg{box: "quiet-fox", asked: v.asked, status: boxgit.Status{Branch: "main", Files: []boxgit.File{a, b}}})
 
 	press(t, m, "enter", "esc")
 	m.Update(gitDiffMsg{box: "quiet-fox", want: 1, file: a, diff: boxgit.Diff{Text: "late"}})
@@ -257,7 +258,14 @@ func TestGitViewKeepsItsTarget(t *testing.T) {
 		t.Fatal("the diff didn't open")
 	}
 	staged := boxgit.File{Path: "a.go", Kind: boxgit.Staged}
-	m.Update(gitStatusMsg{box: "quiet-fox", status: boxgit.Status{Branch: "main", Files: []boxgit.File{staged, a, b}}})
+	// A status read before the latest one is dropped when it comes last.
+	older := v.asked
+	m.gitRefresh()
+	m.Update(gitStatusMsg{box: "quiet-fox", asked: v.asked, status: boxgit.Status{Branch: "main", Files: []boxgit.File{staged, a, b}}})
+	m.Update(gitStatusMsg{box: "quiet-fox", asked: older, status: boxgit.Status{Branch: "main"}})
+	if len(v.status.Files) != 3 {
+		t.Fatalf("an older status replaced a newer one: %+v", v.status.Files)
+	}
 	if f, _ := v.selected(); f != a {
 		t.Fatalf("the cursor left the shown file for %+v", f)
 	}
@@ -265,6 +273,62 @@ func TestGitViewKeepsItsTarget(t *testing.T) {
 	if v.busy != "" {
 		t.Fatalf("u on the unstaged diff did %q", v.busy)
 	}
+
+	// The task diff shows no file, so file keys do nothing there.
+	press(t, m, "esc", "tab")
+	m.Update(gitDiffMsg{box: "quiet-fox", want: v.want, branch: true, diff: boxgit.Diff{Text: "task diff"}})
+	if !v.branch || v.diff == nil {
+		t.Fatal("the task diff didn't open")
+	}
+	press(t, m, "a", "u")
+	if v.busy != "" {
+		t.Fatalf("a file key on the task diff did %q", v.busy)
+	}
+}
+
+// The palette survives a search that matches nothing.
+func TestPaletteNoMatch(t *testing.T) {
+	m := testTUI(t)
+	press(t, m, "space", "zzzz nothing", "down", "enter")
+	if m.menu == nil {
+		t.Fatal("the palette closed")
+	}
+}
+
+// A click selects the row under it, with the search's line above the list too.
+func TestClickWhileSearching(t *testing.T) {
+	m := testTUI(t)
+	press(t, m, "/", "fox", "enter")
+	m.View()
+	// Tabs, the machine line, the search's line, then the rows.
+	m.Update(tea.MouseClickMsg{X: 3, Y: 3, Button: tea.MouseLeft})
+	if got := m.selected().key(); got != m.rows[0].key() {
+		t.Fatalf("clicked the first row, selected %s", got)
+	}
+}
+
+// A prompt whose answer opens another (another local port, when the one asked
+// for is taken) leaves that one open; empty there takes any free port.
+func TestPromptOpensAnother(t *testing.T) {
+	m := testTUI(t)
+	m.ctx = t.Context()
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer taken.Close()
+	port := taken.Addr().(*net.TCPAddr).Port
+	m.input("Forward", "", "", func(string) tea.Cmd { return m.startForward("quiet-fox", 8000, port) })
+	press(t, m, "enter")
+	if m.prompt == nil || !strings.Contains(m.prompt.title, "is taken") {
+		t.Fatalf("the taken-port prompt didn't stay open: %+v", m.prompt)
+	}
+	press(t, m, "enter")
+	f := m.forwards[forwardKey("quiet-fox", 8000)]
+	if f == nil || f.local == 0 || f.local == port {
+		t.Fatalf("empty didn't take a free port: %+v", f)
+	}
+	m.stopForward(f)
 }
 
 // A new box that fails gives its prompt back to the next form only, so it can't
@@ -297,5 +361,24 @@ func TestFailedTaskKeepsPrompt(t *testing.T) {
 	press(t, m, "esc")
 	if m.openForm(""); m.form.prompt.Value() != "" {
 		t.Fatalf("a prompt dismissed with esc came back: %q", m.form.prompt.Value())
+	}
+	press(t, m, "esc")
+
+	// Two started before either fails each come back, one per form.
+	var ends []tea.Cmd
+	for _, p := range []string{"first", "second"} {
+		m.openForm("")
+		m.form.dir = t.TempDir()
+		m.form.prompt.SetValue(p)
+		ends = append(ends, m.submitForm())
+	}
+	for _, end := range ends {
+		m.Update(end())
+	}
+	for _, want := range []string{"second", "first", ""} {
+		if m.openForm(""); m.form.prompt.Value() != want {
+			t.Fatalf("the form came back with %q, want %q", m.form.prompt.Value(), want)
+		}
+		press(t, m, "esc")
 	}
 }

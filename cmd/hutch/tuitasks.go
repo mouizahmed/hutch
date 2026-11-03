@@ -39,8 +39,8 @@ type task struct {
 	open      string // what to select when it ends well
 	report    []string
 	after     tea.Cmd
-	cmd       *exec.Cmd
-	done      chan struct{} // closed when cmd has exited
+	group     *procGroup
+	done      chan struct{} // closed when its command has exited
 	canceling bool
 	draft     string // the form's prompt, given back if it fails
 }
@@ -60,12 +60,12 @@ func (m *tui) run(dir, title, open string, args ...string) tea.Cmd {
 	c := exec.Command(m.exe, args...)
 	c.Dir = dir
 	c.Env = append(os.Environ(), "NO_COLOR=1")
-	ownGroup(c)
 	// Started here, so a cancel always has the process to stop.
+	var g *procGroup
 	r, w, err := os.Pipe()
 	if err == nil {
 		c.Stdout, c.Stderr = w, w
-		err = c.Start()
+		g, err = startGroup(c)
 		w.Close()
 		if err != nil {
 			r.Close()
@@ -74,7 +74,7 @@ func (m *tui) run(dir, title, open string, args ...string) tea.Cmd {
 	if err != nil {
 		return func() tea.Msg { return taskDoneMsg{t.ID, err} }
 	}
-	t.cmd, t.done = c, make(chan struct{})
+	t.group, t.done = g, make(chan struct{})
 	prog := m.prog
 	go func() {
 		readLines(r, func(line string) { prog.Send(taskLineMsg{t.ID, ansi.Strip(line)}) })
@@ -127,11 +127,10 @@ func (m *tui) taskDone(msg taskDoneMsg) tea.Cmd {
 	if t == nil || !t.running() {
 		return nil
 	}
-	t.cmd = nil
 	var after tea.Cmd
 	again := ""
 	if t.draft != "" && (msg.err != nil || t.canceling) {
-		m.draft, again = t.draft, " (n or N brings back what you wrote)"
+		m.drafts, again = append(m.drafts, t.draft), " (n or N brings back what you wrote)"
 	}
 	switch {
 	case t.canceling:
@@ -179,44 +178,43 @@ func (m *tui) taskDone(msg taskDoneMsg) tea.Cmd {
 // for good after tui.cancel_grace, or at once when it's already being canceled.
 // The machine may already have done some of it.
 func (m *tui) cancelTask(t *task) {
-	if !t.running() || t.cmd == nil {
+	if !t.running() || t.group == nil {
 		return
 	}
-	c := t.cmd
+	g := t.group
 	if t.canceling {
-		signalGroup(c, true)
+		g.signal(true)
 		return
 	}
 	t.canceling, t.Step = true, "canceling"
-	signalGroup(c, false)
-	time.AfterFunc(m.cancelGrace, func() { signalGroup(c, true) })
+	g.signal(false)
+	time.AfterFunc(m.cancelGrace, func() { g.signal(true) })
 	m.setStatus(t.Title + ": canceling")
 }
 
-// stopTasks cancels every running task as Hutch quits, and waits for them: up to
-// tui.cancel_grace before stopping them for good.
+// stopTasks cancels every running task as Hutch quits, and waits for each and
+// what it started: up to tui.cancel_grace before stopping them for good.
 func (m *tui) stopTasks() {
 	var running []*task
 	for _, t := range m.tasks {
-		if t.running() && t.cmd != nil {
+		if t.running() && t.group != nil {
 			m.cancelTask(t)
 			running = append(running, t)
 		}
 	}
-	deadline := make(chan struct{})
-	time.AfterFunc(m.cancelGrace, func() { close(deadline) })
+	deadline := time.Now().Add(m.cancelGrace)
 	for _, t := range running {
+		for t.group.alive() && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if t.group.alive() {
+			t.group.signal(true)
+		}
 		select {
 		case <-t.done:
-		case <-deadline:
-			signalGroup(t.cmd, true)
-			select {
-			case <-t.done:
-			case <-time.After(time.Second):
-				continue
-			}
+			t.State = taskCanceled
+		case <-time.After(time.Second):
 		}
-		t.State = taskCanceled
 	}
 }
 
