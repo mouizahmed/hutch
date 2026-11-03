@@ -65,26 +65,29 @@ func TestFollowSignedRecordsOnly(t *testing.T) {
 }
 
 // A machine said to be down that wrote its heartbeat within three of its
-// intervals isn't; one silent longer, or that never wrote one, may be.
+// intervals isn't; one silent longer, or that never wrote one, may be. The age
+// is by the bucket's clock, whatever this computer's says.
 func TestStillAlive(t *testing.T) {
 	ctx := t.Context()
-	now := time.Now()
+	// The bucket's clock runs an hour behind this computer's.
+	clock := time.Now().Add(-time.Hour)
 	b := bucket.NewMem()
-	b.Now = func() time.Time { return now }
+	b.Now = func() time.Time { return clock }
 	if err := StillAlive(ctx, b, "w-a", "a"); err != nil {
 		t.Fatalf("no heartbeat: %v", err)
 	}
 	if err := PutAlive(ctx, b, "w-a", 30*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if err := StillAlive(ctx, b, "w-a", "a"); err == nil || !strings.Contains(err.Error(), "isn't down") {
-		t.Fatalf("a fresh heartbeat: %v", err)
+	clock = clock.Add(10 * time.Second)
+	if err := StillAlive(ctx, b, "w-a", "a"); err == nil || !strings.Contains(err.Error(), "10s ago") {
+		t.Fatalf("a heartbeat 10s old by the bucket: %v", err)
 	}
-	now = now.Add(-91 * time.Second)
-	if err := PutAlive(ctx, b, "w-a", 30*time.Second); err != nil {
-		t.Fatal(err)
-	}
+	clock = clock.Add(81 * time.Second)
 	if err := StillAlive(ctx, b, "w-a", "a"); err != nil {
-		t.Fatalf("a heartbeat 91s old: %v", err)
+		t.Fatalf("a heartbeat 91s old by the bucket: %v", err)
+	}
+	if objs, _ := b.List(ctx, "alive/"); len(objs) != 1 {
+		t.Fatalf("probes left in the bucket: %v", objs)
 	}
 }

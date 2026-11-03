@@ -11,8 +11,8 @@ import (
 	"github.com/mouizahmed/hutch/internal/pki"
 )
 
-// A machine with boxes from another setup isn't added; one added here before,
-// which trusts this lead's CA, is. The probe names the CA as tokens do.
+// A machine with boxes from another setup isn't added; one of this setup
+// before (a worker trusting this lead's CA, or an old lead keeping it aside) is. The probe names the CA as tokens do.
 func TestLeftoverBoxes(t *testing.T) {
 	ca, _, err := pki.NewCA()
 	if err != nil {
@@ -54,15 +54,20 @@ func TestLeftoverBoxes(t *testing.T) {
 	check := func(boxes, linkCA string) error {
 		return leftoverBoxes(probe{values: map[string]string{"boxes": boxes, "link_ca": linkCA}}, "m", token)
 	}
-	if err := check("", emptySHA256); err != nil {
+	if err := check("", ""); err != nil {
 		t.Fatalf("an empty machine: %v", err)
 	}
-	if err := check("web-1 api-2 ", probeCA(ca.PEM)); err != nil {
-		t.Fatalf("a machine added here before: %v", err)
+	if err := check("web-1 api-2 ", " "+probeCA(ca.PEM)); err != nil {
+		t.Fatalf("a worker added here before: %v", err)
 	}
-	for _, linkCA := range []string{probeCA(other.PEM), emptySHA256, ""} {
+	// An old lead fenced by this setup keeps its CA beside its state, perhaps
+	// with another setup's CA from when it was a worker there.
+	if err := check("web-1 api-2 ", " "+probeCA(other.PEM)+" "+probeCA(ca.PEM)); err != nil {
+		t.Fatalf("an old lead of this setup: %v", err)
+	}
+	for _, linkCA := range []string{" " + probeCA(other.PEM), ""} {
 		if err := check("web-1 api-2 ", linkCA); err == nil || !strings.Contains(err.Error(), "web-1, api-2") {
-			t.Fatalf("boxes from another setup (CA %q): %v", linkCA, err)
+			t.Fatalf("boxes from another setup (CAs %q): %v", linkCA, err)
 		}
 	}
 }

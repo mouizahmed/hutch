@@ -99,19 +99,28 @@ func (d Dir) SaveBucket(cfg bucket.Config) error {
 // worker has seen at another address, dials that address from then on. It
 // reports whether the address changed.
 func (d Dir) Follow(ctx context.Context) (bool, error) {
-	data, err := os.ReadFile(d.path("bucket.json"))
-	if err != nil {
-		return false, nil // no bucket yet: nothing to follow
-	}
-	var cfg bucket.Config
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return false, err
+	cfg, ok, err := d.Bucket()
+	if err != nil || !ok {
+		return false, err // no bucket yet: nothing to follow
 	}
 	b, err := bucket.New(cfg)
 	if err != nil {
 		return false, err
 	}
 	return follow(ctx, d, b)
+}
+
+// Bucket is the bucket's settings as the lead last sent them, if it has.
+func (d Dir) Bucket() (bucket.Config, bool, error) {
+	var cfg bucket.Config
+	data, err := os.ReadFile(d.path("bucket.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return cfg, false, nil
+	}
+	if err != nil {
+		return cfg, false, err
+	}
+	return cfg, true, json.Unmarshal(data, &cfg)
 }
 
 func follow(ctx context.Context, d Dir, b bucket.Bucket) (bool, error) {
@@ -155,14 +164,10 @@ func PutAlive(ctx context.Context, b bucket.Bucket, id string, every time.Durati
 // StillAlive returns an error naming how recently machine id wrote its
 // heartbeat, when that's within three of its intervals: it isn't down.
 func StillAlive(ctx context.Context, b bucket.Bucket, id, name string) error {
-	o, err := b.Head(ctx, aliveKey(id))
+	data, o, err := b.Fetch(ctx, aliveKey(id))
 	if errors.Is(err, bucket.ErrNotFound) {
 		return nil
 	}
-	if err != nil {
-		return fmt.Errorf("reading %s's heartbeat in the bucket: %w", name, err)
-	}
-	data, err := b.Get(ctx, aliveKey(id))
 	if err != nil {
 		return fmt.Errorf("reading %s's heartbeat in the bucket: %w", name, err)
 	}
@@ -170,10 +175,26 @@ func StillAlive(ctx context.Context, b bucket.Bucket, id, name string) error {
 	if json.Unmarshal(data, &h) != nil || h.Every <= 0 {
 		return nil
 	}
-	age := time.Since(o.Modified)
+	now, err := bucketNow(ctx, b)
+	if err != nil {
+		return fmt.Errorf("reading the bucket's clock: %w", err)
+	}
+	age := now.Sub(o.Modified)
 	if limit := 3 * h.Every; age < limit {
 		return fmt.Errorf("%s wrote to the bucket %s ago, so it isn't down: it may be cut off from you and the other machines but still working. Stop it, or if it is down, wait %s and try again",
 			name, age.Round(time.Second), (limit - age).Round(time.Second))
 	}
 	return nil
+}
+
+// bucketNow is the time by the bucket's own clock, the one that stamps
+// heartbeats: this computer's clock may be off.
+func bucketNow(ctx context.Context, b bucket.Bucket) (time.Time, error) {
+	key := "alive/.now-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	if err := b.Put(ctx, key, nil, false); err != nil {
+		return time.Time{}, err
+	}
+	defer b.Delete(context.WithoutCancel(ctx), key)
+	o, err := b.Head(ctx, key)
+	return o.Modified, err
 }

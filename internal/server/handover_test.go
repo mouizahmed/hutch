@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -106,3 +107,32 @@ func TestHandoverCopy(t *testing.T) {
 }
 
 func writeFile(path string, data []byte) error { return os.WriteFile(path, data, 0o600) }
+
+// Lead state set aside keeps the link CA's certificate beside it, so the
+// machine is known as one of this setup's when it's added back.
+func TestSetAsideKeepsTheLinkCA(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(Config{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := s.store.ensureLink("lead.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.store.db.Close()
+	if err := SetAside(dir); err != nil {
+		t.Fatal(err)
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, "stale-lead-*", "ca.pem"))
+	if len(matches) != 1 {
+		t.Fatalf("ca.pem beside the state: %v", matches)
+	}
+	got, _ := os.ReadFile(matches[0])
+	if string(got) != string(l.ca.PEM) {
+		t.Fatal("the kept CA isn't the link CA")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "hutch.db")); err == nil {
+		t.Fatal("the database wasn't set aside")
+	}
+}

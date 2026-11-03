@@ -273,7 +273,9 @@ func (s *Server) becomeWorker(l *linkState, local, addr string, b bucket.Config)
 }
 
 // setAside moves a machine's lead state (database, master key, bucket) into a
-// directory of dir, so it never leads with it again; nothing is deleted.
+// directory of dir, so it never leads with it again; nothing is deleted. The
+// link CA's certificate goes beside it, as ca.pem: hutch machine add knows the
+// machine by it as one of this setup's, so its boxes are taken back.
 func setAside(dir, name string) error {
 	aside := filepath.Join(dir, name)
 	if _, err := os.Stat(aside); err == nil {
@@ -281,6 +283,13 @@ func setAside(dir, name string) error {
 	}
 	if err := os.MkdirAll(aside, 0o700); err != nil {
 		return err
+	}
+	if ca, err := linkCACert(filepath.Join(dir, "hutch.db")); err != nil {
+		log.Printf("lead state: reading the link CA: %v", err)
+	} else if len(ca) > 0 {
+		if err := os.WriteFile(filepath.Join(aside, "ca.pem"), ca, 0o600); err != nil {
+			return err
+		}
 	}
 	for _, f := range []string{"hutch.db", "hutch.db-wal", "hutch.db-shm", "master.key", "bucket.json"} {
 		if err := os.Rename(filepath.Join(dir, f), filepath.Join(aside, f)); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -297,4 +306,23 @@ func SetAside(dir string) error {
 		return nil
 	}
 	return setAside(dir, "stale-lead-"+strconv.FormatInt(time.Now().Unix(), 10))
+}
+
+// linkCACert is the link CA's certificate in a lead's database, or nothing for
+// one that never had workers.
+func linkCACert(path string) ([]byte, error) {
+	if _, err := os.Stat(path); err != nil {
+		return nil, nil
+	}
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	var ca []byte
+	err = db.QueryRow(`SELECT ca_cert FROM link WHERE id = 1`).Scan(&ca)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return ca, err
 }

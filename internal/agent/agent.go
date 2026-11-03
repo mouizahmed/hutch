@@ -630,12 +630,18 @@ func (a *Agent) takeLead(_ context.Context, params json.RawMessage, _ *rpc.Out) 
 func (a *Agent) heartbeat(ctx context.Context) {
 	b, _ := os.ReadFile(filepath.Join(a.w.Root, "worker-id"))
 	id := strings.TrimSpace(string(b))
+	var client bucket.Bucket
+	var clientFor bucket.Config
 	for {
-		every := 30 * time.Second
-		if p := a.m.settings.Load(); p != nil && p.Bucket != nil && id != "" {
-			every = cmp.Or(p.LeadCheck, every)
-			if bk, err := bucket.New(*p.Bucket); err == nil {
-				if err := link.PutAlive(ctx, bk, id, every); err != nil {
+		cfg, every, ok := heartbeatBucket(a.m.settings.Load(), a.dir)
+		if ok && id != "" {
+			if client == nil || cfg != clientFor {
+				if c, err := bucket.New(cfg); err == nil {
+					client, clientFor = c, cfg
+				}
+			}
+			if client != nil {
+				if err := link.PutAlive(ctx, client, id, every); err != nil {
 					log.Printf("heartbeat: %v", err)
 				}
 			}
@@ -646,4 +652,18 @@ func (a *Agent) heartbeat(ctx context.Context) {
 		case <-time.After(every):
 		}
 	}
+}
+
+// heartbeatBucket is where and how often a worker writes its heartbeat: the
+// lead's settings, or while it's away (a restart cut off from it) the bucket's
+// as it last sent them.
+func heartbeatBucket(p *api.WorkerSettingsParams, dir link.Dir) (bucket.Config, time.Duration, bool) {
+	every := 30 * time.Second
+	if p != nil && p.Bucket != nil {
+		return *p.Bucket, cmp.Or(p.LeadCheck, every), true
+	}
+	if cfg, saved, err := dir.Bucket(); err == nil && saved {
+		return cfg, every, true
+	}
+	return bucket.Config{}, every, false
 }

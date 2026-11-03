@@ -50,6 +50,15 @@ func (m *Mem) Get(_ context.Context, key string) ([]byte, error) {
 	return append([]byte(nil), o.data...), nil
 }
 
+func (m *Mem) Fetch(ctx context.Context, key string) ([]byte, Object, error) {
+	data, err := m.Get(ctx, key)
+	if err != nil {
+		return nil, Object{}, err
+	}
+	o, err := m.Head(ctx, key)
+	return data, o, err
+}
+
 func (m *Mem) Head(_ context.Context, key string) (Object, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

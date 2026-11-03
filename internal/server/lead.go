@@ -18,29 +18,38 @@ import (
 // record names a higher term.
 func (s *Server) leadLoop(ctx context.Context) {
 	for {
-		every := 30 * time.Second
-		if cfg, err := s.settings(); err == nil {
-			every = cfg.Duration("machines.lead_check")
-		}
-		err := s.checkLead(ctx)
-		if err != nil && !errors.Is(err, errNotLead) {
-			log.Printf("lead record: %v", err)
-		}
-		if v := s.vault.Load(); err == nil && v != nil {
-			if err := link.PutAlive(ctx, v.bucket, "lead", every); err != nil {
-				log.Printf("heartbeat: %v", err)
-			}
-		}
-		// A new lead claims its term as soon as its own worker attaches.
-		if l, err := s.store.link(); err == nil && l != nil && l.term == 0 && s.vault.Load() != nil {
-			every = time.Second
-		}
+		every := s.leadTick(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(every):
 		}
 	}
+}
+
+// leadTick checks the lead record and writes this lead's heartbeat, and
+// returns how long to wait before the next.
+func (s *Server) leadTick(ctx context.Context) time.Duration {
+	every := 30 * time.Second
+	if cfg, err := s.settings(); err == nil {
+		every = cfg.Duration("machines.lead_check")
+	}
+	err := s.checkLead(ctx)
+	if err != nil && !errors.Is(err, errNotLead) {
+		log.Printf("lead record: %v", err)
+	}
+	// Alive and leading, whatever else failed: only a lead passed by a higher
+	// term stops.
+	if v := s.vault.Load(); !errors.Is(err, errNotLead) && v != nil {
+		if err := link.PutAlive(ctx, v.bucket, "lead", every); err != nil {
+			log.Printf("heartbeat: %v", err)
+		}
+	}
+	// A new lead claims its term as soon as its own worker attaches.
+	if l, err := s.store.link(); err == nil && l != nil && l.term == 0 && s.vault.Load() != nil {
+		return time.Second
+	}
+	return every
 }
 
 var errNotLead = errors.New("this machine no longer leads")

@@ -126,3 +126,23 @@ func TestBackupOrder(t *testing.T) {
 		t.Fatalf("a name from before terms: %d %v %v", term, at, ok)
 	}
 }
+
+// A lead keeps writing its heartbeat when reading the lead record fails; only
+// a lead passed by a higher term stops, so a --down can't be taken for granted.
+func TestLeadHeartbeat(t *testing.T) {
+	ctx := t.Context()
+	mem := bucket.NewMem()
+	s := leadOn(t, mem, nil, "w-lead")
+	s.vault.Store(&vault{bucket: listFails{mem}})
+	s.leadTick(ctx)
+	if _, err := mem.Head(ctx, "alive/lead"); err != nil {
+		t.Fatalf("no heartbeat when the lead record couldn't be read: %v", err)
+	}
+	mem.Delete(ctx, "alive/lead")
+	s.vault.Store(&vault{bucket: mem})
+	s.superseded.Store(&link.Record{Term: 9, Address: "other.example:7443"})
+	s.leadTick(ctx)
+	if _, err := mem.Head(ctx, "alive/lead"); err == nil {
+		t.Fatal("a passed lead wrote a heartbeat")
+	}
+}

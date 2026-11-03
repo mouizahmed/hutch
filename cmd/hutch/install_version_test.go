@@ -28,3 +28,23 @@ func TestDowngradeChecksInstalledAndRunningDaemon(t *testing.T) {
 		})
 	}
 }
+
+// Upgrading from v0.1 to any v0.2 build asks first; nothing else does.
+func TestRaisesFormat(t *testing.T) {
+	for _, c := range []struct {
+		have, want string
+		asks       bool
+	}{
+		{"v0.1.0", "v0.2.0", true},
+		{"v0.1.0", "v0.2.0-rc.3", true},
+		{"v0.1.0-15-g4a5fe90-dirty", "v0.2.1", true},
+		{"v0.2.0-rc.3", "v0.2.0", false},
+		{"v0.2.0", "v0.2.1", false},
+		{"v0.1.0", "v0.1.1", false},
+		{"dev", "v0.2.0", false},
+	} {
+		if got := raisesFormat(c.have, c.want); got != c.asks {
+			t.Errorf("%s → %s asks: %v", c.have, c.want, got)
+		}
+	}
+}

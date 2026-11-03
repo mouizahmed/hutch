@@ -167,8 +167,13 @@ for f in kernel/vmlinux layer/hutch-guest layer/tmux-$(uname -m) layer/terminfo.
 if [ -n "$(sudo -n ls /var/lib/hutch/state/hutch.db 2>/dev/null)" ]; then echo state=yes; fi
 if [ -n "$(sudo -n ls /var/lib/hutch/link/lead 2>/dev/null)" ]; then echo worker=yes; fi
 echo "boxes=$(sudo -n ls /var/lib/hutch/boxes 2>/dev/null | tr '\n' ' ')"
-# The CA a worker trusts, as enrollment tokens name it: sha256 of its DER bytes.
-echo "link_ca=$(sudo -n sed '/-----/d' /var/lib/hutch/link/ca.pem 2>/dev/null | base64 -d 2>/dev/null | sha256sum | cut -c1-64)"
+# The link CAs the machine knows, as enrollment tokens name them (sha256 of the
+# DER bytes): the one it trusts as a worker, and those of lead state it keeps aside.
+cas=""
+for f in $(sudo -n sh -c 'ls /var/lib/hutch/link/ca.pem /var/lib/hutch/state/*/ca.pem' 2>/dev/null); do
+  cas="$cas $(sudo -n sed '/-----/d' "$f" 2>/dev/null | base64 -d 2>/dev/null | sha256sum | cut -c1-64)"
+done
+echo "link_ca=$cas"
 `
 
 type probe struct {
@@ -366,6 +371,7 @@ func findArtifacts(ctx context.Context, arch, hutchd, images string) (artifacts,
 		exe = real
 	}
 	dir := filepath.Dir(exe)
+	named := hutchd != ""
 	if hutchd == "" {
 		hutchd = filepath.Join(dir, "linux-"+goarch, "hutchd")
 	}
@@ -379,7 +385,8 @@ func findArtifacts(ctx context.Context, arch, hutchd, images string) (artifacts,
 			return a, fmt.Errorf("%s: build it with make linux images, or pass --hutchd and --images", f)
 		}
 	}
-	if !explicit {
+	// The binaries found next to this CLI, not ones named with --hutchd.
+	if !named {
 		for _, f := range []string{a.hutchd, a.guest} {
 			if err := sameCommit(f); err != nil {
 				return a, err
@@ -690,6 +697,9 @@ skipped and named.`,
 			if err := upgradeHost(cmd, host, f); err != nil {
 				return err
 			}
+			// The lead has raised the bucket's format: workers follow without
+			// being asked again.
+			f.yes = true
 			sess, err := connectTarget(host)
 			if err != nil {
 				return err
@@ -745,8 +755,7 @@ func upgradeHost(cmd *cobra.Command, host string, f installFlags) error {
 			return nil
 		}
 	}
-	// v0.2 raises the bucket's format, which v0.1 refuses to read.
-	if version.Older(have, "v0.2.0") && !version.Older(want, "v0.2.0") && !f.yes {
+	if raisesFormat(have, want) && !f.yes {
 		fmt.Printf("hutchd %s → %s raises the bucket's format: v0.1 can't read it afterwards, so the machine can't go back to v0.1. Running boxes keep running.\n", have, want)
 		if !confirm("Upgrade?") {
 			return errors.New("upgrade called off; nothing changed (--yes skips this question)")
@@ -1118,4 +1127,11 @@ func lastLines(s string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// raisesFormat reports whether upgrading hutchd from have to want raises the
+// bucket's format, which v0.1 refuses to read: from v0.1 to any v0.2 build,
+// release candidates included (v0.2.0-0 is the earliest).
+func raisesFormat(have, want string) bool {
+	return version.Older(have, "v0.2.0-0") && !version.Older(want, "v0.2.0-0")
 }

@@ -43,6 +43,8 @@ type Bucket interface {
 	// Put writes an object; with ifAbsent it fails with ErrExists instead of replacing one.
 	Put(ctx context.Context, key string, data []byte, ifAbsent bool) error
 	Get(ctx context.Context, key string) ([]byte, error)
+	// Fetch is Get with the object's details, in one request.
+	Fetch(ctx context.Context, key string) ([]byte, Object, error)
 	Head(ctx context.Context, key string) (Object, error)
 	Delete(ctx context.Context, key string) error
 	List(ctx context.Context, prefix string) ([]Object, error)
@@ -152,12 +154,19 @@ func (s *S3) Create(ctx context.Context) error {
 }
 
 func (s *S3) Get(ctx context.Context, key string) ([]byte, error) {
+	data, _, err := s.Fetch(ctx, key)
+	return data, err
+}
+
+func (s *S3) Fetch(ctx context.Context, key string) ([]byte, Object, error) {
 	resp, err := s.do(ctx, http.MethodGet, key, nil, nil, nil)
 	if err != nil {
-		return nil, err
+		return nil, Object{}, err
 	}
 	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
+	mod, _ := http.ParseTime(resp.Header.Get("Last-Modified"))
+	return data, Object{Key: key, Size: int64(len(data)), Modified: mod}, err
 }
 
 func (s *S3) Head(ctx context.Context, key string) (Object, error) {
