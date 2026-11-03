@@ -521,26 +521,13 @@ func (s *Server) forkProject(ctx context.Context, p api.ForkParams, stdout, stde
 	if err != nil {
 		return b, err
 	}
-	if err := s.store.putMeta(b.ID, boxMeta{project: p.Project, commit: v.Commit, version: v.Version, uid: uid}); err != nil {
-		return b, err
-	}
-	if err := s.linkPath(ctx, w, b.ID, p.Path, stderr); err != nil {
-		return b, err
-	}
-	if err := s.applyUserLayer(ctx, w, b.ID, p.Credentials); err != nil {
-		return b, err
-	}
-	if p.Branch != "" {
-		step(stdout, "your changes")
-		if b.Branch, b.Base, err = s.takeOverBranch(ctx, w, b.ID, p, stderr); err != nil {
-			s.removeBox(ctx, b.ID)
-			return api.Box{}, err
-		}
-	} else {
-		b.Branch, b.Base, err = s.checkoutBranch(ctx, w, b.ID, "hutch/"+b.ID, p.Base, stderr)
-	}
-	if err != nil {
-		return b, err
+	// Until it's on its branch, a box is no use: one that fails before, or whose
+	// caller gives up, is removed rather than left half made.
+	if err := s.finishFork(ctx, w, &b, p, v, uid, stdout, stderr); err != nil {
+		rm, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		defer cancel()
+		s.removeBox(rm, b.ID)
+		return api.Box{}, err
 	}
 	if s.run(ctx, w, b.ID, api.ExecParams{Dir: workspace, Argv: []string{"test", "-f", ".hutch/on-create.sh"}}, io.Discard, io.Discard) == nil {
 		step(stdout, "on-create.sh")
@@ -549,6 +536,26 @@ func (s *Server) forkProject(ctx context.Context, p api.ForkParams, stdout, stde
 		}
 	}
 	return b, nil
+}
+
+func (s *Server) finishFork(ctx context.Context, w *workerConn, b *api.Box, p api.ForkParams, v api.Template, uid string, stdout, stderr io.Writer) error {
+	if err := s.store.putMeta(b.ID, boxMeta{project: p.Project, commit: v.Commit, version: v.Version, uid: uid}); err != nil {
+		return err
+	}
+	if err := s.linkPath(ctx, w, b.ID, p.Path, stderr); err != nil {
+		return err
+	}
+	if err := s.applyUserLayer(ctx, w, b.ID, p.Credentials); err != nil {
+		return err
+	}
+	var err error
+	if p.Branch != "" {
+		step(stdout, "your changes")
+		b.Branch, b.Base, err = s.takeOverBranch(ctx, w, b.ID, p, stderr)
+	} else {
+		b.Branch, b.Base, err = s.checkoutBranch(ctx, w, b.ID, "hutch/"+b.ID, p.Base, stderr)
+	}
+	return err
 }
 
 // writeSecrets puts project secrets into the checkout and keeps Git from ever
