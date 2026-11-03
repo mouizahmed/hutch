@@ -8,7 +8,7 @@
 - **?** lists the keys.
 - **/** narrows the open project's list to boxes and terminals whose names, agents, branches, or machines hold what you type; **Esc** clears it. Searching never wakes or starts anything.
 
-Commands the TUI runs for you (a new box, a move, a push) show as rows at the top of the list, with their output in the pane. One that ends well leaves the list and says what it did; one that fails stays, with its error, until **d** dismisses it. When a new box or terminal fails, the next **n** or **N** opens with the prompt you wrote. **d** on a running one cancels it, asked first: it stops here, but the machine may already have done some of it. Quitting cancels what's still running, and stops it for good after `tui.cancel_grace`.
+Commands the TUI runs for you (a new box, a move, a push) show as rows at the top of the list, with their output in the pane. One that ends well leaves the list and says what it did; one that fails stays, with its error, until **d** dismisses it. When a new box or terminal fails or is canceled, the next **n** or **N** opens with the prompt you wrote; Esc there discards it. **d** on a running one cancels it, asked first: it stops here, but the machine may already have done some of it. Quitting cancels what's still running, and stops it for good after `tui.cancel_grace`.
 
 The footer always says where your keys go: the list, a view, or the terminal you're typing in. **Enter** types into the selected terminal (waking a sleeping box first) and **ctrl+]** gives the keys back.
 
@@ -18,7 +18,7 @@ Each opens in the workspace pane in place of the terminal; **esc** goes back to 
 
 | Key | View | What it does |
 |---|---|---|
-| `g` | Git | The box's checkout as the agent sees it: staged, unstaged, untracked, and conflicted files; each file's diff, with line numbers; staging and unstaging whole files (`a`/`u`) or single hunks (`A`/`U`, refused if the file changed since it was shown); a commit of what's staged (`c`); fetch, fast-forward-only pull, and push (`f`, `p`, `P`), each asked first; and the task diff against the base branch (Tab). Looking changes nothing and contacts no remote. |
+| `g` | Git | The box's checkout as the agent sees it: staged, unstaged, untracked, and conflicted files; each file's diff, with line numbers; staging and unstaging whole files (`a`/`u`) or single hunks (`A`/`U`, refused if the file changed since it was shown); a commit of what's staged (`c`); fetch (`f`); fast-forward-only pull and push (`p`, `P`), each asked first; and the task diff against the base branch (Tab). Looking changes nothing and contacts no remote. |
 | `o` | Ports | What the box listens on, and forwarding a port to this computer's loopback (Enter), choosing another local port when it's taken. Forwards stay while you look elsewhere and close when you stop them or quit; a forward to a sleeping box wakes it on its first connection. |
 | `m` | Machines | Each machine's role, state, version, room, and boxes; adding, removing, removing as lost, making another the lead, and upgrading every machine. |
 

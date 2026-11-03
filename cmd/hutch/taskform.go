@@ -102,6 +102,7 @@ func (m *tui) openForm(box string) tea.Cmd {
 	f.prompt.CharLimit = 0
 	f.prompt.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter", "alt+enter", "ctrl+j"))
 	f.prompt.SetValue(m.draft)
+	m.draft = ""
 	if project, ok := strings.CutPrefix(box, "template:"); ok {
 		f.boxes, f.box, f.project, f.dir = []string{box}, 0, project, m.checkout(project)
 	}
@@ -312,7 +313,7 @@ func (m *tui) submitForm() tea.Cmd {
 			args = append(args, prompt)
 		}
 	}
-	m.form, m.draft = nil, ""
+	m.form = nil
 	return m.keepDraft(f.prompt.Value(), m.submitRun(f, box, args))
 }
 

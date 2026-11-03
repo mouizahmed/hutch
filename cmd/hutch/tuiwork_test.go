@@ -267,8 +267,8 @@ func TestGitViewKeepsItsTarget(t *testing.T) {
 	}
 }
 
-// A new box that fails gives its prompt back to the next form; one sent again
-// doesn't linger.
+// A new box that fails gives its prompt back to the next form only, so it can't
+// turn up in an unrelated one later.
 func TestFailedTaskKeepsPrompt(t *testing.T) {
 	m := testTUI(t)
 	m.exe = filepath.Join(t.TempDir(), "missing") // the command can't start
@@ -287,19 +287,15 @@ func TestFailedTaskKeepsPrompt(t *testing.T) {
 	if got := m.form.prompt.Value(); got != "fix the flaky login test\nand add a regression test" {
 		t.Fatalf("the form came back with %q", got)
 	}
-	press(t, m, "esc")
+	// Sent again and failing again, it's kept again.
+	m.form.dir = t.TempDir()
+	m.Update(m.submitForm()())
 	m.openForm("")
 	if m.form.prompt.Value() == "" {
-		t.Fatal("esc lost the kept prompt")
-	}
-	// Sent again, it's no longer kept; failing again keeps it again.
-	m.form.dir = t.TempDir()
-	cmd = m.submitForm()
-	if m.draft != "" {
-		t.Fatal("a prompt sent again is still kept")
-	}
-	m.Update(cmd())
-	if m.openForm(""); m.form.prompt.Value() == "" {
 		t.Fatal("the second failure didn't keep the prompt")
+	}
+	press(t, m, "esc")
+	if m.openForm(""); m.form.prompt.Value() != "" {
+		t.Fatalf("a prompt dismissed with esc came back: %q", m.form.prompt.Value())
 	}
 }
