@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/hashicorp/yamux"
 
@@ -146,21 +147,11 @@ func handle(ctx context.Context, conn net.Conn, mux Mux, streams Streams) {
 
 // Stream calls method and passes every frame to onFrame until the final one.
 func Stream(ctx context.Context, sess *yamux.Session, method string, params any, onFrame func(Frame) error) error {
-	conn, err := sess.Open()
+	conn, err := OpenStream(ctx, sess, method, params)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	stop := context.AfterFunc(ctx, func() { conn.Close() })
-	defer stop()
-
-	p, err := json.Marshal(params)
-	if err != nil {
-		return err
-	}
-	if err := wire.WriteMax(conn, Request{Method: method, Params: p}, wire.MaxRPCFrame); err != nil {
-		return err
-	}
 	for {
 		var f Frame
 		if err := wire.ReadMax(conn, &f, wire.MaxRPCFrame); err != nil {
@@ -274,16 +265,34 @@ func OpenStream(ctx context.Context, sess *yamux.Session, method string, params 
 	if err != nil {
 		return nil, err
 	}
+	stream := &contextConn{Conn: conn}
+	stream.stop = context.AfterFunc(ctx, func() {
+		// yamux Close sends FIN but doesn't interrupt an already blocked Read.
+		conn.SetDeadline(time.Now())
+		conn.Close()
+	})
 	p, err := json.Marshal(params)
 	if err != nil {
-		conn.Close()
+		stream.Close()
 		return nil, err
 	}
-	if err := wire.WriteMax(conn, Request{Method: method, Params: p}, wire.MaxRPCFrame); err != nil {
-		conn.Close()
+	if err := wire.WriteMax(stream, Request{Method: method, Params: p}, wire.MaxRPCFrame); err != nil {
+		stream.Close()
 		return nil, err
 	}
-	return conn, nil
+	return stream, nil
+}
+
+// contextConn closes its stream when the call context ends, and releases the
+// cancellation callback when its owner closes the stream first.
+type contextConn struct {
+	net.Conn
+	stop func() bool
+}
+
+func (c *contextConn) Close() error {
+	c.stop()
+	return c.Conn.Close()
 }
 
 // Splice copies bytes both ways until either side closes, then closes both.

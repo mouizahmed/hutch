@@ -22,6 +22,8 @@ func TestParseRejects(t *testing.T) {
 		{User, "idle_timout = \"5m\"", "unknown key idle_timout"},
 		{Project, "machine = \"me@host\"", "can't be set in the project config"},
 		{Project, "idle_timeout = \"10s\"", "below the minimum 1m"},
+		{Machine, "machine.overcommit = nan", "want a finite number"},
+		{Project, "idle.cpu_threshold = \"NaN%\"", "invalid percentage"},
 		{Project, "size = { cpu = \"4\" }", "size.cpu: want a whole number"},
 		{User, "version = 2", "version 2 is not supported"},
 	} {

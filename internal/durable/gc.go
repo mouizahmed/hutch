@@ -2,12 +2,15 @@ package durable
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/sync/errgroup"
+
+	"github.com/mouizahmed/hutch/internal/bucket"
 )
 
 type GCStats struct {
@@ -24,9 +27,13 @@ type ManifestKey func(ctx context.Context, name string) (Key, bool, error)
 // GC deletes every chunk that no manifest uses and that is older than grace. Chunks
 // are listed before manifests are read, so a chunk written for a manifest that isn't
 // there yet is young and spared. A manifest that can't be opened stops the sweep:
-// its chunks can't be told apart.
+// its chunks can't be told apart. Deletes match the listed ETag so a concurrent
+// upload that refreshes an old chunk protects it from this sweep.
 func (s *Store) GC(ctx context.Context, keyFor ManifestKey, grace time.Duration) (GCStats, error) {
 	var st GCStats
+	if err := bucket.CheckConditionalDelete(ctx, s.Bucket); err != nil {
+		return st, err
+	}
 	cutoff := time.Now().Add(-grace)
 	objs, err := s.Bucket.List(ctx, "")
 	if err != nil {
@@ -72,9 +79,20 @@ func (s *Store) GC(ctx context.Context, keyFor ManifestKey, grace time.Duration)
 		if !ok || used[id] || !o.Modified.Before(cutoff) {
 			continue
 		}
-		st.Deleted++
-		st.Bytes += o.Size
-		g.Go(func() error { return s.Bucket.Delete(gctx, o.Key) })
+		g.Go(func() error {
+			err := s.Bucket.DeleteIfMatch(gctx, o.Key, o.ETag)
+			if errors.Is(err, bucket.ErrChanged) || errors.Is(err, bucket.ErrNotFound) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			mu.Lock()
+			st.Deleted++
+			st.Bytes += o.Size
+			mu.Unlock()
+			return nil
+		})
 	}
 	return st, g.Wait()
 }

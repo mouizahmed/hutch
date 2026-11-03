@@ -4,6 +4,7 @@ package bucket
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -29,12 +30,15 @@ var (
 	ErrNotFound = errors.New("not found")
 	// ErrExists is returned by a conditional Put when the key is already there.
 	ErrExists = errors.New("already exists")
+	// ErrChanged is returned when a conditional delete no longer matches.
+	ErrChanged = errors.New("object changed")
 )
 
 type Object struct {
 	Key      string
 	Size     int64
 	Modified time.Time
+	ETag     string
 }
 
 // Bucket is the operations Hutch needs: whole-object reads and writes, conditional
@@ -47,6 +51,8 @@ type Bucket interface {
 	Fetch(ctx context.Context, key string) ([]byte, Object, error)
 	Head(ctx context.Context, key string) (Object, error)
 	Delete(ctx context.Context, key string) error
+	// DeleteIfMatch deletes only the object with this ETag; otherwise ErrChanged.
+	DeleteIfMatch(ctx context.Context, key, etag string) error
 	List(ctx context.Context, prefix string) ([]Object, error)
 }
 
@@ -109,6 +115,9 @@ func (s *S3) do(ctx context.Context, method, key string, query url.Values, body 
 			if header.Get("If-None-Match") != "" {
 				return nil, fmt.Errorf("%s: %w", key, ErrExists)
 			}
+			if header.Get("If-Match") != "" {
+				return nil, fmt.Errorf("%s: %w", key, ErrChanged)
+			}
 		}
 		return nil, fmt.Errorf("bucket %s %s: %s: %s", method, key, resp.Status, errorMessage(msg))
 	}
@@ -166,7 +175,7 @@ func (s *S3) Fetch(ctx context.Context, key string) ([]byte, Object, error) {
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	mod, _ := http.ParseTime(resp.Header.Get("Last-Modified"))
-	return data, Object{Key: key, Size: int64(len(data)), Modified: mod}, err
+	return data, Object{Key: key, Size: int64(len(data)), Modified: mod, ETag: resp.Header.Get("ETag")}, err
 }
 
 func (s *S3) Head(ctx context.Context, key string) (Object, error) {
@@ -176,7 +185,7 @@ func (s *S3) Head(ctx context.Context, key string) (Object, error) {
 	}
 	resp.Body.Close()
 	mod, _ := http.ParseTime(resp.Header.Get("Last-Modified"))
-	return Object{Key: key, Size: resp.ContentLength, Modified: mod}, nil
+	return Object{Key: key, Size: resp.ContentLength, Modified: mod, ETag: resp.Header.Get("ETag")}, nil
 }
 
 func (s *S3) Delete(ctx context.Context, key string) error {
@@ -188,6 +197,35 @@ func (s *S3) Delete(ctx context.Context, key string) error {
 		return err
 	}
 	resp.Body.Close()
+	return nil
+}
+
+func (s *S3) DeleteIfMatch(ctx context.Context, key, etag string) error {
+	if etag == "" || etag == "*" {
+		return fmt.Errorf("%s: conditional delete needs an object's ETag", key)
+	}
+	h := http.Header{}
+	h.Set("If-Match", etag)
+	resp, err := s.do(ctx, http.MethodDelete, key, nil, nil, h)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// CheckConditionalDelete refuses endpoints that silently ignore If-Match.
+// Probe before sweeping any chunks, including for buckets configured by older builds.
+func CheckConditionalDelete(ctx context.Context, b Bucket) error {
+	probe := "probe/gc-" + rand.Text()
+	if err := b.Put(ctx, probe, []byte("probe"), true); err != nil {
+		return err
+	}
+	defer b.Delete(ctx, probe)
+	err := b.DeleteIfMatch(ctx, probe, `"00000000000000000000000000000000"`)
+	if !errors.Is(err, ErrChanged) {
+		return fmt.Errorf("bucket must support conditional deletes (If-Match) for garbage collection: %v", err)
+	}
 	return nil
 }
 
@@ -208,6 +246,7 @@ func (s *S3) List(ctx context.Context, prefix string) ([]Object, error) {
 				Key          string    `xml:"Key"`
 				Size         int64     `xml:"Size"`
 				LastModified time.Time `xml:"LastModified"`
+				ETag         string    `xml:"ETag"`
 			} `xml:"Contents"`
 			IsTruncated           bool   `xml:"IsTruncated"`
 			NextContinuationToken string `xml:"NextContinuationToken"`
@@ -218,7 +257,7 @@ func (s *S3) List(ctx context.Context, prefix string) ([]Object, error) {
 			return nil, fmt.Errorf("bucket list: %w", err)
 		}
 		for _, c := range page.Contents {
-			out = append(out, Object{Key: c.Key, Size: c.Size, Modified: c.LastModified})
+			out = append(out, Object{Key: c.Key, Size: c.Size, Modified: c.LastModified, ETag: c.ETag})
 		}
 		if !page.IsTruncated || page.NextContinuationToken == "" {
 			return out, nil

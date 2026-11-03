@@ -308,6 +308,10 @@ func Restore(ctx context.Context, dir string, cfg bucket.Config, passphrase, add
 	if err != nil {
 		return time.Time{}, err
 	}
+	return restoreFromBucket(ctx, dir, cfg, passphrase, address, b)
+}
+
+func restoreFromBucket(ctx context.Context, dir string, cfg bucket.Config, passphrase, address string, b bucket.Bucket) (time.Time, error) {
 	st := &durable.Store{Bucket: b}
 	if err := st.CheckFormat(ctx); err != nil {
 		return time.Time{}, err
@@ -340,8 +344,13 @@ func Restore(ctx context.Context, dir string, cfg bucket.Config, passphrase, add
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return time.Time{}, err
 	}
+	stage, err := os.MkdirTemp(dir, ".hutch-restore-")
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer os.RemoveAll(stage)
 	for name, file := range m.Files {
-		f, err := os.OpenFile(filepath.Join(dir, filepath.Base(name)), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+		f, err := os.OpenFile(filepath.Join(stage, filepath.Base(name)), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 		if err != nil {
 			return time.Time{}, err
 		}
@@ -353,22 +362,42 @@ func Restore(ctx context.Context, dir string, cfg bucket.Config, passphrase, add
 			return time.Time{}, fmt.Errorf("restore %s: %w", name, err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(dir, "master.key"), master[:], 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(stage, "master.key"), master[:], 0o600); err != nil {
+		return time.Time{}, err
+	}
+	if err := writeBucket(stage, cfg); err != nil {
 		return time.Time{}, err
 	}
 	// This is a new machine: the old one's boxes restore here from the bucket.
 	// Linked workers keep theirs. It leads at a term of its own, above the
 	// highest in the bucket, which it claims when it starts.
-	db, err := openStore(filepath.Join(dir, "hutch.db"), master.Derive("user-layer"))
+	dbPath := filepath.Join(stage, "hutch.db")
+	db, err := openStore(dbPath, master.Derive("user-layer"))
 	if err != nil {
 		return time.Time{}, err
 	}
 	err = restored(ctx, db, b, address)
-	db.db.Close()
+	closeErr := db.db.Close()
 	if err != nil {
 		return time.Time{}, err
 	}
-	return m.Created, writeBucket(dir, cfg)
+	if closeErr != nil {
+		return time.Time{}, closeErr
+	}
+	if err := os.Chmod(dbPath, 0o600); err != nil {
+		return time.Time{}, err
+	}
+	for _, name := range []string{"master.key", "bucket.json"} {
+		if err := os.Rename(filepath.Join(stage, name), filepath.Join(dir, name)); err != nil {
+			return time.Time{}, err
+		}
+	}
+	// Publish the database last: its presence makes a retry refuse the directory.
+	// A hard link publishes it atomically without replacing a database created meanwhile.
+	if err := os.Link(dbPath, filepath.Join(dir, "hutch.db")); err != nil {
+		return time.Time{}, err
+	}
+	return m.Created, nil
 }
 
 func (s *Server) bucketGet(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (any, error) {

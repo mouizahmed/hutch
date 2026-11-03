@@ -293,15 +293,17 @@ func (k *Key) parse(raw any) (any, error) {
 	case Float:
 		switch n := raw.(type) {
 		case float64:
-			return n, nil
+			if !math.IsNaN(n) && !math.IsInf(n, 0) {
+				return n, nil
+			}
 		case int64:
 			return float64(n), nil
 		case string:
-			if f, err := strconv.ParseFloat(n, 64); err == nil {
+			if f, err := strconv.ParseFloat(n, 64); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) {
 				return f, nil
 			}
 		}
-		return nil, fmt.Errorf("want a number, got %s", Display(raw))
+		return nil, fmt.Errorf("want a finite number, got %s", Display(raw))
 	case List:
 		items, ok := raw.([]any)
 		if !ok {
@@ -455,7 +457,7 @@ func ParseSize(s string) (int64, error) {
 
 func parsePercent(s string) (float64, error) {
 	n, err := strconv.ParseFloat(strings.TrimSuffix(s, "%"), 64)
-	if err != nil || !strings.HasSuffix(s, "%") {
+	if err != nil || !strings.HasSuffix(s, "%") || math.IsNaN(n) || math.IsInf(n, 0) {
 		return 0, fmt.Errorf("invalid percentage %q (like 5%%)", s)
 	}
 	return n, nil

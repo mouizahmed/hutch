@@ -40,6 +40,7 @@ type Store struct {
 	// Refresh: a chunk that already exists but is older than this is written again,
 	// so garbage collection (which spares chunks younger than its grace period, at
 	// least twice this) can't delete it while a manifest that uses it is in flight.
+	// Each refresh seals with a fresh nonce, changing the ETag checked by GC.
 	Refresh time.Duration
 }
 

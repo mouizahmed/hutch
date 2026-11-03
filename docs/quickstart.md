@@ -16,6 +16,8 @@ A released CLI downloads checksum-verified machine files for its exact version a
 
 Setup checks the machine, proposes storage, and installs the runtimes and daemon. `/var/lib/hutch` must use XFS with reflink. Review any disk-format prompt carefully. It also offers an S3-compatible backup bucket. Without one, nothing survives losing the machine. A bucket's recovery passphrase must be saved somewhere you can recover independently of that machine.
 
+The bucket must honor conditional writes (`If-None-Match`) for snapshots and [conditional deletes (`If-Match`)](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-deletes.html) for garbage collection. Hutch checks delete support before sweeping backup chunks.
+
 ```sh
 hutch doctor
 hutch machine

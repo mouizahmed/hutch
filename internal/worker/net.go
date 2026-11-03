@@ -53,13 +53,7 @@ func (s slot) boxNetns() string     { return s.netns() + "b" }
 func (s slot) boxNetnsPath() string { return "/var/run/netns/" + s.boxNetns() }
 
 func run(name string, args ...string) error {
-	var stderr bytes.Buffer
-	cmd := exec.Command(name, args...)
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s %s: %v: %s", name, strings.Join(args, " "), err, bytes.TrimSpace(stderr.Bytes()))
-	}
-	return nil
+	return runInput("", name, args...)
 }
 
 func uplink() (string, error) {

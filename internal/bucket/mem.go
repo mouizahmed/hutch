@@ -2,6 +2,7 @@ package bucket
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"sort"
 	"strings"
@@ -19,6 +20,7 @@ type Mem struct {
 type memObject struct {
 	data []byte
 	mod  time.Time
+	etag string
 }
 
 func NewMem() *Mem { return &Mem{objects: map[string]memObject{}} }
@@ -36,7 +38,7 @@ func (m *Mem) Put(_ context.Context, key string, data []byte, ifAbsent bool) err
 	if _, ok := m.objects[key]; ok && ifAbsent {
 		return fmt.Errorf("%s: %w", key, ErrExists)
 	}
-	m.objects[key] = memObject{append([]byte(nil), data...), m.now()}
+	m.objects[key] = memObject{data: append([]byte(nil), data...), mod: m.now(), etag: fmt.Sprintf(`"%x"`, sha256.Sum256(data))}
 	return nil
 }
 
@@ -66,12 +68,26 @@ func (m *Mem) Head(_ context.Context, key string) (Object, error) {
 	if !ok {
 		return Object{}, fmt.Errorf("%s: %w", key, ErrNotFound)
 	}
-	return Object{Key: key, Size: int64(len(o.data)), Modified: o.mod}, nil
+	return Object{Key: key, Size: int64(len(o.data)), Modified: o.mod, ETag: o.etag}, nil
 }
 
 func (m *Mem) Delete(_ context.Context, key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	delete(m.objects, key)
+	return nil
+}
+
+func (m *Mem) DeleteIfMatch(_ context.Context, key, etag string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	o, ok := m.objects[key]
+	if !ok {
+		return fmt.Errorf("%s: %w", key, ErrNotFound)
+	}
+	if etag == "" || etag != o.etag {
+		return fmt.Errorf("%s: %w", key, ErrChanged)
+	}
 	delete(m.objects, key)
 	return nil
 }
@@ -82,7 +98,7 @@ func (m *Mem) List(_ context.Context, prefix string) ([]Object, error) {
 	var out []Object
 	for k, o := range m.objects {
 		if strings.HasPrefix(k, prefix) {
-			out = append(out, Object{Key: k, Size: int64(len(o.data)), Modified: o.mod})
+			out = append(out, Object{Key: k, Size: int64(len(o.data)), Modified: o.mod, ETag: o.etag})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })

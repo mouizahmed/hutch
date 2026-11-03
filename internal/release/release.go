@@ -124,8 +124,7 @@ func (c *Client) Machine(ctx context.Context, version, arch string) (dir string,
 		return dir, err
 	}
 	defer gz.Close()
-	uname := map[string]string{"amd64": "x86_64", "arm64": "aarch64"}[arch]
-	want := map[string]bool{"hutchd": false, "hutch-guest": false, "vmlinux-" + uname: false, "tmux-" + uname: false, "terminfo.tar": false}
+	want := map[string]bool{"hutchd": false, "hutch-guest": false, "vmlinux-x86_64": false, "tmux-x86_64": false, "terminfo.tar": false}
 	tr := tar.NewReader(gz)
 	var total int64
 	for {
