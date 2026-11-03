@@ -196,6 +196,9 @@ type MachineRmParams struct {
 	ID string `json:"id"`
 	// Lost: the machine is gone. Its boxes come back elsewhere from the bucket.
 	Lost bool `json:"lost,omitempty"`
+	// Down: it wasn't fenced, as you say it's off; one still writing to the
+	// bucket is refused.
+	Down bool `json:"down,omitempty"`
 }
 
 // MachineTokenResult is a one-time enrollment token and the address to dial.

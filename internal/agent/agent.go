@@ -24,6 +24,7 @@ import (
 	"github.com/hashicorp/yamux"
 
 	"github.com/mouizahmed/hutch/internal/api"
+	"github.com/mouizahmed/hutch/internal/bucket"
 	"github.com/mouizahmed/hutch/internal/guestproto"
 	"github.com/mouizahmed/hutch/internal/image"
 	"github.com/mouizahmed/hutch/internal/keys"
@@ -107,6 +108,7 @@ func (a *Agent) Serve(ctx context.Context, conn net.Conn) error {
 // Link keeps a connection to another machine's lead, reconnecting with backoff
 // up to machines.reconnect_max.
 func (a *Agent) Link(ctx context.Context, dir link.Dir) {
+	go a.heartbeat(ctx)
 	backoff := time.Second
 	var followed time.Time
 	for ctx.Err() == nil {
@@ -620,4 +622,28 @@ func (a *Agent) takeLead(_ context.Context, params json.RawMessage, _ *rpc.Out) 
 		time.AfterFunc(time.Second, a.Restart)
 	}
 	return nil, nil
+}
+
+// heartbeat writes this worker's heartbeat to the bucket every
+// machines.lead_check, lead or no lead: a machine said to be down that still
+// writes it isn't.
+func (a *Agent) heartbeat(ctx context.Context) {
+	b, _ := os.ReadFile(filepath.Join(a.w.Root, "worker-id"))
+	id := strings.TrimSpace(string(b))
+	for {
+		every := 30 * time.Second
+		if p := a.m.settings.Load(); p != nil && p.Bucket != nil && id != "" {
+			every = cmp.Or(p.LeadCheck, every)
+			if bk, err := bucket.New(*p.Bucket); err == nil {
+				if err := link.PutAlive(ctx, bk, id, every); err != nil {
+					log.Printf("heartbeat: %v", err)
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(every):
+		}
+	}
 }

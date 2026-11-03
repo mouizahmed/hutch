@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/mouizahmed/hutch/internal/bucket"
 	"github.com/mouizahmed/hutch/internal/pki"
@@ -59,5 +61,30 @@ func TestFollowSignedRecordsOnly(t *testing.T) {
 	}
 	if err := CheckTerm(d, 1); err == nil {
 		t.Fatal("a lower term was accepted")
+	}
+}
+
+// A machine said to be down that wrote its heartbeat within three of its
+// intervals isn't; one silent longer, or that never wrote one, may be.
+func TestStillAlive(t *testing.T) {
+	ctx := t.Context()
+	now := time.Now()
+	b := bucket.NewMem()
+	b.Now = func() time.Time { return now }
+	if err := StillAlive(ctx, b, "w-a", "a"); err != nil {
+		t.Fatalf("no heartbeat: %v", err)
+	}
+	if err := PutAlive(ctx, b, "w-a", 30*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := StillAlive(ctx, b, "w-a", "a"); err == nil || !strings.Contains(err.Error(), "isn't down") {
+		t.Fatalf("a fresh heartbeat: %v", err)
+	}
+	now = now.Add(-91 * time.Second)
+	if err := PutAlive(ctx, b, "w-a", 30*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := StillAlive(ctx, b, "w-a", "a"); err != nil {
+		t.Fatalf("a heartbeat 91s old: %v", err)
 	}
 }

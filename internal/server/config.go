@@ -118,6 +118,24 @@ func (s *Server) settings() (*config.Config, error) {
 // settingsOn resolves the config for one machine: its own machine-layer values
 // over every machine's.
 func (s *Server) settingsOn(workerID string) (*config.Config, error) {
+	gen := s.store.configGen.Load()
+	if c, ok := s.settingsCache.Load(workerID); ok && c.(cachedSettings).gen == gen {
+		return c.(cachedSettings).cfg, nil
+	}
+	cfg, err := s.readSettings(workerID)
+	if err == nil {
+		s.settingsCache.Store(workerID, cachedSettings{gen, cfg})
+	}
+	return cfg, err
+}
+
+type cachedSettings struct {
+	gen int64
+	cfg *config.Config
+}
+
+// readSettings parses the config documents for one machine.
+func (s *Server) readSettings(workerID string) (*config.Config, error) {
 	var docs []*config.Doc
 	for name, layer := range configLayers {
 		d, err := s.store.config(name)

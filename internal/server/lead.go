@@ -18,12 +18,18 @@ import (
 // record names a higher term.
 func (s *Server) leadLoop(ctx context.Context) {
 	for {
-		if err := s.checkLead(ctx); err != nil && !errors.Is(err, errNotLead) {
-			log.Printf("lead record: %v", err)
-		}
 		every := 30 * time.Second
 		if cfg, err := s.settings(); err == nil {
 			every = cfg.Duration("machines.lead_check")
+		}
+		err := s.checkLead(ctx)
+		if err != nil && !errors.Is(err, errNotLead) {
+			log.Printf("lead record: %v", err)
+		}
+		if v := s.vault.Load(); err == nil && v != nil {
+			if err := link.PutAlive(ctx, v.bucket, "lead", every); err != nil {
+				log.Printf("heartbeat: %v", err)
+			}
 		}
 		// A new lead claims its term as soon as its own worker attaches.
 		if l, err := s.store.link(); err == nil && l != nil && l.term == 0 && s.vault.Load() != nil {

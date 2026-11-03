@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mouizahmed/hutch/internal/bucket"
 	"github.com/mouizahmed/hutch/internal/pki"
@@ -134,4 +135,45 @@ func (d Dir) Term() int64 {
 	b, _ := os.ReadFile(d.path("term"))
 	t, _ := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
 	return t
+}
+
+// A machine's heartbeat, alive/<id> in the bucket ("lead" for the lead), is
+// written every machines.lead_check while it runs, so a machine you say is
+// down can be checked: one still writing to the bucket isn't.
+type heartbeat struct {
+	Every time.Duration `json:"every"`
+}
+
+func aliveKey(id string) string { return "alive/" + id }
+
+// PutAlive writes machine id's heartbeat, to be written again within every.
+func PutAlive(ctx context.Context, b bucket.Bucket, id string, every time.Duration) error {
+	data, _ := json.Marshal(heartbeat{Every: every})
+	return b.Put(ctx, aliveKey(id), data, false)
+}
+
+// StillAlive returns an error naming how recently machine id wrote its
+// heartbeat, when that's within three of its intervals: it isn't down.
+func StillAlive(ctx context.Context, b bucket.Bucket, id, name string) error {
+	o, err := b.Head(ctx, aliveKey(id))
+	if errors.Is(err, bucket.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading %s's heartbeat in the bucket: %w", name, err)
+	}
+	data, err := b.Get(ctx, aliveKey(id))
+	if err != nil {
+		return fmt.Errorf("reading %s's heartbeat in the bucket: %w", name, err)
+	}
+	var h heartbeat
+	if json.Unmarshal(data, &h) != nil || h.Every <= 0 {
+		return nil
+	}
+	age := time.Since(o.Modified)
+	if limit := 3 * h.Every; age < limit {
+		return fmt.Errorf("%s wrote to the bucket %s ago, so it isn't down: it may be cut off from you and the other machines but still working. Stop it, or if it is down, wait %s and try again",
+			name, age.Round(time.Second), (limit - age).Round(time.Second))
+	}
+	return nil
 }

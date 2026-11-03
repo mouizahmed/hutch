@@ -745,6 +745,13 @@ func upgradeHost(cmd *cobra.Command, host string, f installFlags) error {
 			return nil
 		}
 	}
+	// v0.2 raises the bucket's format, which v0.1 refuses to read.
+	if version.Older(have, "v0.2.0") && !version.Older(want, "v0.2.0") && !f.yes {
+		fmt.Printf("hutchd %s → %s raises the bucket's format: v0.1 can't read it afterwards, so the machine can't go back to v0.1. Running boxes keep running.\n", have, want)
+		if !confirm("Upgrade?") {
+			return errors.New("upgrade called off; nothing changed (--yes skips this question)")
+		}
+	}
 	a, err := findArtifacts(cmd.Context(), p.get("arch"), f.hutchd, f.images)
 	if err != nil {
 		return err

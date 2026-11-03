@@ -10,6 +10,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -148,6 +149,9 @@ type store struct {
 	// onChange is called after every write, for events; onLogin after a login's
 	// stored values change.
 	onChange, onLogin func()
+	// configGen counts writes to the config documents, so parsed settings are
+	// read again only after one.
+	configGen atomic.Int64
 }
 
 func (s *store) exec(query string, args ...any) (sql.Result, error) {
@@ -502,6 +506,7 @@ func (s *store) putConfig(name string, base int64, content string) (api.ConfigDo
 	if err := tx.Commit(); err != nil {
 		return api.ConfigDoc{}, false, err
 	}
+	s.configGen.Add(1)
 	s.changed()
 	return next, false, nil
 }

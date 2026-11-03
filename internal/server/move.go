@@ -13,6 +13,7 @@ import (
 
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/durable"
+	"github.com/mouizahmed/hutch/internal/link"
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
@@ -165,6 +166,11 @@ func (s *Server) workerRm(ctx context.Context, params json.RawMessage, out *rpc.
 	case !p.Lost:
 		return nil, fmt.Errorf("%s is offline, so its boxes can't move off it: wait for it, or if it's gone for good, hutch machine rm --lost %s brings them back elsewhere from the bucket", w.Name, w.Name)
 	default:
+		if v := s.vault.Load(); p.Down && v != nil {
+			if err := link.StillAlive(ctx, v.bucket, w.ID, w.Name); err != nil {
+				return nil, err
+			}
+		}
 		if err := s.lose(ctx, w, out); err != nil {
 			return nil, err
 		}

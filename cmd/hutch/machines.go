@@ -15,7 +15,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mouizahmed/hutch/internal/api"
+	"github.com/mouizahmed/hutch/internal/bucket"
 	"github.com/mouizahmed/hutch/internal/config"
+	"github.com/mouizahmed/hutch/internal/link"
 	"github.com/mouizahmed/hutch/internal/rpc"
 )
 
@@ -122,6 +124,7 @@ keep two copies of each working.`,
 				return fmt.Errorf("no machine named %s", args[0])
 			}
 			w := ws[i]
+			unfenced := false
 			if lost && !w.Online {
 				host := cmp.Or(w.SSH, w.Name)
 				fmt.Printf("Fencing %s over SSH (%s)...\n", w.Name, host)
@@ -134,9 +137,10 @@ keep two copies of each working.`,
 					return fmt.Errorf("can't fence %s over SSH (%v: %s).\nIf it's off or cut off from the bucket and the other machines, run this again with --down; if it's still running its boxes, they'd have two working copies", w.Name, err, strings.TrimSpace(string(out)))
 				default:
 					fmt.Printf("  ! not fenced (%v); going on, as you said it's down\n", err)
+					unfenced = true
 				}
 			}
-			if err := rpc.CallOutput(cmd.Context(), sess, api.WorkerRm, api.MachineRmParams{ID: w.ID, Lost: lost}, nil, os.Stdout, os.Stderr); err != nil {
+			if err := rpc.CallOutput(cmd.Context(), sess, api.WorkerRm, api.MachineRmParams{ID: w.ID, Lost: lost, Down: unfenced}, nil, os.Stdout, os.Stderr); err != nil {
 				return err
 			}
 			fmt.Printf("Removed %s; its hutchd can't connect again.\n", w.Name)
@@ -258,6 +262,10 @@ func handOver(cmd *cobra.Command, name string) (string, error) {
 // promote makes the worker at host the lead from the bucket's newest backup,
 // after fencing the old lead.
 func promote(cmd *cobra.Command, host string, down bool) error {
+	cfg, pass, err := recoverBucket()
+	if err != nil {
+		return err
+	}
 	old := machineTarget()
 	if old != "" && old != host {
 		fmt.Printf("Fencing the old lead over SSH (%s)...\n", old)
@@ -270,15 +278,18 @@ func promote(cmd *cobra.Command, host string, down bool) error {
 			return fmt.Errorf("can't fence the old lead %s over SSH (%v: %s).\nIf it's off or cut off from the bucket and the other machines, run this again with --down; if it still leads, there'd be two leads until it reads the new lead record", old, err, strings.TrimSpace(string(out)))
 		default:
 			fmt.Printf("  ! not fenced (%v); going on, as you said it's down\n", err)
+			b, err := bucket.New(cfg)
+			if err != nil {
+				return err
+			}
+			if err := link.StillAlive(cmd.Context(), b, "lead", "the old lead "+old); err != nil {
+				return err
+			}
 		}
 	}
 	addr := sshHostname(host)
 	if addr == "" {
 		return fmt.Errorf("can't tell %s's address", host)
-	}
-	cfg, pass, err := recoverBucket()
-	if err != nil {
-		return err
 	}
 	body, _ := json.Marshal(api.ServerInitParams{Bucket: cfg, Passphrase: pass, Address: addr})
 	fmt.Printf("Restoring the newest backup onto %s...\n", host)

@@ -76,6 +76,8 @@ type Server struct {
 	leadMu     sync.Mutex
 	// gate stops the changing calls, and new placements, during a handover.
 	gate gate
+	// settingsCache holds each machine's parsed settings (cachedSettings).
+	settingsCache sync.Map
 
 	// keyProxy holds the whole keys table, to sign and refresh for workers' proxies.
 	keyProxy *keys.Proxy

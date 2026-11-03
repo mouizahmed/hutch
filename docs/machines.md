@@ -41,7 +41,7 @@ hutch machine rm <machine>          # moves its boxes to the others, then remove
 hutch machine rm --lost <machine>   # it's gone: its boxes come back elsewhere from the bucket
 ```
 
-`--lost` first fences the machine over SSH, so it stops running its copies. When it can't be reached, add `--down` only if you know it's off or cut off from the bucket and the other machines: otherwise two copies of its boxes keep working. Boxes come back from their newest snapshot (`checkpoint.interval`); work since then is lost. Hutch never restores them on its own; it notifies you after `machines.lost_notify_after`. A lost machine added back keeps its stale copies asleep as `<box>-returned`.
+`--lost` first fences the machine over SSH, so it stops running its copies. When it can't be reached, add `--down` only if you know it's off or cut off from the bucket and the other machines: otherwise two copies of its boxes keep working. Every machine writes a heartbeat to the bucket each `machines.lead_check`, and `--down` is refused while a machine's is recent. Boxes come back from their newest snapshot (`checkpoint.interval`); work since then is lost. Hutch never restores them on its own; it notifies you after `machines.lost_notify_after`. A lost machine added back keeps its stale copies asleep as `<box>-returned`.
 
 ## Changing the lead
 

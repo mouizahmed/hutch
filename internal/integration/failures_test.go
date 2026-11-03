@@ -206,7 +206,7 @@ os.replace(tmp,'/usr/local/bin/hutchd')`, filepath.Join(files, "hutchd"))
 	upgrade := func(binary string) (string, error) {
 		ctx, cancel := context.WithTimeout(t.Context(), 4*time.Minute)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, cli, "machine", "upgrade", "--hutchd", binary, "--images", files)
+		cmd := exec.CommandContext(ctx, cli, "machine", "upgrade", "--yes", "--hutchd", binary, "--images", files)
 		var out bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &out, &out
 		err := cmd.Run()

@@ -165,3 +165,23 @@ func TestPlaceAcrossMachines(t *testing.T) {
 		t.Fatalf("a fleet-wide key set on one machine: %v", err)
 	}
 }
+
+// Settings are parsed once per change, not on every placement, and a change is
+// seen at once.
+func TestSettingsCached(t *testing.T) {
+	s, err := New(Config{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := s.settingsOn("w-a")
+	if b, _ := s.settingsOn("w-a"); a != b {
+		t.Fatal("settings parsed again with nothing changed")
+	}
+	d, _ := s.store.config(machineDoc("w-a"))
+	if _, _, err := s.store.putConfig(machineDoc("w-a"), d.Version, "machine.max_boxes = 3\n"); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := s.settingsOn("w-a"); c.Int("machine.max_boxes") != 3 {
+		t.Fatal("a config change wasn't seen")
+	}
+}

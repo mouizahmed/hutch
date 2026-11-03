@@ -12,6 +12,7 @@ import (
 	"github.com/mouizahmed/hutch/internal/api"
 	"github.com/mouizahmed/hutch/internal/bucket"
 	"github.com/mouizahmed/hutch/internal/durable"
+	"github.com/mouizahmed/hutch/internal/link"
 )
 
 // rm --lost is only for a machine that's offline, and plain rm only for one
@@ -64,6 +65,14 @@ func TestRmLost(t *testing.T) {
 	s.mu.Unlock()
 	if err := rm(false); err == nil || !strings.Contains(err.Error(), "rm --lost") {
 		t.Fatalf("plain rm of an offline machine: %v", err)
+	}
+	// Said to be down, but it still writes its heartbeat: refused.
+	if err := link.PutAlive(ctx, mem, "w-a", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := json.Marshal(api.MachineRmParams{ID: "w-a", Lost: true, Down: true})
+	if _, err := s.workerRm(ctx, p, nil); err == nil || !strings.Contains(err.Error(), "isn't down") {
+		t.Fatalf("rm --lost --down of a machine still writing to the bucket: %v", err)
 	}
 	if err := rm(true); err != nil {
 		t.Fatal(err)
