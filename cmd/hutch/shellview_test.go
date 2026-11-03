@@ -30,7 +30,8 @@ func TestShellViewEndsWithItsShell(t *testing.T) {
 		}
 		return strings.TrimSpace(string(out))
 	}
-	tmux("new-session", "-d", "-s", agentSession, "-n", "agent", "sleep 60")
+	// No tmux.conf: a box's keeps every ended window, as a shell's window doesn't.
+	tmux("-f", "/dev/null", "new-session", "-d", "-s", agentSession, "-n", "agent", "sleep 60")
 	shell := make(chan struct{})
 	tmux("new-window", "-t", agentSession, "-n", "shell", "read x; exit")
 	tmux("new-window", "-t", agentSession, "-n", "other", "read x; exit")
