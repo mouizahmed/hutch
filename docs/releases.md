@@ -1,6 +1,6 @@
 # Release preparation
 
-Releases provide CLI archives, matching machine bundles and build attestations. A version-tag push builds and checks the artifacts and creates a draft release; publication is a separate maintainer action. See the [v0.2.1](releases/v0.2.1.md) and [v0.2.0](releases/v0.2.0.md) release notes for the current scope and limitations, and the [v0.1.0 notes](releases/v0.1.0.md) for the first release.
+Releases provide CLI archives, matching machine bundles and build attestations. A version-tag push builds and checks the artifacts and creates a draft release; publication is a separate maintainer action. See the [v0.2.2](releases/v0.2.2.md), [v0.2.1](releases/v0.2.1.md) and [v0.2.0](releases/v0.2.0.md) release notes for the current scope and limitations, and the [v0.1.0 notes](releases/v0.1.0.md) for the first release.
 
 ## Artifacts
 
