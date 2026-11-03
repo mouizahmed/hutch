@@ -24,6 +24,8 @@ hutch config set --on <machine> machine.max_boxes 4
 hutch config set --on <machine> machine.run_boxes false   # coordinate only
 ```
 
+A lead that only coordinates needn't meet the box requirements (KVM, kernel 6.1, XFS): set it up with `hutch setup <ssh-host> --no-boxes`, then add machines that run the boxes.
+
 Machine-layer keys set with `--machine` apply to every machine; `--on` overrides one. A box waking on a machine at `machine.max_boxes` moves to another of its class after `placement.move_queued_after`. `hutch ls` shows each box's machine.
 
 ## Logins on workers
