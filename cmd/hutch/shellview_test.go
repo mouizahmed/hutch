@@ -5,6 +5,7 @@ package main
 import (
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,8 @@ func TestShellViewEndsWithItsShell(t *testing.T) {
 	}
 	t.Setenv("TMUX_TMPDIR", t.TempDir())
 	t.Setenv("TMUX", "")
+	// The view is a tmux client, which needs a terminal type (CI sets none).
+	t.Setenv("TERM", "xterm-256color")
 	tmux := func(args ...string) string {
 		t.Helper()
 		out, err := exec.Command("tmux", args...).CombinedOutput()
@@ -42,14 +45,27 @@ func TestShellViewEndsWithItsShell(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
+	var mu sync.Mutex
+	var screen []byte
 	go func() {
 		buf := make([]byte, 4096)
 		for {
-			if _, err := f.Read(buf); err != nil {
+			n, err := f.Read(buf)
+			mu.Lock()
+			screen = append(screen, buf[:n]...)
+			mu.Unlock()
+			if err != nil {
 				return
 			}
 		}
 	}()
+	t.Cleanup(func() {
+		if t.Failed() {
+			mu.Lock()
+			t.Logf("the view's terminal: %q", screen)
+			mu.Unlock()
+		}
+	})
 	go func() { cmd.Wait(); close(shell) }()
 	waitFor(t, func() bool { return exec.Command("tmux", "has-session", "-t", view).Run() == nil }, "the view to start")
 
