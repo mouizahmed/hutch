@@ -126,7 +126,12 @@ func boxCommands() []*cobra.Command {
 			if image != "" {
 				p := api.BootParams{ID: name, Image: image, VCPUs: cpus, MemMiB: memMiB, DiskBytes: cfg.Size("disk.size"), Idle: idle, Worker: on}
 				if err := rpc.Call(ctx, sess, api.BoxBoot, p, &b); err != nil {
-					return fmt.Errorf("%w\n  hutch console %s", err, name)
+					// A box that failed to boot is kept, so its console can be read.
+					var bs []api.Box
+					if rpc.Call(ctx, sess, api.BoxList, struct{}{}, &bs) == nil && slices.ContainsFunc(bs, func(x api.Box) bool { return x.ID == name }) {
+						return fmt.Errorf("%w\n  hutch console %s", err, name)
+					}
+					return err
 				}
 			} else if from == "" && repo != nil {
 				p := api.ForkParams{Project: repo.ID, Path: laptopPath(repo.Root), Base: cfg.String("base"), ID: name, Idle: idle, Credentials: cfg.List("credentials"),
