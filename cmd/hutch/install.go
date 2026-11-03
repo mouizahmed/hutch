@@ -694,7 +694,7 @@ skipped and named.`,
 			if host == "" {
 				return errors.New("no machine set: hutch setup <ssh-host>")
 			}
-			if err := upgradeHost(cmd, host, f); err != nil {
+			if err := upgradeHost(cmd, host, f, ""); err != nil {
 				return err
 			}
 			// The lead has raised the bucket's format: workers follow without
@@ -716,7 +716,9 @@ skipped and named.`,
 				}
 				target := cmp.Or(w.SSH, w.Name)
 				fmt.Printf("\n%s (%s)\n", w.Name, target)
-				if err := upgradeHost(cmd, target, f); err != nil {
+				// A worker refuses the CLI while its lead is up: the lead says
+				// what it runs.
+				if err := upgradeHost(cmd, target, f, w.Version); err != nil {
 					fmt.Printf("  ! %v\n", err)
 					skipped = append(skipped, w.Name)
 					continue
@@ -727,7 +729,7 @@ skipped and named.`,
 				}
 			}
 			if len(skipped) > 0 {
-				return fmt.Errorf("not upgraded: %s (run hutch machine upgrade again once they're reachable over SSH)", strings.Join(skipped, ", "))
+				return fmt.Errorf("not upgraded: %s (see above; run hutch machine upgrade again once that's fixed)", strings.Join(skipped, ", "))
 			}
 			return nil
 		},
@@ -737,7 +739,8 @@ skipped and named.`,
 }
 
 // upgradeHost installs this hutchd on the machine at host and restarts it.
-func upgradeHost(cmd *cobra.Command, host string, f installFlags) error {
+// running is the hutchd version the lead reports for it, if it's a worker.
+func upgradeHost(cmd *cobra.Command, host string, f installFlags, running string) error {
 	r := remote{host}
 	p, err := r.probe()
 	if err != nil {
@@ -750,7 +753,10 @@ func upgradeHost(cmd *cobra.Command, host string, f installFlags) error {
 	if have == want && want != "dev" && !strings.HasSuffix(want, "-dirty") && !f.force {
 		// The file may have been uploaded by an interrupted upgrade while
 		// the old process is still running. Ask the actual daemon as well.
-		if running, err := daemonVersion(cmd.Context(), host); err == nil && running == want {
+		if running == "" {
+			running, _ = daemonVersion(cmd.Context(), host)
+		}
+		if running == want {
 			fmt.Printf("It already runs hutchd %s.\n", have)
 			return nil
 		}
