@@ -166,6 +166,7 @@ if [ -f /var/lib/hutch/images/base/image.json ]; then echo base=yes; fi
 for f in kernel/vmlinux layer/hutch-guest layer/tmux-$(uname -m) layer/terminfo.tar; do echo "sum_$(basename $f)=$(sudo -n sha256sum /var/lib/hutch/$f 2>/dev/null | cut -c1-64)"; done
 if [ -n "$(sudo -n ls /var/lib/hutch/state/hutch.db 2>/dev/null)" ]; then echo state=yes; fi
 if [ -n "$(sudo -n ls /var/lib/hutch/link/lead 2>/dev/null)" ]; then echo worker=yes; fi
+if [ -e /var/lib/hutch/no-boxes ]; then echo noboxes=yes; fi
 echo "boxes=$(sudo -n ls /var/lib/hutch/boxes 2>/dev/null | tr '\n' ' ')"
 # The link CAs the machine knows, as enrollment tokens name them (sha256 of the
 # DER bytes): the one it trusts as a worker, and those of lead state it keeps aside.
@@ -270,6 +271,13 @@ func checkMachine(p probe) error {
 	arch := p.get("arch")
 	if err := check(arch == "x86_64", "architecture", arch, "Hutch machines currently need x86_64; arm64 CLI clients can connect to an x86_64 machine", true); err != nil {
 		return err
+	}
+	if p.get("noboxes") == "yes" {
+		fmt.Println("  · boxes: none; it only coordinates (machine.run_boxes = false), so KVM, kernel 6.1, XFS and the box runtimes aren't needed")
+		if p.get("apt") != "yes" && p.get("tools") != "yes" {
+			return check(false, "packages", "no apt-get", "install zstd and curl, then run setup again", true)
+		}
+		return nil
 	}
 	if p.get("kvm") == "yes" {
 		check(true, "/dev/kvm", "boxes are Firecracker VMs", "", false)
@@ -452,12 +460,17 @@ func install(r remote, p probe, a artifacts, st storagePlan, start bool) error {
 			return err
 		}
 	}
-	if err := r.run("xfs_info /var/lib/hutch | grep -q reflink=1"); err != nil {
+	noBoxes := p.get("noboxes") == "yes"
+	if noBoxes {
+		if err := step("/var/lib/hutch, marked to run no boxes", r.run("sudo mkdir -p /var/lib/hutch && sudo touch /var/lib/hutch/no-boxes")); err != nil {
+			return err
+		}
+	} else if err := r.run("xfs_info /var/lib/hutch | grep -q reflink=1"); err != nil {
 		return check(false, "/var/lib/hutch", "XFS without reflink", "reformat it with mkfs.xfs -m reflink=1", true)
 	}
 	fc := "/var/lib/hutch/firecracker/" + fcVersion
 	tgz := fmt.Sprintf("firecracker-%s-%s.tgz", fcVersion, arch)
-	if p.get("kvm") == "yes" {
+	if p.get("kvm") == "yes" && !noBoxes {
 		if err := step("Firecracker "+fcVersion, r.run(fmt.Sprintf(`
 if [ ! -x %[1]s/firecracker ]; then
   t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
@@ -471,62 +484,66 @@ fi`, fc, fcVersion, tgz, fcSHA256[arch], arch))); err != nil {
 			return err
 		}
 	}
-	gv := "/var/lib/hutch/gvisor/" + gvisorVersion
-	if err := step("gVisor "+gvisorVersion, r.run(fmt.Sprintf(`
+	if !noBoxes {
+		gv := "/var/lib/hutch/gvisor/" + gvisorVersion
+		if err := step("gVisor "+gvisorVersion, r.run(fmt.Sprintf(`
 if [ ! -x %[1]s/runsc ]; then
   t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
   curl -fsSL -o "$t/gvisor.tar.zstd" https://storage.googleapis.com/gvisor/releases/release/%[2]s/%[3]s/gvisor.tar.zstd
   echo "%[4]s  $t/gvisor.tar.zstd" | sha256sum -c --quiet
   sudo mkdir -p %[1]s.new && sudo tar -C %[1]s.new --zstd -xf "$t/gvisor.tar.zstd" && sudo mv %[1]s.new %[1]s
 fi`, gv, gvisorVersion, arch, gvisorSHA256[arch]))); err != nil {
-		return err
-	}
-	bk := "/var/lib/hutch/buildkit/" + buildkitVersion
-	goarch := map[string]string{"x86_64": "amd64", "aarch64": "arm64"}[arch]
-	if err := step("BuildKit "+buildkitVersion, r.run(fmt.Sprintf(`
+			return err
+		}
+		bk := "/var/lib/hutch/buildkit/" + buildkitVersion
+		goarch := map[string]string{"x86_64": "amd64", "aarch64": "arm64"}[arch]
+		if err := step("BuildKit "+buildkitVersion, r.run(fmt.Sprintf(`
 if [ ! -x %[1]s/bin/buildkitd ]; then
   t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
   curl -fsSL -o "$t/bk.tgz" https://github.com/moby/buildkit/releases/download/%[2]s/buildkit-%[2]s.linux-%[3]s.tar.gz
   echo "%[4]s  $t/bk.tgz" | sha256sum -c --quiet
   sudo mkdir -p %[1]s.new && sudo tar -C %[1]s.new -xzf "$t/bk.tgz" && sudo mv %[1]s.new %[1]s
 fi`, bk, buildkitVersion, goarch, buildkitSHA256[arch]))); err != nil {
-		return err
+			return err
+		}
 	}
 	if err := step("hutchd", r.upload(a.hutchd, "/usr/local/bin/hutchd", 0o755)); err != nil {
 		return err
 	}
-	files := []struct{ local, path string }{
-		{a.guest, "/var/lib/hutch/layer/hutch-guest"},
-		{a.tmux, "/var/lib/hutch/layer/tmux-" + arch},
-		{a.terminfo, "/var/lib/hutch/layer/terminfo.tar"},
-	}
-	if p.get("kvm") == "yes" {
-		files = append(files, struct{ local, path string }{a.kernel, "/var/lib/hutch/kernel/vmlinux"})
-	}
-	guestChanged := false
-	for _, f := range files {
-		sum, err := fileSHA256(f.local)
-		if err != nil {
-			return err
+	if !noBoxes {
+		files := []struct{ local, path string }{
+			{a.guest, "/var/lib/hutch/layer/hutch-guest"},
+			{a.tmux, "/var/lib/hutch/layer/tmux-" + arch},
+			{a.terminfo, "/var/lib/hutch/layer/terminfo.tar"},
 		}
-		if p.get("sum_"+filepath.Base(f.path)) == sum {
-			continue
+		if p.get("kvm") == "yes" {
+			files = append(files, struct{ local, path string }{a.kernel, "/var/lib/hutch/kernel/vmlinux"})
 		}
-		if err := r.upload(f.local, f.path, 0o755); err != nil {
-			return err
+		guestChanged := false
+		for _, f := range files {
+			sum, err := fileSHA256(f.local)
+			if err != nil {
+				return err
+			}
+			if p.get("sum_"+filepath.Base(f.path)) == sum {
+				continue
+			}
+			if err := r.upload(f.local, f.path, 0o755); err != nil {
+				return err
+			}
+			guestChanged = guestChanged || filepath.Base(f.path) == "hutch-guest"
 		}
-		guestChanged = guestChanged || filepath.Base(f.path) == "hutch-guest"
-	}
-	fmt.Println("  ✓ Hutch's image layer" + map[bool]string{true: " and the guest kernel"}[p.get("kvm") == "yes"])
-	if p.get("base") != "yes" || guestChanged {
-		fmt.Println("  … the default image, built on the machine (a minute or two the first time)")
-		var out bytes.Buffer
-		c := r.cmd("sudo hutchd image build base")
-		c.Stdout, c.Stderr = &out, &out
-		if err := c.Run(); err != nil {
-			return fmt.Errorf("default image: %v\n%s", err, lastLines(out.String(), 30))
+		fmt.Println("  ✓ Hutch's image layer" + map[bool]string{true: " and the guest kernel"}[p.get("kvm") == "yes"])
+		if p.get("base") != "yes" || guestChanged {
+			fmt.Println("  … the default image, built on the machine (a minute or two the first time)")
+			var out bytes.Buffer
+			c := r.cmd("sudo hutchd image build base")
+			c.Stdout, c.Stderr = &out, &out
+			if err := c.Run(); err != nil {
+				return fmt.Errorf("default image: %v\n%s", err, lastLines(out.String(), 30))
+			}
+			fmt.Println("  ✓ default image")
 		}
-		fmt.Println("  ✓ default image")
 	}
 	if err := step("group hutch, with "+p.get("user")+" in it", r.run(`sudo groupadd -f hutch && sudo usermod -aG hutch "$(id -un)"`)); err != nil {
 		return err
@@ -553,6 +570,7 @@ type installFlags struct {
 	imageSize    int64
 	noBucket     bool
 	force        bool
+	noBoxes      bool
 }
 
 func (f *installFlags) register(c *cobra.Command, setup bool) {
@@ -564,6 +582,7 @@ func (f *installFlags) register(c *cobra.Command, setup bool) {
 	c.Flags().BoolVar(&f.force, "force", false, "install even when the machine runs this or a newer hutchd")
 	if setup {
 		c.Flags().BoolVar(&f.noBucket, "no-bucket", false, "no bucket for now (add one later with hutch machine bucket)")
+		c.Flags().BoolVar(&f.noBoxes, "no-boxes", false, "a machine that only coordinates (machine.run_boxes = false): no KVM, XFS, or box runtimes needed")
 	}
 }
 
@@ -578,12 +597,21 @@ func prepare(ctx context.Context, host string, f installFlags) (remote, probe, a
 	if err := checkDowngrade(p, f.force); err != nil {
 		return r, p, artifacts{}, storagePlan{}, err
 	}
+	if f.noBoxes {
+		if p.get("state") == "yes" && p.get("noboxes") != "yes" {
+			return r, p, artifacts{}, storagePlan{}, fmt.Errorf("%s already runs boxes; --no-boxes is for a new machine (hutch config set --on <it> machine.run_boxes false stops new boxes there)", host)
+		}
+		p.values["noboxes"] = "yes"
+	}
 	if err := checkMachine(p); err != nil {
 		return r, p, artifacts{}, storagePlan{}, err
 	}
 	a, err := findArtifacts(ctx, p.get("arch"), f.hutchd, f.images)
 	if err != nil {
 		return r, p, a, storagePlan{}, err
+	}
+	if p.get("noboxes") == "yes" {
+		return r, p, a, storagePlan{}, nil // no box disk to plan
 	}
 	disk := f.disk
 	if disk == "none" {

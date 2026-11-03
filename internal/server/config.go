@@ -207,3 +207,22 @@ func (s *Server) hostProject(ctx context.Context, w *workerConn, project string)
 		s.pushKeys(ctx, w)
 	}
 }
+
+// runNoBoxes sets machine.run_boxes = false in machine id's own config, once.
+func (s *Server) runNoBoxes(id string) error {
+	c, err := s.settingsOn(id)
+	if err != nil || !c.Bool("machine.run_boxes") {
+		return err
+	}
+	d, err := s.store.config(machineDoc(id))
+	if err != nil {
+		return err
+	}
+	p, _ := config.SplitPath("machine.run_boxes")
+	text, err := config.Set([]byte(d.Content), p, false)
+	if err != nil {
+		return err
+	}
+	_, _, err = s.store.putConfig(machineDoc(id), d.Version, string(text))
+	return err
+}

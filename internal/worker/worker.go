@@ -114,7 +114,10 @@ func New(root, fcVersion string) (*Worker, error) {
 		return nil, err
 	}
 	w := &Worker{Root: root, FCVersion: fcVersion, vendor: vendor}
-	if _, err := os.Stat("/dev/kvm"); err == nil {
+	if NoBoxes(root) {
+		// A machine that only coordinates has no box runtime to find.
+		w.FCVersion = ""
+	} else if _, err := os.Stat("/dev/kvm"); err == nil {
 		for _, f := range []string{"firecracker", "jailer"} {
 			if _, err := os.Stat(w.fcBin("", f)); err != nil {
 				return nil, fmt.Errorf("firecracker %s not installed: %w", fcVersion, err)
@@ -319,3 +322,10 @@ func (w *Worker) OpenKeys() {
 
 // uid is the unprivileged user a box's Firecracker runs as.
 func (s slot) uid() int { return 100000 + int(s) }
+
+// NoBoxes reports whether this machine only coordinates: hutch setup
+// --no-boxes marks it, and it runs no boxes (machine.run_boxes = false).
+func NoBoxes(root string) bool {
+	_, err := os.Stat(filepath.Join(root, "no-boxes"))
+	return err == nil
+}

@@ -185,3 +185,28 @@ func TestSettingsCached(t *testing.T) {
 		t.Fatal("a config change wasn't seen")
 	}
 }
+
+// A machine set up with --no-boxes marks itself coordinate-only in its own
+// machine config, once, keeping what else is set there.
+func TestRunNoBoxes(t *testing.T) {
+	s, err := New(Config{Dir: t.TempDir(), NoBoxes: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, _ := s.store.config(machineDoc("w-lead"))
+	if _, _, err := s.store.putConfig(machineDoc("w-lead"), d.Version, "machine.max_boxes = 2\n"); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := s.runNoBoxes("w-lead"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c, _ := s.settingsOn("w-lead")
+	if c.Bool("machine.run_boxes") || c.Int("machine.max_boxes") != 2 {
+		t.Fatalf("run_boxes %v, max_boxes %d", c.Bool("machine.run_boxes"), c.Int("machine.max_boxes"))
+	}
+	if d, _ := s.store.config(machineDoc("w-lead")); d.Version != 2 {
+		t.Fatalf("written %d times, want once", d.Version-1)
+	}
+}
