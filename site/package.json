@@ -1,0 +1,14 @@
+{
+  "name": "hutch-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "banner": "astro build && python3 brand/make-header.py"
+  },
+  "dependencies": {
+    "astro": "7.4.5"
+  }
+}

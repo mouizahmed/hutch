@@ -1,0 +1,178 @@
+<canvas id="constellation" aria-hidden="true"></canvas>
+<script is:inline>
+// A few microVMs in a slowly swaying lattice: wireframe boxes joined by links that
+// carry packets, each box softly lit and brightening when a packet lands. The scene
+// is drawn as thin lines on a small offscreen canvas; each glyph cell's coverage is
+// then ordered-dithered into glyphs, so edges come out light and vertices bright.
+const glyphs = ' .·:-=+x*#%@';
+const bayer = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map(v => v / 16 - 0.5);
+const spacing = 2.6, rise = 1.3, half = 0.95, distance = 22, packets = 3, period = 3.2, sample = 3, gain = 1.3;
+
+// Chosen by search over the lattice so no two boxes overlap anywhere in the camera's sway.
+const places = [[-1, -1.5, -1], [0, -1.5, 1], [0, -0.5, 0], [-1, 0.5, -1], [1, 0.5, 0], [1, 1.5, -1]];
+const pairs = [[0, 1], [1, 2], [0, 3], [2, 4], [3, 4], [4, 5], [3, 5]];
+const middle = [0, 1, 2].map(k => places.reduce((sum, p) => sum + p[k], 0) / places.length);
+const nodes = places.map((p, i) => ({ at: p.map((v, k) => (v - middle[k]) * spacing * (k === 1 ? rise : 1)), phase: i * 2.39996 }));
+// Links run along the lattice axes, turning at right angles: across, then deep, then up.
+const links = pairs.map(([from, to]) => {
+  const route = [nodes[from].at];
+  for (const k of [0, 2, 1]) {
+    const next = route[route.length - 1].slice();
+    next[k] = nodes[to].at[k];
+    if (next[k] !== route[route.length - 1][k]) route.push(next);
+  }
+  // Links meet the boxes at their faces rather than running through them.
+  const trim = (end, toward) => end.map((v, k) => v + Math.sign(toward[k] - v) * half);
+  route[0] = trim(route[0], route[1]);
+  route[route.length - 1] = trim(route[route.length - 1], route[route.length - 2]);
+  return { from, to, route };
+});
+const along = (route, s) => {
+  const lengths = route.slice(1).map((p, i) => Math.hypot(...p.map((v, k) => v - route[i][k])));
+  let left = s * lengths.reduce((sum, l) => sum + l, 0), i = 0;
+  while (i < lengths.length - 1 && left > lengths[i]) left -= lengths[i++];
+  return route[i].map((v, k) => v + (route[i + 1][k] - v) * left / lengths[i]);
+};
+const corners = [...Array(8)].map((_, i) => [i & 1 ? half : -half, i & 2 ? half : -half, i & 4 ? half : -half]);
+const edges = [];
+for (let i = 0; i < 8; i++) for (const bit of [1, 2, 4]) if (!(i & bit)) edges.push([i, i | bit]);
+const hash = n => { n = Math.imul(n ^ 0x9e3779b9, 0x85ebca6b); n ^= n >>> 13; return (Math.imul(n, 0xc2b2ae35) ^ (n >>> 16)) >>> 0; };
+const smooth = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+
+function render(canvas, paused) {
+  const context = canvas.getContext('2d');
+  const scene = document.createElement('canvas');
+  const ink = scene.getContext('2d', { willReadFrequently: true });
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)');
+  const still = () => paused || reduced.matches || document.hidden;
+  let width = 0, height = 0, frame = 0, last = 0, clock = 3, zoom = 1, steady = false;
+
+  const dither = (t, cell) => {
+    const columns = Math.ceil(width / cell), rows = Math.ceil(height / cell);
+    if (scene.width !== columns * sample || scene.height !== rows * sample) {
+      scene.width = columns * sample; scene.height = rows * sample;
+    }
+    const unit = sample / cell;
+
+    // Sway around a three-quarter view; face-on, the boxes flatten into squares.
+    const yaw = Math.PI / 4 + 0.3 * Math.sin(t * 0.06), pitch = 0.5 + 0.05 * Math.sin(t * 0.13);
+    const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
+    const focal = Math.min(width * 2.2, height * 1.4) * zoom;
+    const project = ([x, y, z]) => {
+      const x1 = x * cy + z * sy, z1 = -x * sy + z * cy;
+      const y2 = y * cp - z1 * sp, z2 = y * sp + z1 * cp + distance;
+      return [(width / 2 + x1 * focal / z2) * unit, (height * 0.54 - y2 * focal / z2) * unit, z2];
+    };
+    const nearness = z => smooth(distance + 4, distance - 4, z);
+
+    ink.globalCompositeOperation = 'source-over';
+    ink.fillStyle = '#000';
+    ink.fillRect(0, 0, scene.width, scene.height);
+    ink.globalCompositeOperation = 'lighter';
+    ink.lineCap = 'round';
+    const stroke = (points, alpha, thickness) => {
+      ink.strokeStyle = `rgba(255,255,255,${alpha})`;
+      ink.lineWidth = thickness * sample;
+      ink.beginPath();
+      ink.moveTo(points[0][0], points[0][1]);
+      for (let i = 1; i < points.length; i++) ink.lineTo(points[i][0], points[i][1]);
+      ink.stroke();
+    };
+    const glow = (p, radius, alpha) => {
+      const light = ink.createRadialGradient(p[0], p[1], 0, p[0], p[1], radius);
+      light.addColorStop(0, `rgba(255,255,255,${alpha})`);
+      light.addColorStop(1, 'rgba(255,255,255,0)');
+      ink.fillStyle = light;
+      ink.fillRect(p[0] - radius, p[1] - radius, radius * 2, radius * 2);
+    };
+
+    const flash = nodes.map(() => steady ? 0.7 : 0);
+    const travelling = [];
+    for (let j = 0; j < (steady ? 0 : packets); j++) {
+      const shifted = t + j * period / packets, slot = Math.floor(shifted / period), phase = (shifted % period) / period;
+      const h = hash(slot * 31 + j);
+      const link = links[h % links.length], back = h & 1, to = back ? link.from : link.to;
+      if (phase < 0.55) {
+        const s = smooth(0, 1, phase / 0.55);
+        travelling.push(along(link.route, back ? 1 - s : s));
+      } else flash[to] = Math.max(flash[to], 1 - (phase - 0.55) / 0.45);
+    }
+
+    for (const { route } of links) {
+      const points = route.map(project);
+      const depth = nearness(points.reduce((sum, p) => sum + p[2], 0) / points.length);
+      stroke(points, steady ? 0.7 + 0.3 * depth : 0.45 + 0.25 * depth, steady ? 0.75 : 0.6);
+    }
+    nodes.forEach((node, n) => {
+      const awake = Math.max(0.7 + 0.3 * smooth(-0.2, 0.4, Math.sin(t * 0.11 + node.phase)), flash[n]);
+      const centre = project(node.at);
+      const points = corners.map(corner => project(corner.map((v, k) => v + node.at[k])));
+      const alpha = (0.7 + 0.3 * nearness(centre[2])) * awake;
+      for (const [a, b] of edges) stroke([points[a], points[b]], alpha, 0.75);
+      const size = Math.hypot(points[0][0] - points[7][0], points[0][1] - points[7][1]);
+      glow(centre, size * 0.8, 0.04 * awake + 0.3 * flash[n]);
+    });
+    for (const p of travelling) {
+      const at = project(p);
+      glow(at, 2.5 * sample, 0.9);
+      glow(at, 1 * sample, 1);
+    }
+
+    const pixels = ink.getImageData(0, 0, scene.width, scene.height).data;
+    const levels = glyphs.split('').map(() => []);
+    for (let r = 0; r < rows; r++) {
+      const y = r / rows;
+      for (let c = 0; c < columns; c++) {
+        const x = c / columns;
+        let cover = 0;
+        for (let dy = 0; dy < sample; dy++) for (let dx = 0; dx < sample; dx++) cover += pixels[((r * sample + dy) * scene.width + c * sample + dx) * 4];
+        cover /= 255 * sample * sample;
+        const field = (0.1 + 0.06 * Math.sin(x * 4.1 + y * 2.3 + t * 0.25) + 0.04 * Math.sin(y * 7.7 - x * 1.9 - t * 0.18)) * (0.55 + 0.45 * Math.sin(Math.PI * y));
+        const value = cover * gain + field + bayer[(r % 4) * 4 + c % 4] * 0.16;
+        const level = Math.max(0, Math.min(glyphs.length - 1, Math.round(value * (glyphs.length - 1))));
+        if (level) levels[level].push(c, r);
+      }
+    }
+    return levels;
+  };
+
+  const draw = now => {
+    if (last && !still()) clock += Math.min(now - last, 100) / 1000;
+    last = now;
+    const cell = width < 400 ? 6 : 8;
+    const levels = dither(clock, cell);
+    context.fillStyle = '#000';
+    context.fillRect(0, 0, width, height);
+    context.font = `${cell + 1}px "IBM Plex Mono", monospace`;
+    context.textAlign = 'center';
+    context.textBaseline = 'middle';
+    levels.forEach((cells, level) => {
+      context.fillStyle = `rgba(255,255,255,${0.35 + 0.65 * level / (glyphs.length - 1)})`;
+      for (let i = 0; i < cells.length; i += 2) context.fillText(glyphs[level], (cells[i] + 0.5) * cell, (cells[i + 1] + 0.5) * cell);
+    });
+  };
+
+  const loop = now => {
+    if (now - last >= 50) draw(now);
+    frame = still() ? 0 : requestAnimationFrame(loop);
+  };
+  const restart = () => {
+    cancelAnimationFrame(frame);
+    last = 0;
+    frame = requestAnimationFrame(now => { draw(now); if (!still()) frame = requestAnimationFrame(loop); });
+  };
+  new ResizeObserver(([entry]) => {
+    width = entry.contentRect.width; height = entry.contentRect.height;
+    const ratio = Math.min(devicePixelRatio || 1, 2);
+    canvas.width = Math.round(width * ratio); canvas.height = Math.round(height * ratio);
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    restart();
+  }).observe(canvas);
+  document.fonts.load('10px "IBM Plex Mono"').then(restart, () => {});
+  reduced.addEventListener('change', restart);
+  document.addEventListener('visibilitychange', restart);
+  return { frame: (t, w, h, cell, scale, still) => { width = w; height = h; zoom = scale; steady = still; const levels = dither(t, cell); zoom = 1; steady = false; return levels; } };
+}
+
+window.constellation = render(document.getElementById('constellation'), false);
+</script>

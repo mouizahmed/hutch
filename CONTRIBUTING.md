@@ -26,3 +26,5 @@ Keep changes focused and explain their effect on CLI/TUI behavior, box state, fa
 Commit subjects use short, concrete, lower-case descriptions, for example `forwarded ports wake sleeping boxes, one wake per box`. Do not add automated co-author attribution.
 
 `private/` is a separate private documentation repository and must never be committed into this public repository. Public usage and security documentation belongs under `docs/` or the root public Markdown files.
+
+The website source is in [`site/`](site/README.md). It is a static Astro site; its README covers local preview, building, and generating the shared header artwork.

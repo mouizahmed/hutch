@@ -1,0 +1,37 @@
+:root { --bg: #fff; --fg: #111; --muted: #8a8a8a; --panel: #000; }
+* { box-sizing: border-box; margin: 0; }
+body { background: var(--bg); color: var(--fg); font: 16px/1.8 "IBM Plex Mono", monospace; }
+.page { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 0.75rem; padding: 0.75rem; min-height: 100vh; }
+main { padding: 0 1rem 4rem 0; }
+nav { display: flex; justify-content: space-between; align-items: center; }
+.logo { font-size: 1.35rem; font-weight: 500; letter-spacing: -0.02em; }
+nav ul { display: flex; gap: 1.5rem; list-style: none; padding: 0; font-size: 0.8rem; }
+nav a { color: var(--muted); text-decoration: none; }
+nav a:hover { color: var(--fg); }
+h1 { font-weight: 400; font-size: clamp(1.6rem, 2.6vw, 2.2rem); line-height: 1.3; margin: 30vh 0 2.5rem; max-width: 22ch; }
+p { max-width: 37rem; }
+.muted { color: var(--muted); font-size: 0.95rem; margin-top: 1.5rem; }
+.muted + .muted { margin-top: 0.5rem; }
+.open { margin-top: 2.5rem; font-size: 0.85rem; color: var(--muted); }
+.open + .open { margin-top: 0.6rem; }
+.open a { color: var(--fg); text-decoration: none; }
+.command { display: flex; align-items: center; gap: 0.9rem; padding: 1.35rem 1.5rem; background: #111; border: 1px solid #2a2a2a; color: #f2f2f2; font-size: 0.85rem; }
+.lede { margin-top: 2.5rem; }
+.command .prompt { color: #666; user-select: none; }
+.command code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; font: inherit; scrollbar-width: none; }
+.command code::-webkit-scrollbar { display: none; }
+.command button { flex: none; display: grid; place-items: center; width: 1.9rem; height: 1.9rem; padding: 0; background: none; border: 0; border-radius: 4px; color: #9a9a9a; cursor: pointer; }
+.command button:hover, .command button:focus-visible { color: #fff; background: #222; }
+.command svg { width: 1.05rem; height: 1.05rem; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.command .done { display: none; }
+.command button.copied .copy { display: none; }
+.command button.copied .done { display: block; }
+aside { position: sticky; top: 0.75rem; height: calc(100vh - 1.5rem); border-radius: 10px; overflow: hidden; background: var(--panel); }
+canvas { display: block; width: 100%; height: 100%; }
+@media (max-width: 800px) {
+  .page { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  aside { position: relative; top: 0; height: 60vh; order: -1; }
+  main { padding: 2rem 16px 3rem; }
+  h1 { margin: 4rem 0 2rem; }
+  .lede { margin-top: 3rem; }
+}

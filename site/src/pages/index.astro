@@ -1,0 +1,23 @@
+---
+import Layout from '../layouts/Layout.astro';
+import GlyphDither from '../components/GlyphDither.astro';
+import InstallCommand from '../components/InstallCommand.astro';
+---
+<Layout title="Hutch: every coding agent gets its own computer" description="Hutch clones boxes from snapshots of your project's environment, keeps terminals running when you disconnect, and sleeps idle boxes, on a Linux machine you rent or own.">
+  <div class="page">
+  <main>
+    <nav>
+      <div class="logo">hutch</div>
+      <ul><li><a href="#">Docs</a></li><li><a href="https://github.com/mouizahmed/hutch">GitHub ↗</a></li></ul>
+    </nav>
+    <h1>Every coding agent gets its own computer.</h1>
+    <InstallCommand />
+    <p class="lede">Hutch clones boxes from snapshots of your project's environment, keeps terminals running when you disconnect, and sleeps idle boxes — on a Linux machine you rent or own.</p>
+    <p class="muted">Firecracker microVMs where there's KVM. gVisor everywhere else.</p>
+    <p class="muted">Works with Claude Code and Codex. Others via a TOML adapter.</p>
+    <p class="open">Open source. Apache 2.0 licensed. <a href="https://github.com/mouizahmed/hutch">Star on GitHub ↗</a></p>
+    <p class="open">Early software, not yet independently reviewed. <a href="https://github.com/mouizahmed/hutch/blob/main/docs/security.md">Security model ↗</a></p>
+  </main>
+  <aside><GlyphDither /></aside>
+  </div>
+</Layout>
