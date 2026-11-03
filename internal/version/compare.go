@@ -1,12 +1,15 @@
 package version
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 )
 
 // Older reports whether release a is older than release b. Builds that aren't
-// releases (dev, a commit) aren't ordered, so it's false for them.
+// releases (dev, a commit) aren't ordered, so it's false for them. A build from
+// source comes just after the version it was described from (git describe:
+// v0.1.0-16-g4a5fe90, v0.2.0-rc.2-dirty), ordered by its commits past it.
 func Older(a, b string) bool {
 	x, okA := parse(a)
 	y, okB := parse(b)
@@ -18,25 +21,28 @@ func Older(a, b string) bool {
 			return x.n[i] < y.n[i]
 		}
 	}
-	// A build from source, described as N commits past a release
-	// (v0.1.0-16-g4a5fe90), comes after that release.
-	if xn, ok := past(x.pre); ok {
-		yn, ok := past(y.pre)
-		return ok && xn < yn
+	if x.pre != y.pre {
+		return preOlder(x.pre, y.pre)
 	}
-	if _, ok := past(y.pre); ok {
-		return true
-	}
-	// A pre-release comes before its release.
 	switch {
-	case x.pre == y.pre:
+	case x.build != y.build:
+		return !x.build
+	case x.commits != y.commits:
+		return x.commits < y.commits
+	}
+	return !x.dirty && y.dirty
+}
+
+// preOlder orders different pre-release identifiers; a pre-release comes
+// before its release ("").
+func preOlder(x, y string) bool {
+	switch {
+	case x == "":
 		return false
-	case x.pre == "":
-		return false
-	case y.pre == "":
+	case y == "":
 		return true
 	}
-	xp, yp := strings.Split(x.pre, "."), strings.Split(y.pre, ".")
+	xp, yp := strings.Split(x, "."), strings.Split(y, ".")
 	for i := 0; i < min(len(xp), len(yp)); i++ {
 		if xp[i] == yp[i] {
 			continue
@@ -56,7 +62,15 @@ func Older(a, b string) bool {
 type release struct {
 	n   [3]int
 	pre string
+	// build: a source build described from this version, commits past it,
+	// with uncommitted changes when dirty.
+	build   bool
+	commits int
+	dirty   bool
 }
+
+// describe matches git describe's suffix: "<commits>-g<hash>".
+var describe = regexp.MustCompile(`^(?:(.*)-)?([0-9]+)-g[0-9a-f]{4,}$`)
 
 func parse(v string) (release, bool) {
 	var r release
@@ -71,6 +85,13 @@ func parse(v string) (release, bool) {
 	v, r.pre, ok = strings.Cut(v, "-")
 	if ok && !identifiers(r.pre, true) {
 		return r, false
+	}
+	if rest, dirty := strings.CutSuffix(r.pre, "dirty"); dirty && (rest == "" || strings.HasSuffix(rest, "-")) {
+		r.pre, r.build, r.dirty = strings.TrimSuffix(rest, "-"), true, true
+	}
+	if m := describe.FindStringSubmatch(r.pre); m != nil {
+		r.pre, r.build = m[1], true
+		r.commits, _ = strconv.Atoi(m[2])
 	}
 	parts := strings.Split(v, ".")
 	if len(parts) != 3 {
@@ -110,18 +131,4 @@ func identifiers(s string, prerelease bool) bool {
 		}
 	}
 	return true
-}
-
-// past reads git describe's "<commits>-g<hash>[-dirty]" after a release.
-func past(pre string) (int, bool) {
-	n, rest, ok := strings.Cut(pre, "-g")
-	if !ok {
-		return 0, false
-	}
-	hash := strings.TrimSuffix(rest, "-dirty")
-	commits, err := strconv.Atoi(n)
-	if err != nil || len(hash) < 4 || strings.Trim(hash, "0123456789abcdef") != "" {
-		return 0, false
-	}
-	return commits, true
 }
