@@ -13,6 +13,8 @@ hutch machine
 
 The new machine dials the lead over mutual TLS on port 7443 (`machine.link_port`), so only the lead needs that port open to the others; a worker needs no inbound port. If the lead's address isn't its SSH host, set `machine.address`.
 
+Machines are named by the SSH host you set them up or add them as, like `hutch-vps2`; for an IP address, by their hostname. `--name` chooses another for an added machine.
+
 ## Placing boxes
 
 A new box goes to a machine that fits it, preferring one that already has its template version. `placement.order` chooses between filling the fullest machine (`fill`, the default) and spreading to the emptiest (`spread`).

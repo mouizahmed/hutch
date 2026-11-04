@@ -308,9 +308,12 @@ func buildImage(ctx context.Context, root string, args []string) error {
 func run(ctx context.Context, root, fcVersion, socket string, args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	host, _ := os.Hostname()
-	// A worker that became the lead keeps the name it was added with.
-	if b, err := os.ReadFile(filepath.Join(root, "state", "worker-link", "name")); err == nil {
-		host = strings.TrimSpace(string(b))
+	// The name setup gave it, the SSH host it was set up as; a worker that became
+	// the lead keeps the name it was added with.
+	for _, f := range []string{"name", filepath.Join("worker-link", "name")} {
+		if b, err := os.ReadFile(filepath.Join(root, "state", f)); err == nil && strings.TrimSpace(string(b)) != "" {
+			host = strings.TrimSpace(string(b))
+		}
 	}
 	name := fs.String("name", host, "this machine's name")
 	fs.Parse(args[1:])

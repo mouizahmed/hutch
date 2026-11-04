@@ -646,6 +646,15 @@ hutch doctor. Run it again to update hutchd; boxes and state are kept.`,
 			if err := install(r, p, a, st, true); err != nil {
 				return err
 			}
+			if name := machineName(host); name != "" {
+				// Named as you reach it, unless it was added as a worker with a name.
+				if err := r.run(fmt.Sprintf(`f=/var/lib/hutch/state/name
+[ -e /var/lib/hutch/state/worker-link/name ] && exit 0
+[ "$(sudo cat $f 2>/dev/null)" = %[1]s ] && exit 0
+printf %%s %[1]s | sudo tee $f >/dev/null && sudo systemctl restart hutchd && for i in $(seq 50); do [ -S /run/hutch/api.sock ] && exit 0; sleep 0.2; done; exit 1`, shellQuote(name))); err != nil {
+					return fmt.Errorf("naming the machine %s: %w", name, err)
+				}
+			}
 			if err := setUserMachine(host); err != nil {
 				return err
 			}

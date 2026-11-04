@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"slices"
@@ -38,6 +39,9 @@ its own. Several machines need a bucket.`,
 				return err
 			}
 			defer sess.Close()
+			if name == "" {
+				name = machineName(host)
+			}
 			if name == "" {
 				out, err := exec.Command("ssh", "-o", "BatchMode=yes", host, "hostname -s").Output()
 				if err != nil {
@@ -90,7 +94,7 @@ its own. Several machines need a bucket.`,
 		},
 	}
 	f.register(c, false)
-	c.Flags().StringVar(&name, "name", "", "the machine's name (default: its hostname)")
+	c.Flags().StringVar(&name, "name", "", "the machine's name (default: the SSH host, else its hostname)")
 	return c
 }
 
@@ -150,6 +154,22 @@ keep two copies of each working.`,
 	c.Flags().BoolVar(&lost, "lost", false, "the machine is gone: bring its boxes back elsewhere from the bucket")
 	c.Flags().BoolVar(&down, "down", false, "with --lost: go on when the machine can't be fenced over SSH, as it's off")
 	return c
+}
+
+// machineName is a machine's name from the SSH host it's reached as, like
+// hutch-vps2 from ubuntu@hutch-vps2:2222, or empty for an IP address.
+func machineName(target string) string {
+	h := strings.TrimPrefix(target, "ssh://")
+	if _, rest, ok := strings.Cut(h, "@"); ok {
+		h = rest
+	}
+	if host, _, err := net.SplitHostPort(h); err == nil {
+		h = host
+	}
+	if h == "" || net.ParseIP(strings.Trim(h, "[]")) != nil {
+		return ""
+	}
+	return h
 }
 
 // sshHostname is the host an SSH target connects to, as another machine dials it.
