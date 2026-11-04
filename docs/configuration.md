@@ -1,83 +1,79 @@
 # Configuration
 
-Settings resolve from defaults, the machine, your user config, the project's `.hutch/hutch.toml`, and command flags. The schema rejects unknown keys, incorrect layers, types, and ranges. Each TOML file uses `version = 1`.
+Hutch's settings live in TOML files at a few layers, and each setting resolves from the most specific layer that sets it. This page covers the layers, the `hutch config` commands, and what a project may ask for. Every setting is listed in the [settings reference](reference/settings.md).
+
+## Layers
+
+| Layer | File | Holds |
+| --- | --- | --- |
+| Defaults | built in | A value for every setting |
+| Machine | on the machine; `hutch config set --machine` | Settings for every machine, like `placement.order` |
+| One machine | on the machine; `--on <machine>` | One machine's own value, over every machine's |
+| User | `~/.config/hutch/config.toml` | Yours, like `default_agent`, on every computer you use |
+| Project | `.hutch/hutch.toml` in the repository | The project's box size, idle timeout, and requests |
+| Flags | the command line | One command's value, like `hutch new --agent codex` |
+
+Each file starts with `version = 1`. The schema rejects unknown keys, a setting at a layer that can't hold it, wrong types, and out-of-range values. `$XDG_CONFIG_HOME/hutch` replaces `~/.config/hutch` when set.
+
+## Commands
 
 ```sh
-hutch config explain                   # resolved settings, source, and descriptions
+hutch config explain                   # every setting for this project, and where it comes from
 hutch config get idle_timeout
-hutch config set default_agent codex
+hutch config set default_agent codex   # your config; --project, --machine, or --on <machine> for others
 hutch config unset default_agent       # back to the layers below
-hutch config edit                      # ~/.config/hutch/config.toml
-hutch config edit --project
-hutch config validate
+hutch config edit                      # your config in $EDITOR; --project opens the project form
+hutch config validate                  # check every layer against the schema
 ```
-
-`$XDG_CONFIG_HOME/hutch` replaces `~/.config/hutch` when set. `machine` names the SSH target for this computer; it stays local when other settings sync. `HUTCH_MACHINE` overrides it.
 
 ## Common settings
 
-| Key | Layer | Default | Purpose |
-|---|---|---|---|
-| `default_agent` | user or project | `claude` | Agent for new terminals |
-| `size.cpu` | project | `4` | Box vCPUs |
-| `size.memory` | project | `8G` | Box memory |
-| `disk.size` | project | `50G` | Sparse disk capacity |
-| `idle_timeout` | project | `10m` | Sleep after inactivity |
-| `autonomy` | user or project request | `full` | `ask` or `full` |
-| `credentials` | user or project request | `["*"]` | Agent login grants |
-| `network.allow` | project request | empty | Explicit private `host:port` targets |
-| `network.egress` | user or project request | `open` | Public internet; `allowlist` isn't implemented, so boxes refuse to start with it (doctor and `hutch config validate` report it) |
-| `mcp_hosts.<server>` | user | empty | HTTPS hosts a stdio MCP uses its keys toward |
-| `keys.identity_hosts` | user | empty | Exact HTTPS hosts receiving a signed box identity |
-| `ports.wake_wait` | machine | `30s` | Forwarded connection's wake deadline |
-| `ports.parked_max` | machine | `100` | Maximum connections waiting for wake |
-| `mcp.start_timeout` | machine or user | `1m` | How long one MCP server may take to start in `doctor --template` |
-| `notify.command` | user | empty | Optional event handler command |
-| `placement.order` | machine | `fill` | With several machines: `fill` the fullest that fits, or `spread` to the emptiest |
-| `machine.max_boxes` | machine | `0` (no cap) | Awake boxes one machine may run; set per machine with `--on` |
-| `machine.run_boxes` | machine | `true` | `false` makes a machine coordinate only |
-| `tui.task_lines` | user | `2000` | Output lines kept for each command the TUI runs; earlier ones are dropped, and it says so |
-| `tui.cancel_grace` | user | `5s` | How long a canceled TUI task (or one running when you quit) has to stop before it's stopped for good |
-| `tui.diff_limit` | user | `2M` | The most of one diff the TUI's Git view reads |
+| Key | Layer | Default | |
+| --- | --- | --- | --- |
+| `default_agent` | user, project | `claude` | Agent for new terminals |
+| `size.cpu`, `size.memory` | project | `4`, `8G` | Each box's vCPUs and memory |
+| `disk.size` | project | `50G` | Each box's disk, allocated as it's used |
+| `idle_timeout` | project | `10m` | A box sleeps after this long without activity |
+| `base` | project | the default branch | Branch new boxes start from |
+| `autonomy` | user, project request | `full` | `full`: agents run without asking permission; `ask`: they ask |
+| `credentials` | user, project request | `["*"]` | Logins boxes get |
+| `network.allow` | project request | none | Private `host:port` targets boxes may reach |
+| `network.egress` | user, project request | `open` | Public internet; `allowlist` isn't enforced yet, so boxes refuse to start with it |
+| `limits.awake_boxes` | machine, user | `8` | Boxes awake at once; more queue |
+| `notify.command` | user | none | A command run on events, like an agent waiting for you |
 
-Use `hutch config explain` for the full reference generated from the running version's schema. The per-project grants in your user config bound requests from a repository; a project cannot grant itself more access.
+The [settings reference](reference/settings.md) has the rest, including the machine's memory, placement, backup, and TUI settings.
 
-## Agents and MCPs
+## Your config on several computers
 
-Built-in adapters describe Claude Code, Codex, and GitHub CLI. Custom adapters live in `~/.config/hutch/agents/*.toml` and travel with `hutch user sync`. An adapter declares its native start, resume, install and login commands, supported files, secret fields, credential hosts, and the token URL its login refreshes at. Start commands are argument lists split on whitespace; use an executable wrapper for shell syntax. Custom agents can launch without Hutch parsing their provider-specific transcripts; session discovery and handoff depend on supported formats.
+Your user config lives on the machine as well as on each computer, and every `hutch` command syncs the two first, so a setting you change on one computer reaches the others. The one exception is `machine`, the SSH target, which stays on each computer; `HUTCH_MACHINE` overrides it for one command.
 
-`hutch user sync` previews changes before applying them. Ordinary config, MCP secret fields, and agent credentials have different handling. Review path warnings: a laptop path or executable is not automatically available inside a Linux box. A config file's `gateway` fields route an agent through a gateway; when one is a URL on this computer's loopback, such as `ANTHROPIC_BASE_URL=http://127.0.0.1:8317` in Claude's settings, sync leaves all of them out and says so, and boxes use their own login.
-
-MCP clients run natively inside the selected agent; Hutch does not require an agent SDK. Remote HTTP MCPs need reachable URLs and their own authentication. Local stdio MCPs need their runtime and command installed in the box. Only config locations declared by the adapter are collected; unlisted project-local or keychain state does not transfer automatically.
-
-For a stdio MCP called `github` that sends its API key over HTTPS:
+If both sides changed since they last matched, the command stops and says so. Choose one:
 
 ```sh
-hutch config set mcp_hosts.github api.github.com
-hutch user sync
+hutch config sync --mine     # this computer's copy wins
+hutch config sync --theirs   # the machine's copy wins
 ```
 
-The proxy can replace supported token values in HTTPS headers toward configured hosts, including an explicitly configured nonstandard port such as `api.example.com:8443`. Bare host names mean port 443. Without known HTTPS targets, that MCP's keys remain real in the box and sync warns. Plain HTTP cannot use this proxy and keeps real credentials. Non-HTTPS protocols, short or non-token secrets, and project secret files can still contain real credentials. See [security](security.md).
+## Grants
 
-The MCP server's HTTP client must honor `HTTPS_PROXY` and the machine CA. Hutch enables Node 24's environment proxy support and sets the system CA bundle for common Python clients. Older Node versions and libraries that ignore proxy settings need a proxy-aware client or wrapper. Claude's default project-local servers in `~/.claude.json` are outside the built-in adapter's transferred user scope; use user-scoped MCP configuration or a project `.mcp.json` in Git.
+A repository is code you may not have written, so its `hutch.toml` can only *request* the settings that give boxes access: `autonomy`, `credentials`, `network.allow`, and `network.egress`. A project gets what it asks for up to your own value, plus whatever you've granted that project.
 
-Native MCP OAuth sessions are separate from the managed agent login. Sign in using the native client inside the box; neither laptop keychains nor native MCP token caches are transferred automatically. Claude's MCP session is preserved when Hutch updates its managed Claude login. Native refresh tokens remain in the box and its snapshots. Cloning a signed-in box can duplicate a rotating refresh token; use separate MCP sign-ins for independent boxes.
-
-Adapter MCP `secrets` fields describe header/environment tokens the proxy can substitute. `raw_secrets` names confidential fields used outside headers, such as Codex's `oauth.client_secret`; dotted paths select nested fields. These are kept in the encrypted credential layer and sent only to granted boxes, but remain real there, so sync and doctor warn. A changed or removed MCP secret is included in the sync preview even when ordinary configuration is unchanged.
-
-AWS's stdio `mcp-proxy-for-aws` needs its own AWS authentication context and `uvx` installed inside the box. A working laptop AWS profile does not transfer with the MCP command. Do not put long-lived AWS keys in ordinary agent config; choose a native AWS authentication flow and review the resulting box-local credential storage.
-
-`hutch doctor` checks the configured default adapter, captured login fields and their proxy placeholders, and MCP token targets without waking boxes or contacting providers. It warns about missing logins, unsupported token targets, and unverified MCP runtime/authentication. Stored credentials passing this check does not establish that a provider session is still valid. Use `hutch doctor --template` for fresh builds and MCP transport checks, and the native client to verify its authentication.
-
-## Box identity
+When a project asks for more, Hutch shows the difference before making a box, and asks whether to grant it. A grant is written to your user config, under `grants.<project>`, and applies to that project only. Without one, the box is made with what's already granted.
 
 ```sh
-hutch config set keys.identity_hosts service.example.com
-hutch machine identity > hutch-identity.json
+hutch config grants                    # what you've granted each project
+hutch config grants <project> --revoke
 ```
 
-Give the output's issuer and public JWKS to your service. Verify EdDSA signatures and `kid`, pin the issuer, require an exact `aud` matching the service host, validate `exp`/`nbf`, and authorize the `sub` (box) and `project` claims. Tokens last five minutes and have unique `jti` values. A service requiring stronger replay protection must enforce it itself.
+## Notifications
 
-The [independent Node verifier example](../examples/identity/README.md) implements these checks with the standard library and an explicit authorization callback.
+`notify.command` runs on the machine when something needs you. `HUTCH_EVENT` says what: `bell` (an agent wants you), `exited` (an agent exited), `crashed` (a box was lost, or rolled back to its last snapshot), `queued`, `force-slept` (a box slept for memory or `limits.box_max_awake`), `moved`, `returned` (a machine came back with an old copy of a box, kept aside), `unreachable` (a machine), `lead` (a machine stopped leading), or `login` (a login needs signing in again). It also gets `HUTCH_BOX`, `HUTCH_TITLE`, and `HUTCH_MESSAGE`. For example, with [ntfy](https://ntfy.sh):
 
-Hutch adds `X-Hutch-Identity` outside the box, replacing a spoofed header, only for exact configured hosts over HTTPS on port 443. It preserves the service's normal `Authorization`. No extra public machine port is opened. The signing key derives separately from the machine master key and is never written into boxes. Removing a host stops new tokens; already issued tokens remain valid until expiry. Identity proves which box made a request, not that its code or intent is trustworthy.
+```sh
+hutch config set notify.command 'curl -s -d "$HUTCH_TITLE: $HUTCH_MESSAGE" ntfy.sh/my-hutch-topic'
+```
+
+## Moved
+
+Agent logins, `hutch user sync`, MCP servers, and custom adapters are in [agents, logins, and MCPs](agents.md). Box identity is in the [security model](security.md#box-identity).

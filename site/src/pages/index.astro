@@ -2,13 +2,17 @@
 import Layout from '../layouts/Layout.astro';
 import GlyphDither from '../components/GlyphDither.astro';
 import InstallCommand from '../components/InstallCommand.astro';
+import Footer from '../components/Footer.astro';
+import { Image } from 'astro:assets';
+import tui from '../../../docs/assets/tui.png';
 ---
 <Layout title="Hutch: every coding agent gets its own computer" description="Hutch clones boxes from snapshots of your project's environment, keeps terminals running when you disconnect, and sleeps idle boxes, on a Linux machine you rent or own.">
-  <div class="page">
   <main>
+  <div class="page">
+  <div class="intro">
     <nav>
       <div class="logo">hutch</div>
-      <ul><li><a href="#">Docs</a></li><li><a href="https://github.com/mouizahmed/hutch">GitHub ↗</a></li></ul>
+      <ul><li><a href="/docs/">Docs</a></li><li><a href="https://github.com/mouizahmed/hutch">GitHub ↗</a></li></ul>
     </nav>
     <h1>Every coding agent gets its own computer.</h1>
     <InstallCommand />
@@ -17,7 +21,123 @@ import InstallCommand from '../components/InstallCommand.astro';
     <p class="muted">Works with Claude Code and Codex. Others via a TOML adapter.</p>
     <p class="open">Open source. Apache 2.0 licensed. <a href="https://github.com/mouizahmed/hutch">Star on GitHub ↗</a></p>
     <p class="open">Early software, not yet independently reviewed. <a href="https://github.com/mouizahmed/hutch/blob/main/docs/security.md">Security model ↗</a></p>
-  </main>
+  </div>
   <aside><GlyphDither /></aside>
   </div>
+  <section class="benefits" aria-labelledby="benefits-title">
+    <div class="points">
+      <h2 id="benefits-title">A computer for each task</h2>
+      <dl>
+        <div>
+          <dt>Work in isolation.</dt>
+          <dd>Run tasks in isolated boxes, each with its own files, processes, dependencies, and services.</dd>
+        </div>
+        <div>
+          <dt>Start prepared.</dt>
+          <dd>Clone your project's environment from a reusable template.</dd>
+        </div>
+        <div>
+          <dt>Keep work running.</dt>
+          <dd>Move work between your computer and a box. Leave agents working on your server while your computer is off, then reconnect when you’re ready.</dd>
+        </div>
+        <div>
+          <dt>Keep your logins out.</dt>
+          <dd>Boxes hold placeholders, never your tokens. A proxy on your machine uses the real ones only toward each agent’s own service.</dd>
+        </div>
+        <div>
+          <dt>Review before it ships.</dt>
+          <dd>See each box’s changes at a glance, read every diff, and commit or push from the TUI. Nothing leaves a box until you say so.</dd>
+        </div>
+      </dl>
+    </div>
+    <figure class="shot">
+      <Image src={tui} widths={[800, 1400, 2000]} sizes="(max-width: 800px) 100vw, 66vw" alt="The Hutch TUI: three boxes across two machines, their terminals on the left, and an agent's summary of its work open on the right." />
+      <figcaption>The TUI: every project, box, and terminal, across your machines.</figcaption>
+    </figure>
+  </section>
+
+  <section class="steps" aria-labelledby="steps-title">
+    <h2 id="steps-title">How it works</h2>
+    <ol>
+      <li>
+        <h3>Set up a machine.</h3>
+        <p>Any x86_64 Linux server you reach over SSH. Setup installs everything, and offers backups to an S3-compatible bucket.</p>
+        <pre><code><span class="prompt">$</span> hutch setup my-server
+<span class="prompt">$</span> hutch login claude gh</code></pre>
+      </li>
+      <li>
+        <h3>Describe your project.</h3>
+        <p>Your agent writes the recipe in <code>.hutch/</code>: a Dockerfile, services, and a script that proves the project works. A snapshot of the result is every box’s starting point.</p>
+        <pre><code><span class="prompt">$</span> hutch init
+<span class="prompt">$</span> hutch template snapshot</code></pre>
+      </li>
+      <li>
+        <h3>Start agents.</h3>
+        <p>Each box is a copy of the snapshot on its own branch, up in seconds. Watch them all in the TUI, and close your laptop.</p>
+        <pre><code><span class="prompt">$</span> hutch new "Fix the flaky login test"
+<span class="prompt">$</span> hutch</code></pre>
+      </li>
+    </ol>
+    <p class="more"><a href="/docs/quickstart/">Your first box, step by step →</a></p>
+  </section>
+
+  <section class="own" aria-labelledby="own-title">
+    <h2 id="own-title">On a machine you own</h2>
+    <dl>
+      <div>
+        <dt>Your code stays yours.</dt>
+        <dd>Boxes run on your server. Backups go to your bucket, encrypted with a key only you can unlock.</dd>
+      </div>
+      <div>
+        <dt>Your subscriptions, as they are.</dt>
+        <dd>Claude Code and Codex sign in with your own accounts and run with your config and MCP servers. Nothing to resell, nothing in between.</dd>
+      </div>
+      <div>
+        <dt>Your hardware, your bill.</dt>
+        <dd>A VPS, a cloud instance, or a box under your desk. Idle boxes sleep, so one machine holds many. Add machines when you need more.</dd>
+      </div>
+      <div>
+        <dt>Open source.</dt>
+        <dd>Apache 2.0. Read the code that runs your agents, and the <a href="/docs/security/">security model</a> it works to.</dd>
+      </div>
+    </dl>
+  </section>
+
+  <section class="faq" aria-labelledby="faq-title">
+    <h2 id="faq-title">Questions</h2>
+    <div class="questions">
+      <details>
+        <summary>How is this different from git worktrees on my laptop?</summary>
+        <p>A worktree shares your laptop: its CPU, its ports, its databases, and its battery. A box is a whole computer with the project’s services running, so agents can’t step on each other, and they keep working when your laptop is closed.</p>
+      </details>
+      <details>
+        <summary>What machine do I need?</summary>
+        <p>An x86_64 Linux server with systemd and Linux 6.1 or newer, reachable over SSH with passwordless sudo. 8 GB of memory is a good start. With KVM, boxes are Firecracker microVMs; without it, gVisor sandboxes. <a href="/docs/install/">Requirements</a></p>
+      </details>
+      <details>
+        <summary>Do I need a special subscription?</summary>
+        <p>No. Agents sign in with their own login flows, using the accounts you already have. Boxes get placeholders; the real tokens stay on your machine. <a href="/docs/agents/">Agents and logins</a></p>
+      </details>
+      <details>
+        <summary>Can I use my editor?</summary>
+        <p>Yes, over SSH. <code>hutch ssh-config</code> makes every box reachable as <code>&lt;box&gt;.hutch</code>, for <code>ssh</code>, VS Code, and JetBrains, and <code>hutch forward</code> brings a box’s dev server to localhost. <a href="/docs/networking/">Ports, SSH, and editors</a></p>
+      </details>
+      <details>
+        <summary>What happens if the server dies?</summary>
+        <p>With a backup bucket, <code>hutch machine restore</code> brings everything back on a new machine, losing at most the work since each box’s last checkpoint. Without one, its boxes are gone. <a href="/docs/backups/">Backups and recovery</a></p>
+      </details>
+      <details>
+        <summary>Is it ready for production use?</summary>
+        <p>Hutch is early software and hasn’t had an independent security review. Give boxes access only to accounts you’d trust an agent with. <a href="/docs/changelog/">Current limitations</a></p>
+      </details>
+    </div>
+  </section>
+
+  <section class="cta">
+    <h2>Give every agent its own computer.</h2>
+    <InstallCommand />
+    <p><a href="/docs/quickstart/">Your first box →</a> <a href="https://github.com/mouizahmed/hutch">GitHub ↗</a></p>
+  </section>
+  </main>
+  <Footer />
 </Layout>

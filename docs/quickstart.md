@@ -1,101 +1,98 @@
-# One machine
+# First box
 
-Hutch runs one daemon, `hutchd`, on your Linux machine. You reach it through SSH; no public box ports or web login are required.
+This guide goes from an empty Linux machine to an agent working in a box on your project. You'll need the `hutch` CLI on your computer ([install](install.md)) and a Git repository with an `origin` remote.
+
+Commands run on your computer unless they say otherwise.
 
 ## Prepare the machine
 
-Use an x86_64 Linux machine with systemd and kernel 6.1 or newer. The CLI also runs on arm64 computers, but arm64 machines are not supported yet. An Ubuntu machine with `apt` is the simplest path. Eight GB of RAM is a practical starting point; leave space for your projects and their snapshots. `/dev/kvm` selects Firecracker; without it Hutch uses gVisor. Their isolation and supported workloads differ; see [security](security.md).
+Use an x86_64 Linux machine with systemd and kernel 6.1 or newer; an Ubuntu VPS with 8 GB of memory is a good start. See [requirements](install.md#the-machine) for the details, including Firecracker and gVisor.
 
-Make `ssh <ssh-host>` work with a key, and allow that SSH user passwordless sudo. Run on your own computer:
+Make `ssh <ssh-host>` work with a key, as a user with passwordless sudo. Check:
+
+```sh
+ssh <ssh-host> sudo -n true && echo ready
+```
+
+## Set it up
 
 ```sh
 hutch setup <ssh-host>
 ```
 
-A released CLI downloads checksum-verified machine files for its exact version and the machine's architecture. A development CLI uses `make linux images` output; `--hutchd` and `--images` select local files explicitly.
+Setup checks the machine, installs the runtimes and `hutchd`, and builds the default image, which takes a few minutes. `/var/lib/hutch` must be XFS with reflink: setup proposes a blank disk to format, or an image file, and asks before it formats anything. Read that prompt carefully.
 
-Setup checks the machine, proposes storage, and installs the runtimes and daemon. `/var/lib/hutch` must use XFS with reflink. Review any disk-format prompt carefully. It also offers an S3-compatible backup bucket. Without one, nothing survives losing the machine. A bucket's recovery passphrase must be saved somewhere you can recover independently of that machine.
+It then offers a backup bucket. Without one, losing the machine loses its boxes; with one, save the recovery passphrase somewhere you can reach without the machine. You can add one later with `hutch machine bucket`; see [backups and recovery](backups.md).
 
-The bucket must honor conditional writes (`If-None-Match`) for snapshots and [conditional deletes (`If-Match`)](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-deletes.html) for garbage collection. Hutch checks delete support before sweeping backup chunks.
+Setup ends with `hutch doctor`. Every line should pass, or say how to fix it.
 
-```sh
-hutch doctor
-hutch machine
-```
-
-You can check the machine before signing in to an agent by starting a shell box:
+## Sign in
 
 ```sh
-hutch new --image base --cpus 1 --mem 1024 --cmd bash --name first-box
-hutch exec first-box -- uname -a
-hutch attach first-box
+hutch login claude gh      # or: hutch login codex gh
+hutch user sync            # review, then apply
 ```
 
-Detach with `Ctrl-b`, then `d`. This shell uses the default image; the project template below adds your development environment. Remove the trial box when finished with `hutch rm first-box`.
+Each login opens the tool's own sign-in. `gh` lets boxes clone private GitHub repositories. Sync copies your agent config, like `CLAUDE.md` and MCP servers, into every new box; read its preview before applying. See [agents, logins, and MCPs](agents.md).
 
-## Add your tools and project
+Check: `hutch user status` shows each login as signed in.
 
-Log in with each tool's own flow, then review what Hutch will copy from your computer:
+## Set up your project
 
-```sh
-hutch login claude gh                  # choose claude or codex
-hutch user sync
-hutch user status
-```
-
-Config sync affects newly created boxes. A copied MCP command still needs its executable, packages, files, and network access inside the box. OAuth for an MCP server is separate from the agent's login. See [configuration](configuration.md).
-
-In a Git checkout with an origin remote:
+In your checkout:
 
 ```sh
 hutch init
 ```
 
-Use `SETUP_PROMPT.md` to prepare `.hutch/` with your agent. Review its setup and verification scripts, image, resource sizes, and requested access. Commit and push the recipe, then:
+Init starts the project's template box and writes `.hutch/SETUP_PROMPT.md`. Give it to your agent, in your checkout:
 
 ```sh
-hutch template build
-hutch doctor --template
+claude "$(cat .hutch/SETUP_PROMPT.md)"
+```
+
+The agent writes the recipe in `.hutch/`: a Dockerfile, the services, and scripts that install dependencies and check the project works. Review it like any code you'd run, then build and snapshot it:
+
+```sh
 hutch template snapshot
-hutch new "Run the tests"
 ```
 
-A build prepares the environment; snapshot publishes the version new boxes use. Existing boxes keep their own environment. The template agent's work is imported for review during a build; resolve conflicts before replacing its box.
+The first time, a form asks you to confirm the box size. The build commits and pushes `.hutch/` if you haven't, after asking. It shows each step, then `Built and verified …` and `Template v1`. A failing step leaves the template box running so you can look: `hutch template shell`. See [projects and templates](templates.md).
 
-`doctor --template` takes the committed and pushed recipe through two fresh image and box builds. It bypasses Dockerfile layer caching, runs verification, compares package/tool versions and non-ignored project files, and initializes declared user-scope MCP servers. Temporary boxes and images are removed afterward. It does not replace the working template or publish a version. Add `.hutch/fingerprint.sh` for deterministic checks beyond that fingerprint, such as hashing generated files that Git ignores. The machine's Hutch default base image and explicit BuildKit cache mounts are shared; this check does not compare every byte of a disk or prove service behavior. Native-client MCP OAuth and unsupported transports are reported as unverified.
-
-## Work and reconnect
+## Start an agent
 
 ```sh
-hutch                                # open the TUI
-hutch ls
-hutch attach <box>
-hutch shell <box>
-hutch exec <box> -- git status
+hutch new "Run the tests and fix any that fail"
+```
+
+The box starts in seconds, as a copy of the template on its own branch, and the agent starts with your prompt. Open the TUI to watch it:
+
+```sh
+hutch
+```
+
+Your projects are tabs along the top, with their boxes and terminals on the left and the selected terminal on the right. Enter types into the terminal, and `ctrl+]` gives the keys back. Space lists every action, and `?` every key. See [the TUI](tui.md).
+
+## Review the work
+
+When the agent is done:
+
+```sh
 hutch diff <box>
+hutch pr <box>       # push its branch and open a pull request
 ```
 
-The [TUI](tui.md) covers what the CLI does: Space lists every action, `?` every key.
+Or, in the TUI, `g` opens the box's Git view. To carry on in your own checkout instead, `hutch local <box>` brings its branch and the agent's conversation back. See [review and deliver work](git.md).
 
-Each box is an independent working environment. Terminals in one box share files, dependencies, and services. A terminal is a process session; the agent's conversation is managed by the agent itself. Cold boots leave saved agent terminals ready to resume through the agent's picker.
-
-Restoring a gVisor snapshot on another machine also checks its recorded CPU features. A matching CPU vendor and runtime version alone do not guarantee a warm restore. Missing features, or an older imported snapshot without feature metadata, cause a cold boot that preserves files. Existing local sleep/wake keeps its warm behavior.
-
-For a service listening on port 3000 in a box:
+Boxes sleep on their own after 10 minutes without activity, and wake when you come back to them. Remove one when its work is pushed:
 
 ```sh
-hutch forward <box> 3000
+hutch rm <box>
 ```
 
-Use the local address printed by that command. The listener remains while the box sleeps; a connection wakes it and waits for a bounded interval. Open forwarded connections keep the box awake. The service may need its own startup or readiness handling after a cold boot.
+## Next
 
-## Update and recover
-
-Run the installer again to select the newest published CLI, or pin `HUTCH_VERSION` to an existing release. Then:
-
-```sh
-hutch machine upgrade
-hutch doctor
-```
-
-For a lost machine backed by a bucket, use `hutch machine restore <new-ssh-host>` with its recovery passphrase. To run boxes on more than one machine, see [several machines](machines.md). Avoid deleting a box until its work is somewhere you intend to keep it. See [release preparation](releases.md) for artifact verification and validation of upgrades and both backends.
+- [Boxes and terminals](boxes.md): more terminals, shells, sleep and wake, and resizing.
+- [Ports, SSH, and editors](networking.md): reach a box's dev server, or open it in your editor.
+- [Several machines](machines.md): add more machines for more boxes.
+- [Troubleshooting](troubleshooting.md), when something doesn't work.

@@ -1,0 +1,54 @@
+---
+import { getCollection, render } from 'astro:content';
+import Layout from '../../layouts/Layout.astro';
+import { sidebar, repo } from '../../docs/nav';
+import '../../styles/docs.css';
+
+export async function getStaticPaths() {
+  const docs = await getCollection('docs');
+  return docs.map((entry) => ({ params: { slug: entry.id === 'index' ? undefined : entry.id }, props: { entry } }));
+}
+
+const { entry } = Astro.props;
+const nav = sidebar((await getCollection('docs')).map((d) => d.id));
+const { Content, headings } = await render(entry);
+const title = headings.find((h) => h.depth === 1)?.text ?? entry.id;
+// The first paragraph, as plain text, describes the page.
+const lede = (entry.body ?? '').split(/\n\s*\n/).map((p) => p.trim()).find((p) => p && !/^[#|`>-]/.test(p)) ?? '';
+const description = lede.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/[`*_]/g, '').replace(/\s+/g, ' ').slice(0, 200);
+const page = (id: string) => (id === 'index' ? '/docs/' : `/docs/${id}/`);
+const here = page(entry.id);
+const source = `${repo}/blob/main/docs/${entry.id}.md`;
+---
+<Layout title={`${title} · Hutch docs`} description={description}>
+  <div class="docs">
+    <header>
+      <a class="logo" href="/">hutch</a>
+      <span class="section">docs</span>
+      <a class="gh" href={repo}>GitHub ↗</a>
+    </header>
+    <details class="menu" open>
+      <summary>Contents</summary>
+      <nav aria-label="Documentation">
+        {nav.map((group) => (
+          <section>
+            <h2>{group.title}</h2>
+            <ul>
+              {group.pages.map((p) => (
+                <li><a href={page(p.id)} aria-current={page(p.id) === here ? 'page' : undefined}>{p.label}</a></li>
+              ))}
+            </ul>
+          </section>
+        ))}
+      </nav>
+    </details>
+    <script is:inline>
+      // On a phone the page comes first; the contents stay a tap away.
+      if (matchMedia('(max-width: 800px)').matches) document.querySelector('.docs .menu').open = false;
+    </script>
+    <main>
+      <article><Content /></article>
+      <footer><a href={source}>Edit this page on GitHub ↗</a></footer>
+    </main>
+  </div>
+</Layout>

@@ -1,6 +1,6 @@
 # Release preparation
 
-Releases provide CLI archives, matching machine bundles and build attestations. A version-tag push builds and checks the artifacts and creates a draft release; publication is a separate maintainer action. See the [v0.2.4](releases/v0.2.4.md), [v0.2.3](releases/v0.2.3.md), [v0.2.2](releases/v0.2.2.md), [v0.2.1](releases/v0.2.1.md) and [v0.2.0](releases/v0.2.0.md) release notes for the current scope and limitations, and the [v0.1.0 notes](releases/v0.1.0.md) for the first release.
+Releases provide CLI archives, matching machine bundles and build attestations. A version-tag push builds and checks the artifacts and creates a draft release; publication is a separate maintainer action. The [release notes](changelog.md) list every release and the current limitations.
 
 ## Artifacts
 
@@ -29,6 +29,22 @@ gh attestation verify hutch_v0.1.0_linux_amd64.tar.gz --repo mouizahmed/hutch \
 ```
 
 This is separate from the automatic SHA-256 checks in `install.sh` and setup. GitHub documents [artifact attestation verification](https://cli.github.com/manual/gh_attestation_verify).
+
+## Notes and docs
+
+Each release has notes in `docs/releases/vX.Y.Z.md`, like the earlier ones: what's new, fixes, and upgrading. Add the release to the table in [the release notes](changelog.md), which the README links to. The docs site lists `docs/releases/` on its own. When the commands or settings changed, regenerate their references:
+
+```sh
+go test ./cmd/hutch -run TestCLIReference -update
+go test ./internal/config -run TestSettingsReference -update
+cd site && npm run check
+```
+
+The workflow's draft only links the changelog; set its text from the notes before publishing:
+
+```sh
+gh release edit vX.Y.Z --notes-file docs/releases/vX.Y.Z.md
+```
 
 ## Before publishing
 

@@ -26,6 +26,23 @@ type exitError int
 func (e exitError) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
 
 func main() {
+	root := newRoot()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	err := root.ExecuteContext(ctx)
+	stop()
+	var code exitError
+	switch {
+	case errors.As(err, &code):
+		os.Exit(int(code))
+	case err != nil:
+		fmt.Fprintln(os.Stderr, "hutch:", err)
+		os.Exit(1)
+	}
+}
+
+// newRoot is every command.
+func newRoot() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "hutch",
 		Short:         "Every coding agent gets its own computer",
@@ -56,18 +73,7 @@ func main() {
 	root.AddCommand(configCommands(), initCommand(), templateCommands(), projectCommands(), sizesCommand(), userCommands(), loginCommand())
 
 	setHelp(root)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	err := root.ExecuteContext(ctx)
-	stop()
-	var code exitError
-	switch {
-	case errors.As(err, &code):
-		os.Exit(int(code))
-	case err != nil:
-		fmt.Fprintln(os.Stderr, "hutch:", err)
-		os.Exit(1)
-	}
+	return root
 }
 
 // machineTarget uses the explicit environment or saved SSH target, otherwise

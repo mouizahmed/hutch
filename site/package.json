@@ -6,9 +6,12 @@
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "banner": "astro build && python3 brand/make-header.py"
+    "banner": "astro build && python3 brand/make-header.py",
+    "check": "astro build && node scripts/check-links.mjs"
   },
   "dependencies": {
-    "astro": "7.4.5"
+    "@astrojs/markdown-satteri": "0.4.6",
+    "astro": "7.4.5",
+    "github-slugger": "2.0.0"
   }
 }

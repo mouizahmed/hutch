@@ -2,13 +2,13 @@
 * { box-sizing: border-box; margin: 0; }
 body { background: var(--bg); color: var(--fg); font: 16px/1.8 "IBM Plex Mono", monospace; }
 .page { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 0.75rem; padding: 0.75rem; min-height: 100vh; }
-main { padding: 0 1rem 4rem 0; }
-nav { display: flex; justify-content: space-between; align-items: center; }
+.intro { padding: 0 1rem 4rem 0; }
+.page nav { display: flex; justify-content: space-between; align-items: center; }
 .logo { font-size: 1.35rem; font-weight: 500; letter-spacing: -0.02em; }
-nav ul { display: flex; gap: 1.5rem; list-style: none; padding: 0; font-size: 0.8rem; }
-nav a { color: var(--muted); text-decoration: none; }
-nav a:hover { color: var(--fg); }
-h1 { font-weight: 400; font-size: clamp(1.6rem, 2.6vw, 2.2rem); line-height: 1.3; margin: 30vh 0 2.5rem; max-width: 22ch; }
+.page nav ul { display: flex; gap: 1.5rem; list-style: none; padding: 0; font-size: 0.8rem; }
+.page nav a { color: var(--muted); text-decoration: none; }
+.page nav a:hover { color: var(--fg); }
+.page h1 { font-weight: 400; font-size: clamp(1.6rem, 2.6vw, 2.2rem); line-height: 1.3; margin: 30vh 0 2.5rem; max-width: 22ch; }
 p { max-width: 37rem; }
 .muted { color: var(--muted); font-size: 0.95rem; margin-top: 1.5rem; }
 .muted + .muted { margin-top: 0.5rem; }
@@ -26,12 +26,64 @@ p { max-width: 37rem; }
 .command .done { display: none; }
 .command button.copied .copy { display: none; }
 .command button.copied .done { display: block; }
-aside { position: sticky; top: 0.75rem; height: calc(100vh - 1.5rem); border-radius: 10px; overflow: hidden; background: var(--panel); }
-canvas { display: block; width: 100%; height: 100%; }
+.page aside { position: sticky; top: 0.75rem; height: calc(100vh - 1.5rem); border-radius: 10px; overflow: hidden; background: var(--panel); }
+.page canvas { display: block; width: 100%; height: 100%; }
+.benefits { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2.4fr); gap: 3rem; align-items: start; margin: 0 0.75rem; padding: 4rem 0; border-top: 1px solid #e5e5e5; }
+.benefits h2 { font-size: 1.2rem; font-weight: 400; }
+.benefits dl { display: grid; gap: 1.75rem; margin-top: 2rem; }
+.benefits dt { font-size: 0.95rem; font-weight: 500; }
+.benefits dd { margin-top: 0.5rem; font-size: 0.85rem; }
+.shot { margin: 0; }
+.shot img { display: block; width: 100%; height: auto; border-radius: 10px; }
+.shot figcaption { margin-top: 1rem; font-size: 0.8rem; color: var(--muted); }
+.steps, .own, .faq, .cta { margin: 0 0.75rem; padding: 4rem 0; border-top: 1px solid #e5e5e5; }
+:is(.steps, .own, .faq, .cta) h2 { font-size: 1.2rem; font-weight: 400; }
+.steps ol { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2rem; margin-top: 2rem; padding: 0; list-style: none; counter-reset: step; }
+.steps li { display: flex; flex-direction: column; counter-increment: step; }
+.steps h3 { font-size: 0.95rem; font-weight: 500; }
+.steps h3::before { content: counter(step) "  "; color: var(--muted); white-space: pre; }
+.steps li p { flex: 1; margin-top: 0.5rem; font-size: 0.85rem; }
+.steps pre { margin-top: 1.25rem; padding: 1.1rem 1.25rem; background: #111; color: #f2f2f2; font-size: 0.78rem; line-height: 1.7; overflow-x: auto; }
+.steps pre code { font: inherit; }
+.steps .prompt { color: #666; user-select: none; }
+:is(.steps, .faq) p code, .own a, .faq a, .more a, .cta a { color: var(--fg); }
+:is(.steps, .faq) p code { font-size: 0.92em; background: #f3f3f3; padding: 0.1em 0.3em; }
+.more { margin-top: 2rem; font-size: 0.85rem; }
+.more a, .faq a, .cta p a { text-decoration: none; }
+.own dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 2rem; border-top: 1px solid #e5e5e5; border-left: 1px solid #e5e5e5; }
+.own dl > div { min-height: 12rem; padding: 2rem; border-right: 1px solid #e5e5e5; border-bottom: 1px solid #e5e5e5; }
+.own dt { font-size: 1rem; font-weight: 500; }
+.own dd { margin-top: 0.75rem; font-size: 0.85rem; max-width: 30rem; }
+.faq .questions { margin-top: 1.5rem; max-width: 52rem; }
+.faq details { border-bottom: 1px solid #e5e5e5; }
+.faq summary { padding: 1rem 0; font-size: 0.95rem; cursor: pointer; list-style: none; }
+.faq summary::-webkit-details-marker { display: none; }
+.faq summary::before { content: "+ "; color: var(--muted); }
+.faq details[open] summary::before { content: "− "; }
+.faq details p { padding: 0 0 1.25rem 1.2rem; font-size: 0.85rem; max-width: 46rem; }
+.faq details p a { margin-left: 0.4rem; }
+.faq details p a::after { content: " →"; }
+.cta { padding-bottom: 4rem; }
+.cta h2 { font-size: clamp(1.4rem, 2.2vw, 1.9rem); margin-bottom: 2rem; }
+.cta .command { max-width: 56rem; }
+.cta p { margin-top: 1.5rem; font-size: 0.85rem; display: flex; gap: 2rem; }
+.site-footer nav { display: flex; align-items: center; gap: 1.25rem; margin: 0 0.75rem; padding: 2.5rem 0 3rem; font-size: 0.8rem; }
+.site-footer ul { display: flex; gap: 1.25rem; list-style: none; padding: 0; }
+.site-footer a { color: var(--muted); text-decoration: none; }
+.site-footer a:hover { color: var(--fg); }
+.site-footer .rule { flex: 1; height: 1px; background: #e5e5e5; }
 @media (max-width: 800px) {
   .page { grid-template-columns: minmax(0, 1fr); gap: 0; }
-  aside { position: relative; top: 0; height: 60vh; order: -1; }
-  main { padding: 2rem 16px 3rem; }
-  h1 { margin: 4rem 0 2rem; }
+  .page aside { position: relative; top: 0; height: 60vh; order: -1; }
+  .intro { padding: 2rem 16px 3rem; }
+  .page h1 { margin: 4rem 0 2rem; }
   .lede { margin-top: 3rem; }
+  .benefits { grid-template-columns: minmax(0, 1fr); gap: 2.5rem; padding: 2rem 16px 3rem; }
+  .benefits dl { gap: 1.5rem; }
+  .steps, .own, .faq, .cta { padding: 2.5rem 16px; }
+  .steps ol { grid-template-columns: minmax(0, 1fr); gap: 2rem; }
+  .own dl { grid-template-columns: minmax(0, 1fr); }
+  .own dl > div { min-height: 0; padding: 1.5rem; }
+  .site-footer nav { flex-wrap: wrap; row-gap: 0.75rem; padding: 2rem 16px; }
+  .site-footer .rule { display: none; }
 }

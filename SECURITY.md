@@ -8,4 +8,4 @@ You'll get an acknowledgement within a few days. Fixes ship as patch releases wi
 
 ## Supported versions
 
-Hutch is in early development and has no releases yet. Once it does, the current and previous minor versions get security fixes.
+Hutch is in early development. The current and previous minor versions get security fixes.

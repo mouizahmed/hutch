@@ -1,6 +1,6 @@
 # Contributing
 
-Hutch is pre-release. Describe the concrete problem or workflow when opening an issue. For larger changes, discuss the intended behavior first. Report vulnerabilities privately through [SECURITY.md](SECURITY.md).
+Hutch is early software. Describe the concrete problem or workflow when opening an issue. For larger changes, discuss the intended behavior first. Report vulnerabilities privately through [SECURITY.md](SECURITY.md).
 
 ## Build and check
 
@@ -27,4 +27,4 @@ Commit subjects use short, concrete, lower-case descriptions, for example `forwa
 
 `private/` is a separate private documentation repository and must never be committed into this public repository. Public usage and security documentation belongs under `docs/` or the root public Markdown files.
 
-The website source is in [`site/`](site/README.md). It is a static Astro site; its README covers local preview, building, and generating the shared header artwork.
+The website source is in [`site/`](site/README.md). It is a static Astro site that also renders `docs/` at `/docs/`; its README covers local preview, building, how the docs are wired in, and generating the shared header artwork.

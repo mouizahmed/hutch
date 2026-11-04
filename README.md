@@ -2,48 +2,54 @@
 
 # Hutch
 
-Every coding agent gets its own computer, on a Linux machine you rent or own. Hutch clones boxes from snapshots of your project's environment, keeps terminals running when you disconnect, and sleeps idle boxes. Machines with KVM use Firecracker microVMs; other machines use gVisor sandboxes.
+Every coding agent gets its own computer, on a Linux machine you rent or own. Hutch clones boxes from snapshots of your project's environment, keeps terminals running when you disconnect, and sleeps idle boxes. Machines with KVM run boxes as Firecracker microVMs; others use gVisor sandboxes.
 
-Hutch is early software. Read the [v0.2.4 release notes](docs/releases/v0.2.4.md) for supported platforms and current limitations.
+<p align="center"><img src="docs/assets/tui.png" alt="The Hutch TUI: three boxes across two machines, with an agent's summary of its work open on the right." width="100%"></p>
 
-The CLI and TUI run on Linux, macOS, and Windows. A project has reusable template versions; each box has its own files and services; terminals in the same box share that environment. Claude Code and Codex have built-in adapters, and you can add a TOML adapter for another agent's CLI.
+- **A box per task.** Each box has its own files, processes, services, and Git branch, copied in seconds from your project's template.
+- **Work that keeps going.** Agents carry on with your computer closed; attach again from anywhere and see where they are.
+- **Your logins stay out of boxes.** Boxes hold placeholders; a proxy on the machine uses the real tokens only toward each agent's own hosts.
+- **Your agents, as they are.** Claude Code and Codex are built in, with your config and MCP servers; any other agent CLI works through a TOML adapter.
+- **One machine, or several.** Add machines for more boxes, with encrypted backups to an S3-compatible bucket.
+
+Hutch is early software and hasn't had an independent security review. See the [release notes](docs/changelog.md) for current limitations.
 
 ## Install
 
-Install the CLI on Linux or macOS with:
+On Linux or macOS:
 
 ```sh
 curl -fsSL https://github.com/mouizahmed/hutch/releases/latest/download/install.sh | sh
 ```
 
-The script verifies the archive's SHA-256 checksum and installs into `~/.local/bin` without sudo. Add that directory to your `PATH` if needed. Set `HUTCH_VERSION=v0.1.0` to select a published version, or `HUTCH_INSTALL_DIR` to choose a directory. Before the first release, [build from source](CONTRIBUTING.md).
-
-Windows users can extract `hutch.exe` from the matching release archive and install OpenSSH and Git, or use WSL with the Linux installer. Native Windows handoffs copy code, while agent conversations stay on their original side.
+For Windows, the machine's requirements, and checking a release, see [install and requirements](docs/install.md).
 
 ## First box
 
-On a Linux machine with systemd, Linux 6.1 or newer, and passwordless SSH and sudo:
+On an x86_64 Linux machine with systemd and Linux 6.1 or newer, reachable with `ssh` and passwordless sudo:
 
 ```sh
 hutch setup <ssh-host>
-hutch login claude gh                  # or: hutch login codex gh
-hutch user sync                       # review the config and MCP changes
-cd /path/to/your/git-checkout
-hutch init
-```
-
-Follow the generated `SETUP_PROMPT.md` to prepare and review `.hutch/`, then build and publish a template snapshot:
-
-```sh
-hutch template build
+hutch login claude gh          # or: hutch login codex gh
+hutch user sync
+cd /path/to/your/checkout
+hutch init                     # then give .hutch/SETUP_PROMPT.md to your agent
 hutch template snapshot
-hutch new "Run the tests and investigate failures"
-hutch                                 # TUI: projects, boxes, and terminals
+hutch new "Run the tests and fix any that fail"
+hutch                          # the TUI
 ```
 
-Setup explains its storage plan before formatting a blank disk or making an XFS image. With no backup bucket, losing the machine loses its boxes. A project needs a Git origin reachable from the machine; the GitHub login supplies access to private GitHub repositories.
+[First box](docs/quickstart.md) walks through each step.
 
-See the [VPS quick start](docs/quickstart.md), [the TUI](docs/tui.md), [several machines](docs/machines.md), [configuration](docs/configuration.md), [security model](docs/security.md), and [release preparation](docs/releases.md).
+## Documentation
+
+- [Overview](docs/index.md) and [how Hutch works](docs/concepts.md)
+- [Projects and templates](docs/templates.md), [boxes and terminals](docs/boxes.md), [the TUI](docs/tui.md)
+- [Agents, logins, and MCPs](docs/agents.md), [configuration](docs/configuration.md)
+- [Several machines](docs/machines.md), [backups and recovery](docs/backups.md), [troubleshooting](docs/troubleshooting.md)
+- [CLI](docs/reference/cli.md) and [settings](docs/reference/settings.md) references, the [security model](docs/security.md)
+
+To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md) and the [architecture](docs/architecture.md). Report vulnerabilities privately through [SECURITY.md](SECURITY.md).
 
 ## License
 

@@ -29,6 +29,21 @@ Forks cannot reduce the credential grants of their source snapshot: raw credenti
 
 Credential grants and a host restriction are not authorization for arbitrary downstream operations. Review the permissions of each account. The optional signed box identity also names the caller; the receiving service must authorize it and validate all token claims.
 
+## Box identity
+
+A box can prove to your own services which box and project a request comes from. For each exact HTTPS host you name, Hutch adds an `X-Hutch-Identity` header outside the box: a JWT signed by the machine, lasting five minutes.
+
+```sh
+hutch config set keys.identity_hosts service.example.com
+hutch machine identity > hutch-identity.json
+```
+
+Give the output's issuer and public JWKS to your service. Verify EdDSA signatures and `kid`, pin the issuer, require an exact `aud` matching the service host, validate `exp`/`nbf`, and authorize the `sub` (box) and `project` claims. Tokens have unique `jti` values; a service requiring stronger replay protection must enforce it itself.
+
+The [independent Node verifier example](../examples/identity/README.md) implements these checks with the standard library and an explicit authorization callback.
+
+Hutch replaces a spoofed header, adds it only for exact configured hosts over HTTPS on port 443, and preserves the service's normal `Authorization`. No extra public machine port is opened. The signing key derives separately from the machine master key and is never written into boxes. Removing a host stops new tokens; already issued tokens remain valid until expiry. Identity proves which box made a request, not that its code or intent is trustworthy.
+
 ## Storage and updates
 
 Local disks, memory snapshots, and the trusted machine can contain source code and secrets. Bucket chunks and manifests are encrypted under keys derived from the machine's master key. Save the recovery passphrase independently; losing the machine without a bucket loses its boxes.
