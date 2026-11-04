@@ -2,7 +2,7 @@
 
 Hutch gives every coding agent its own computer, on a Linux machine you rent or own. Each agent works in a box: an isolated environment cloned from a snapshot of your project's setup, with its own files, processes, and services. Terminals keep running when you disconnect, and idle boxes sleep until you come back.
 
-These guides describe the upcoming Hutch v0.2.5; the latest published release is v0.2.4. Hutch is early software and has not had an independent security review; read the [security model](security.md) before giving boxes access to anything you care about.
+These guides describe Hutch v0.2.5. Hutch is early software and has not had an independent security review; read the [security model](security.md) before giving boxes access to anything you care about.
 
 ## What you need
 
