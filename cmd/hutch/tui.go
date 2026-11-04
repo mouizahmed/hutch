@@ -1321,12 +1321,16 @@ func highlight(line string, w int, bg color.Color) string {
 }
 
 // spread puts right at the right edge of a line of width w.
-// lineCounts is +added −removed, colored, or empty when both are 0.
+// lineCounts is +added −removed, colored, leaving out a side that's 0.
 func lineCounts(added, removed int) string {
-	if added == 0 && removed == 0 {
-		return ""
+	var parts []string
+	if added > 0 {
+		parts = append(parts, styleRead.Render(fmt.Sprintf("+%d", added)))
 	}
-	return styleRead.Render(fmt.Sprintf("+%d", added)) + " " + styleError.Render(fmt.Sprintf("−%d", removed))
+	if removed > 0 {
+		parts = append(parts, styleError.Render(fmt.Sprintf("−%d", removed)))
+	}
+	return strings.Join(parts, " ")
 }
 
 func spread(left, right string, w int) string {
