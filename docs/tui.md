@@ -6,6 +6,7 @@
 
 - **Space** opens the action palette, in the list or any view: every action that applies to the selected project, box, terminal, or view, found by typing any words of its name. One that doesn't apply says why instead of running.
 - **?** lists the keys.
+- **[** and **]** switch to the previous or next project tab; clicking a tab opens it, and its **×** closes it. **+** (or **p** in the palette) brings back a closed project or adds a checkout. Starting `hutch` in a repository opens its tab.
 - **/** narrows the open project's list to boxes and terminals whose names, agents, branches, or machines hold what you type; **Esc** clears it. Searching never wakes or starts anything.
 
 Commands the TUI runs for you (a new box, a move, a push) show as rows at the top of the list, with their output in the pane. One that ends well leaves the list and says what it did; one that fails stays, with its error, until **d** dismisses it. When a new box or terminal fails or is canceled, the next **n** or **N** opens with the prompt you wrote; Esc there discards it. **d** on a running one cancels it, asked first: it stops here, but the machine may already have done some of it. Quitting cancels what's still running, and stops it for good after `tui.cancel_grace`.
