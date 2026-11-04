@@ -75,15 +75,15 @@ p { max-width: 37rem; }
 @media (max-width: 800px) {
   .page { grid-template-columns: minmax(0, 1fr); gap: 0; }
   .page aside { position: relative; top: 0; height: 60vh; }
-  .intro { padding: 0 16px 3rem; }
+  .intro { padding: 0 0 3rem; }
   .page h1 { margin: 4rem 0 2rem; }
   .lede { margin-top: 3rem; }
-  .benefits { grid-template-columns: minmax(0, 1fr); gap: 2.5rem; padding: 2rem 16px 3rem; }
+  .benefits { grid-template-columns: minmax(0, 1fr); gap: 2.5rem; padding: 2rem 0 3rem; }
   .benefits dl { gap: 1.5rem; }
-  .steps, .own, .faq, .cta { padding: 2.5rem 16px; }
+  .steps, .own, .faq, .cta { padding: 2.5rem 0; }
   .steps ol { grid-template-columns: minmax(0, 1fr); gap: 2rem; }
   .own dl { grid-template-columns: minmax(0, 1fr); }
   .own dl > div { min-height: 0; padding: 1.5rem; }
-  .site-footer nav { flex-wrap: wrap; row-gap: 0.75rem; padding: 2rem 16px; }
+  .site-footer nav { flex-wrap: wrap; row-gap: 0.75rem; padding: 2rem 0; }
   .site-footer .rule { display: none; }
 }
