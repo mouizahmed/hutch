@@ -77,6 +77,9 @@ func (s *Server) threadNew(ctx context.Context, params json.RawMessage, _ *rpc.O
 	if err != nil {
 		return nil, err
 	}
+	if len(argv) == 0 {
+		return nil, fmt.Errorf("the %s adapter has an empty start command", p.Agent)
+	}
 	b, err := s.store.box(p.Box)
 	if err != nil {
 		return nil, err
@@ -92,6 +95,15 @@ func (s *Server) threadNew(ctx context.Context, params json.RawMessage, _ *rpc.O
 	w, err := s.awake(ctx, p.Box)
 	if err != nil {
 		return nil, err
+	}
+	if p.Cmd == "" {
+		_, code, err := s.boxRun(ctx, w, p.Box, "sh", "-c", `command -v "$1" >/dev/null 2>&1`, "sh", argv[0])
+		if err != nil {
+			return nil, err
+		}
+		if code != 0 {
+			return nil, fmt.Errorf("%s isn't installed in box %s: use a project template that installs it, or start a shell with hutch terminal %s --cmd bash", p.Agent, p.Box, p.Box)
+		}
 	}
 	if err := s.writeFiles(ctx, w, p.Box, p.Files); err != nil {
 		return nil, fmt.Errorf("session files: %w", err)

@@ -4,6 +4,7 @@ Each release's notes say what changed, how to upgrade, and the limitations that 
 
 | Version | Published (UTC) | |
 | --- | --- | --- |
+| [v0.2.5](releases/v0.2.5.md) | Unreleased | Machine reset, missing-agent errors, accurate worker timestamps, and clearer cloud handoffs |
 | [v0.2.4](releases/v0.2.4.md) | 2026-11-04 | Line counts for each box's work in the TUI, a clearer Git view, and fixes found setting up a fresh pair of machines |
 | [v0.2.3](releases/v0.2.3.md) | 2026-11-04 | Fixes for backups and canceling commands; garbage collection needs conditional deletes |
 | [v0.2.2](releases/v0.2.2.md) | 2026-11-03 | The TUI does what the CLI does: Git, Ports, and Machines views, the action palette, and template guidance |

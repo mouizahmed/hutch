@@ -21,7 +21,7 @@ The box is a copy of the newest template version, on a new branch `hutch/<box>` 
 | `--from <box>` | Copy a sleeping box instead of the template: its files and checkout as they are, on its machine. |
 | `--dry-run` | Say which template, logins, and network access the box would get, and start nothing. |
 
-Outside a project, or with `--image base`, a box boots from an image instead of a template: no checkout, nothing installed beyond the image. Such a box has no agent CLIs either, so start it with `--cmd bash`:
+Outside a project, or with `--image base`, a box boots from an image instead of a template: no checkout, nothing installed beyond the image. Such a box has no agent CLIs either: requesting one tells you it's missing and keeps the box so you can start a shell with `--cmd bash`:
 
 ```sh
 hutch new --image base --cpus 1 --mem 1024 --cmd bash --name scratch

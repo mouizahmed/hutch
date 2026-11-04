@@ -546,6 +546,20 @@ hutch machine lead <machine> [flags]
 | `--down` | with `--from-backup`: go on when the old lead can't be fenced over SSH, as it's off |
 | `--from-backup` | the lead is dead: promote `<machine>` (its SSH host) from the bucket's newest backup |
 
+### hutch machine reset
+
+Delete every local box, snapshot, project, login, setting, and machine identity on the SSH host. This permanently deletes work kept only there. Installed runtimes, images, build cache, and the storage mount are kept; the bucket is untouched. The daemon is stopped and disabled until setup runs again.
+
+Remove a worker with hutch machine rm first. A lead with enrolled workers must hand over the lead or remove its workers before it can be reset. Requires `--yes`; the SSH host is always explicit, even for your configured machine.
+
+```text
+hutch machine reset <ssh-host> [flags]
+```
+
+| Flag | |
+| --- | --- |
+| `--yes` | permanently delete the machine's boxes and setup state |
+
 ### hutch machine restore
 
 Set up a new machine and restore your old machine's state onto it from the bucket, with your recovery passphrase. Boxes come back from their newest snapshots the first time you use them. Then the new machine is your machine.

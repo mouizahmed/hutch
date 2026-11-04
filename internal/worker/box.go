@@ -489,6 +489,12 @@ func (w *Worker) Remove(id string) error {
 		return err
 	}
 	w.stop(b)
+	if b.GVisor != "" {
+		// Never descend into a sandbox's mounted filesystem while deleting it.
+		if err := w.unmountDisk(id); err != nil {
+			return err
+		}
+	}
 	if b.Slot != 0 {
 		w.teardown(slot(b.Slot))
 	}

@@ -28,7 +28,7 @@ Last, it stashes your local changes, as `hutch cloud <box>`, since the box has t
 
 Ignored files, like `node_modules` or `.env`, don't move: the box has the template's. List files a box needs but Git mustn't have in [`uploads.txt`](templates.md#files-that-arent-in-git). Changes and conversations are limited to 32 MB; commit and push large files first.
 
-`hutch cloud` is meant for a project with a template; set one up first, as in [projects and templates](templates.md). Without a template, it copies the directory's files, those Git doesn't ignore, into a copy of a sleeping box named `base`, and fails if the machine has none. Your local changes aren't stashed in that case.
+`hutch cloud` requires a project with a built template. Set one up first with `hutch init` in the Git repository, then `hutch template build`, as in [projects and templates](templates.md). Outside a project or before its first template build, it stops with those steps to follow.
 
 ## Bring a box's work back
 

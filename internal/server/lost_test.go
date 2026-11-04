@@ -118,3 +118,30 @@ func TestDoctorNeverConnected(t *testing.T) {
 		t.Fatalf("states: %v", states)
 	}
 }
+
+func TestWorkerHeartbeatSurvivesLeadRestart(t *testing.T) {
+	cfg := Config{Dir: t.TempDir()}
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.store.ensureWorker("worker", "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().UTC().Add(-6 * time.Hour)
+	if _, err := s.store.db.Exec(`UPDATE workers SET last_seen = ?, version = 'v0.2.4' WHERE id = 'worker'`, old); err != nil {
+		t.Fatal(err)
+	}
+	before := time.Now().UTC()
+	if _, err := s.workerMux("worker")[api.WorkerReport](t.Context(), json.RawMessage(`{}`), nil); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, err := restarted.store.workers()
+	if err != nil || len(ws) != 1 || ws[0].LastSeen.Before(before) {
+		t.Fatalf("last seen after restart: %+v, %v", ws, err)
+	}
+}

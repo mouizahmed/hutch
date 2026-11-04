@@ -360,6 +360,11 @@ func (s *Server) workerMux(workerID string) rpc.Mux {
 			if err := rpc.Decode(params, &r); err != nil {
 				return nil, err
 			}
+			// Persist heartbeats, so a lead restart doesn't make the last
+			// connection time look like the moment this worker went offline.
+			if _, err := s.store.exec(`UPDATE workers SET last_seen = ? WHERE id = ?`, time.Now().UTC(), workerID); err != nil {
+				return nil, err
+			}
 			s.mu.Lock()
 			w := s.workers[workerID]
 			if w != nil {

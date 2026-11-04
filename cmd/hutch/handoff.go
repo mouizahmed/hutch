@@ -83,29 +83,12 @@ func handoffCommands() []*cobra.Command {
 				}
 				project = len(versions) > 0
 			}
-			if project {
-				p.Project, p.Path = repo.ID, laptopPath(repo.Root)
-				if err := gitDelta(repo.Root, &p); err != nil {
-					return err
-				}
-			} else {
-				if _, err := findBox(ctx, sess, "base"); err != nil {
-					return fmt.Errorf("%s isn't in a project with a template, and the machine has no base box for other directories: hutch init in the repository, then hutch template build", dir)
-				}
-				root := dir
-				if repo != nil {
-					root = repo.Root
-				}
-				files, err := dirFiles(root)
-				if err != nil {
-					return err
-				}
-				data, err := tarFiles(root, files)
-				if err != nil {
-					return err
-				}
-				p.Source, p.Path, p.Delta = "base", laptopPath(root), &api.Delta{Files: data}
-				fmt.Printf("Files:    %d from %s (%s; no project template, so a base box)\n", len(files), root, size(len(data)))
+			if !project {
+				return fmt.Errorf("%s has no project template to start from: run hutch init in its Git repository, then hutch template build, and retry hutch cloud", dir)
+			}
+			p.Project, p.Path = repo.ID, laptopPath(repo.Root)
+			if err := gitDelta(repo.Root, &p); err != nil {
+				return err
 			}
 			if p.Delta.Size() > maxHandoff {
 				return fmt.Errorf("the changes come to %s; hutch cloud carries up to %s: commit and push large files first, or ignore them", size(p.Delta.Size()), size(maxHandoff))
@@ -394,31 +377,6 @@ func splitNul(b []byte) []string {
 		}
 	}
 	return out
-}
-
-// dirFiles lists what hutch cloud copies from a directory outside a project: in a
-// Git repository, the files Git doesn't ignore and the repository itself; else all.
-func dirFiles(root string) ([]string, error) {
-	var files []string
-	walk := func(dir string) error {
-		return filepath.WalkDir(filepath.Join(root, dir), func(p string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
-				return err
-			}
-			rel, _ := filepath.Rel(root, p)
-			files = append(files, rel)
-			return nil
-		})
-	}
-	if _, err := os.Stat(filepath.Join(root, ".git")); err != nil {
-		return files, walk(".")
-	}
-	list, err := gitRaw(root, "ls-files", "-co", "--exclude-standard", "-z")
-	if err != nil {
-		return nil, err
-	}
-	files = splitNul(list)
-	return files, walk(".git")
 }
 
 // tarFiles archives files and symlinks under root; anything else is skipped.

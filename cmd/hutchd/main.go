@@ -49,6 +49,7 @@ commands:
   image build [--pin REF@DIGEST]... <name> [<dir>]       build an image from the Dockerfile in a directory (none: the default image)
   run [--name NAME]                                      run the machine: boxes, their state, and the API
   fence [<why>]                                          stop this machine acting on its own: restart hutchd with its boxes asleep
+  reset --yes                                           delete local boxes and setup state (stop hutchd first)
   join --lead HOST:PORT --token TOKEN --name NAME        join another machine's lead as a worker (hutch machine add runs it)
   api                                                    bridge stdio to the API (what ssh <machine> hutchd api runs)
   restore                                                recover the state from a bucket: {"bucket": ..., "passphrase": ...} on stdin
@@ -89,6 +90,8 @@ func dispatch(ctx context.Context, root, fcVersion, socket string, args []string
 		return join(ctx, root, args)
 	case "fence":
 		return fence(root, args)
+	case "reset":
+		return reset(root, socket, args[1:])
 	case "restore":
 		var p api.ServerInitParams
 		if err := json.NewDecoder(os.Stdin).Decode(&p); err != nil {

@@ -79,6 +79,16 @@ hutch machine rm --lost <machine>   # it's gone: its boxes come back elsewhere f
 
 The first moves every box off the machine, warm where it can, then removes it; it's refused from then on. The second is for a machine that's gone, and is covered in [backups and recovery](backups.md#a-lost-worker). In short: `--lost` first fences the machine over SSH, so it stops running its copies. When it can't be reached, add `--down` only if you know it's off or cut off from the bucket and the other machines: otherwise two copies of its boxes keep working. Every machine writes a heartbeat to the bucket each `machines.lead_check`, and `--down` is refused while a machine's is recent. Boxes come back from their newest snapshot (`checkpoint.interval`); work since then is lost. Hutch never restores them on its own; it notifies you after `machines.lost_notify_after`. A lost machine added back keeps its stale copies asleep as `<box>-returned`.
 
+## Reset a machine
+
+```sh
+hutch machine reset <ssh-host> --yes
+```
+
+This permanently deletes every local box and snapshot, project, login, setting, and the machine's identity. Copy work you want to keep elsewhere first. Installed runtimes, images, build cache, the storage mount, and the bucket are kept.
+
+Remove a worker with `hutch machine rm` first. A lead with enrolled workers refuses a reset: hand over the lead or remove its workers first. Reset requires the SSH host and `--yes` explicitly, stops and disables hutchd, and leaves it stopped. Run `hutch setup <ssh-host>` to start fresh. This also works when the daemon cannot start.
+
 ## Changing the lead
 
 ```sh
