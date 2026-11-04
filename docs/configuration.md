@@ -46,7 +46,7 @@ Use `hutch config explain` for the full reference generated from the running ver
 
 Built-in adapters describe Claude Code, Codex, and GitHub CLI. Custom adapters live in `~/.config/hutch/agents/*.toml` and travel with `hutch user sync`. An adapter declares its native start, resume, install and login commands, supported files, secret fields, credential hosts, and the token URL its login refreshes at. Start commands are argument lists split on whitespace; use an executable wrapper for shell syntax. Custom agents can launch without Hutch parsing their provider-specific transcripts; session discovery and handoff depend on supported formats.
 
-`hutch user sync` previews changes before applying them. Ordinary config, MCP secret fields, and agent credentials have different handling. Review path warnings: a laptop path or executable is not automatically available inside a Linux box.
+`hutch user sync` previews changes before applying them. Ordinary config, MCP secret fields, and agent credentials have different handling. Review path warnings: a laptop path or executable is not automatically available inside a Linux box. A config file's `gateway` fields route an agent through a gateway; when one is a URL on this computer's loopback, such as `ANTHROPIC_BASE_URL=http://127.0.0.1:8317` in Claude's settings, sync leaves all of them out and says so, and boxes use their own login.
 
 MCP clients run natively inside the selected agent; Hutch does not require an agent SDK. Remote HTTP MCPs need reachable URLs and their own authentication. Local stdio MCPs need their runtime and command installed in the box. Only config locations declared by the adapter are collected; unlisted project-local or keychain state does not transfer automatically.
 

@@ -474,7 +474,7 @@ func (s *Server) boxPlan(ctx context.Context, params json.RawMessage, _ *rpc.Out
 		return nil, err
 	}
 	if len(versions) == 0 {
-		return nil, fmt.Errorf("this project has no template yet: hutch template snapshot")
+		return nil, errNoTemplate
 	}
 	v := versions[0]
 	src, err := s.store.box(v.Box)

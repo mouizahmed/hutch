@@ -123,6 +123,9 @@ func boxCommands() []*cobra.Command {
 			if dryRun && (image != "" || from != "" || repo == nil) {
 				return fmt.Errorf("--dry-run plans a box from this project's template: run it in a checkout, without --from or --image")
 			}
+			if image == "" && from == "" && repo == nil {
+				image = api.DefaultImage
+			}
 			if image != "" {
 				p := api.BootParams{ID: name, Image: image, VCPUs: cpus, MemMiB: memMiB, DiskBytes: cfg.Size("disk.size"), Idle: idle, Worker: on}
 				if err := rpc.Call(ctx, sess, api.BoxBoot, p, &b); err != nil {
@@ -146,9 +149,6 @@ func boxCommands() []*cobra.Command {
 					return err
 				}
 			} else {
-				if from == "" {
-					from = "base"
-				}
 				if err := rpc.Call(ctx, sess, api.BoxFork, api.ForkParams{Source: from, ID: name, Idle: idle, Credentials: cfg.List("credentials"), Worker: on}, &b); err != nil {
 					return err
 				}
@@ -164,7 +164,7 @@ func boxCommands() []*cobra.Command {
 	}
 	agent.register(newCmd)
 	newCmd.Flags().StringVar(&name, "name", "", "box name (default: generated, like quiet-fox)")
-	newCmd.Flags().StringVar(&from, "from", "", "sleeping box to fork from (default: this project's template, else base)")
+	newCmd.Flags().StringVar(&from, "from", "", "sleeping box to fork from (default: this project's template; outside a project, the base image)")
 	newCmd.Flags().StringVar(&image, "image", "", "cold boot from this image on the machine instead of forking")
 	newCmd.Flags().IntVar(&cpus, "cpus", 0, "vCPUs (with --image; default: size.cpu)")
 	newCmd.Flags().IntVar(&memMiB, "mem", 0, "memory in MiB (with --image; default: size.memory)")

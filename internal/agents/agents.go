@@ -47,11 +47,14 @@ type Adapter struct {
 
 // Source is a file or directory under ~, or with Keys only those top-level keys of
 // a JSON file. In credentials, Secrets names the keys whose values are secrets,
-// anywhere in the file; boxes get placeholders for them.
+// anywhere in the file; boxes get placeholders for them. In config, Gateway names
+// the dotted fields that route the agent through a gateway: when a URL among them
+// points at this computer, sync leaves all of them out, since a box can't reach it.
 type Source struct {
 	File    string   `toml:"file"`
 	Keys    []string `toml:"keys"`
 	Secrets []string `toml:"secrets"`
+	Gateway []string `toml:"gateway"`
 }
 
 func (m MCP) SecretFields() []string {
@@ -129,7 +132,7 @@ func (s *Source) UnmarshalTOML(v any) error {
 	case map[string]any:
 		f, _ := v["file"].(string)
 		s.File = f
-		for name, list := range map[string]*[]string{"keys": &s.Keys, "secrets": &s.Secrets} {
+		for name, list := range map[string]*[]string{"keys": &s.Keys, "secrets": &s.Secrets, "gateway": &s.Gateway} {
 			items, _ := v[name].([]any)
 			for _, k := range items {
 				ks, ok := k.(string)
@@ -140,12 +143,12 @@ func (s *Source) UnmarshalTOML(v any) error {
 			}
 		}
 		for k := range v {
-			if k != "file" && k != "keys" && k != "secrets" {
+			if k != "file" && k != "keys" && k != "secrets" && k != "gateway" {
 				return fmt.Errorf("unknown key %q", k)
 			}
 		}
 	default:
-		return fmt.Errorf("want a path or { file, keys, secrets }, got %v", v)
+		return fmt.Errorf("want a path or { file, keys, secrets, gateway }, got %v", v)
 	}
 	if !strings.HasPrefix(s.File, "~/") {
 		return fmt.Errorf("%q: paths must start with ~/", s.File)

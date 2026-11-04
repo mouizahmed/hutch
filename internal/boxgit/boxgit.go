@@ -49,6 +49,15 @@ type File struct {
 	Orig string // a rename or copy's source
 	Kind Kind
 	Code byte // Git's status letter: M, A, D, R, C, T, U, ?
+	// Added and Removed are the change's lines; Binary when Git counts none.
+	Added, Removed int
+	Binary         bool
+}
+
+// Unpushed is one commit on the branch that no remote has.
+type Unpushed struct {
+	Hash    string
+	Subject string
 }
 
 // Status is the repository as it is now.
@@ -59,8 +68,14 @@ type Status struct {
 	Ahead    int
 	Behind   int
 	Files    []File
-	Index    string // changes whenever what's staged does
+	Index    string     // changes whenever what's staged does
+	Commits  []Unpushed // on no remote, newest first, at most MaxCommits
 }
+
+const (
+	MaxCommits   = 20
+	maxUntracked = 200 // new files whose lines are counted
+)
 
 // Staged reports whether anything is staged to commit.
 func (s Status) Staged() bool {
@@ -101,7 +116,87 @@ func GetStatus(ctx context.Context, run Run) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	return parseStatus(out)
+	s, err := parseStatus(out)
+	if err != nil {
+		return s, err
+	}
+	if err := s.count(ctx, run); err != nil {
+		return s, err
+	}
+	if !s.Unborn {
+		out, err := git(ctx, run, readEnv, "log", "--no-color", "--format=%h%x09%s", "-n", fmt.Sprint(MaxCommits), "HEAD", "--not", "--remotes")
+		if err != nil {
+			return s, err
+		}
+		for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if hash, subject, ok := strings.Cut(l, "\t"); ok {
+				s.Commits = append(s.Commits, Unpushed{Hash: hash, Subject: subject})
+			}
+		}
+	}
+	return s, nil
+}
+
+// count fills in each file's lines: staged and unstaged from Git's numstat, new
+// files by counting their text lines.
+func (s *Status) count(ctx context.Context, run Run) error {
+	lines := map[Kind]map[string][2]int{}
+	binary := map[string]bool{}
+	for kind, args := range map[Kind][]string{
+		Unstaged: {"diff", "--numstat", "-z", "--no-renames", "--no-ext-diff", "--no-textconv"},
+		Staged:   {"diff", "--cached", "--numstat", "-z", "--no-renames", "--no-ext-diff", "--no-textconv"},
+	} {
+		out, err := git(ctx, run, readEnv, args...)
+		if err != nil {
+			return err
+		}
+		lines[kind] = map[string][2]int{}
+		for _, e := range strings.Split(string(out), "\x00") {
+			f := strings.SplitN(e, "\t", 3)
+			if len(f) != 3 {
+				continue
+			}
+			if f[0] == "-" {
+				binary[fmt.Sprint(kind)+f[2]] = true
+				continue
+			}
+			var n [2]int
+			fmt.Sscan(f[0], &n[0])
+			fmt.Sscan(f[1], &n[1])
+			lines[kind][f[2]] = n
+		}
+	}
+	var untracked []string
+	for _, f := range s.Files {
+		if f.Kind == Untracked && len(untracked) < maxUntracked {
+			untracked = append(untracked, f.Path)
+		}
+	}
+	if len(untracked) > 0 {
+		// grep counts a text file's lines and skips a binary one; it exits 1 when
+		// no file has a line.
+		out, _, code, err := run(ctx, append([]string{"grep", "-IHc", "--", ""}, untracked...), nil)
+		if err != nil {
+			return err
+		}
+		if code <= 1 {
+			lines[Untracked] = map[string][2]int{}
+			for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				if i := strings.LastIndexByte(l, ':'); i > 0 {
+					var n int
+					fmt.Sscan(l[i+1:], &n)
+					lines[Untracked][l[:i]] = [2]int{n, 0}
+				}
+			}
+		}
+	}
+	for i := range s.Files {
+		f := &s.Files[i]
+		n := lines[f.Kind][f.Path]
+		f.Added, f.Removed = n[0], n[1]
+		f.Binary = binary[fmt.Sprint(f.Kind)+f.Path]
+	}
+	return nil
 }
 
 func parseStatus(out []byte) (Status, error) {

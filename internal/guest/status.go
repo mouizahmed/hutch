@@ -86,20 +86,31 @@ func status(p guestproto.StatusParams) (guestproto.Status, error) {
 func gitStatus() *guestproto.GitStatus {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	// The work's lines count from the parent of the first commit no remote has
+	// (the empty tree when there is none), so pushed work stops counting. Text
+	// files only, and at most 500 new ones.
 	out, err := asDev(ctx, "/workspace", "sh", "-c", `git rev-parse --git-dir >/dev/null 2>&1 || exit 3
 git symbolic-ref --short -q HEAD || echo
 git status --porcelain | wc -l
-git rev-list --count HEAD --not --remotes 2>/dev/null || echo 0`)
+git rev-list --count HEAD --not --remotes 2>/dev/null || echo 0
+first=$(git rev-list --reverse HEAD --not --remotes 2>/dev/null | head -n 1)
+base=HEAD
+if [ -n "$first" ]; then base=$(git rev-parse -q --verify "$first^" || git hash-object -t tree /dev/null); fi
+git rev-parse -q --verify HEAD >/dev/null || base=$(git hash-object -t tree /dev/null)
+{ git diff --numstat "$base" 2>/dev/null
+  git ls-files -z -o --exclude-standard | head -z -n 500 | xargs -0 -r grep -IHc '' -- 2>/dev/null | sed 's/.*:\([0-9]*\)$/\1\t0/'
+} | awk '$1 != "-" { a += $1; d += $2 } END { print a + 0, d + 0 }'`)
 	if err != nil {
 		return nil
 	}
-	f := strings.Split(strings.TrimSpace(out), "\n")
-	if len(f) != 3 {
+	f := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(f) != 4 {
 		return nil
 	}
 	g := &guestproto.GitStatus{Branch: strings.TrimSpace(f[0])}
 	g.Changes, _ = strconv.Atoi(strings.TrimSpace(f[1]))
 	g.Unpushed, _ = strconv.Atoi(strings.TrimSpace(f[2]))
+	fmt.Sscan(f[3], &g.Added, &g.Removed)
 	return g
 }
 

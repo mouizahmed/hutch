@@ -1212,22 +1212,19 @@ func (m *tui) rowView(r tuiRow, w int) string {
 		default:
 			state = r.box.State
 		}
-		// Work only in the box: commits on no remote, and uncommitted changes.
 		var only []string
-		if r.box.Unpushed > 0 {
-			only = append(only, fmt.Sprintf("%d unpushed", r.box.Unpushed))
-		}
-		if r.box.Changes > 0 {
-			only = append(only, "edited")
+		if r.box.Machine != "" {
+			only = append(only, r.box.Machine)
 		}
 		if state != "" {
-			only = append([]string{state}, only...)
+			only = append(only, state)
 		}
-		if r.box.Machine != "" {
-			only = append([]string{r.box.Machine}, only...)
+		right := styleDim.Render(strings.Join(only, " · "))
+		// The lines of work only in the box, committed or not.
+		if lines := lineCounts(r.box.Added, r.box.Removed); lines != "" {
+			right += " " + lines
 		}
-		state = strings.Join(only, " · ")
-		right := styleDim.Render(state)
+		state = ansi.Strip(right)
 		branch := ""
 		// A box's own hutch/<box> branch goes without saying.
 		if r.box.Branch != "" && r.box.Branch != "hutch/"+r.box.ID {
@@ -1324,6 +1321,14 @@ func highlight(line string, w int, bg color.Color) string {
 }
 
 // spread puts right at the right edge of a line of width w.
+// lineCounts is +added −removed, colored, or empty when both are 0.
+func lineCounts(added, removed int) string {
+	if added == 0 && removed == 0 {
+		return ""
+	}
+	return styleRead.Render(fmt.Sprintf("+%d", added)) + " " + styleError.Render(fmt.Sprintf("−%d", removed))
+}
+
 func spread(left, right string, w int) string {
 	if room := w - lipgloss.Width(right) - 1; lipgloss.Width(left) > room {
 		left = truncate(left, room)

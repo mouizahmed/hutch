@@ -131,10 +131,14 @@ type Status struct {
 
 // GitStatus is /workspace's repository as it is now: the branch checked out (empty
 // when detached), uncommitted and untracked files, and commits on no remote.
+// Added and Removed count the lines of that work: everything since the last
+// commit a remote has, committed or not, new files included.
 type GitStatus struct {
 	Branch   string `json:"branch"`
 	Changes  int    `json:"changes"`
 	Unpushed int    `json:"unpushed"`
+	Added    int    `json:"added,omitempty"`
+	Removed  int    `json:"removed,omitempty"`
 }
 
 // ListenPort is a listening TCP socket in the guest.

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -81,6 +82,15 @@ func collectLayer() (collected, error) {
 				return c, err
 			}
 			for _, f := range files {
+				if len(src.Gateway) > 0 {
+					var note string
+					if f, note, err = dropLocalGateway(f, src.Gateway); err != nil {
+						return c, fmt.Errorf("%s: %w", src.File, err)
+					}
+					if note != "" {
+						c.warnings = append(c.warnings, note)
+					}
+				}
 				if a.MCP != nil && a.MCP.File == src.File {
 					var secret *guestproto.File
 					if f, secret, err = splitSecrets(f, a.MCP.Key, a.MCP.SecretFields()); err != nil {
@@ -250,14 +260,7 @@ func readLocal(home string, src agents.Source) ([]guestproto.File, error) {
 // splitSecrets moves the secret fields of MCP servers under key out of a config
 // file, into a separate file merged into the same path from the credentials part.
 func splitSecrets(f guestproto.File, key string, fields []string) (guestproto.File, *guestproto.File, error) {
-	var doc map[string]any
-	toml_ := strings.HasSuffix(f.Path, ".toml")
-	var err error
-	if toml_ {
-		_, err = toml.Decode(string(f.Data), &doc)
-	} else {
-		err = json.Unmarshal(f.Data, &doc)
-	}
+	doc, err := decodeConfig(f)
 	if err != nil {
 		return f, nil, err
 	}
@@ -281,22 +284,76 @@ func splitSecrets(f guestproto.File, key string, fields []string) (guestproto.Fi
 	if len(envs) == 0 {
 		return f, nil, nil
 	}
-	encode := func(v any) ([]byte, error) {
-		if toml_ {
-			var b bytes.Buffer
-			err := toml.NewEncoder(&b).Encode(v)
-			return b.Bytes(), err
-		}
-		return json.MarshalIndent(v, "", "  ")
-	}
-	if f.Data, err = encode(doc); err != nil {
+	if f.Data, err = encodeConfig(f.Path, doc); err != nil {
 		return f, nil, err
 	}
-	data, err := encode(map[string]any{key: envs})
+	data, err := encodeConfig(f.Path, map[string]any{key: envs})
 	if err != nil {
 		return f, nil, err
 	}
 	return f, &guestproto.File{Path: f.Path, Mode: 0o600, Data: data, Merge: true}, nil
+}
+
+func decodeConfig(f guestproto.File) (map[string]any, error) {
+	var doc map[string]any
+	if strings.HasSuffix(f.Path, ".toml") {
+		_, err := toml.Decode(string(f.Data), &doc)
+		return doc, err
+	}
+	return doc, json.Unmarshal(f.Data, &doc)
+}
+
+func encodeConfig(path string, v any) ([]byte, error) {
+	if strings.HasSuffix(path, ".toml") {
+		var b bytes.Buffer
+		err := toml.NewEncoder(&b).Encode(v)
+		return b.Bytes(), err
+	}
+	return json.MarshalIndent(v, "", "  ")
+}
+
+// dropLocalGateway leaves a config file's gateway fields out when one of them is
+// a URL on this computer's loopback, which a box can't reach; it says what it left out.
+func dropLocalGateway(f guestproto.File, fields []string) (guestproto.File, string, error) {
+	doc, err := decodeConfig(f)
+	if err != nil {
+		return f, "", err
+	}
+	local := ""
+	for _, field := range fields {
+		v, _ := agents.MCPField(doc, field)
+		s, _ := v.(string)
+		if u, err := url.Parse(s); err == nil && u.Host != "" && loopbackHost(u.Hostname()) {
+			local = fmt.Sprintf("%s points at %s on this computer", field, u.Host)
+			break
+		}
+	}
+	if local == "" {
+		return f, "", nil
+	}
+	var left []string
+	for _, field := range fields {
+		if _, ok := agents.TakeMCPField(doc, field); ok {
+			left = append(left, field)
+		}
+		if parent, _, ok := strings.Cut(field, "."); ok {
+			if m, isMap := doc[parent].(map[string]any); isMap && len(m) == 0 {
+				delete(doc, parent)
+			}
+		}
+	}
+	if f.Data, err = encodeConfig(f.Path, doc); err != nil {
+		return f, "", err
+	}
+	return f, fmt.Sprintf("%s: %s, so boxes leave out %s and use their own login", f.Path, local, strings.Join(left, ", ")), nil
+}
+
+func loopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func configPaths(f guestproto.File) [][]byte {

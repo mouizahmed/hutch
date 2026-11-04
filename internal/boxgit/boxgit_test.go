@@ -294,3 +294,35 @@ func TestPatternNames(t *testing.T) {
 		t.Fatalf("unstaging *.txt unstaged a.txt: %+v", s.Files)
 	}
 }
+
+// Each file carries its lines (a binary one none), and the branch's commits that
+// no remote has are listed, newest first.
+func TestCountsAndUnpushed(t *testing.T) {
+	ctx := t.Context()
+	dir, run := repo(t)
+	write(t, dir, "a.txt", "1\n2\n3\n")
+	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "first"}} {
+		if _, err := git(ctx, run, nil, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(t, dir, "a.txt", "1\ntwo\n3\n4\n")
+	write(t, dir, "new file.txt", "x\ny\n")
+	write(t, dir, "blob.bin", "\x00\x01\x02")
+	s, err := GetStatus(ctx, run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, _ := find(s, "a.txt", Unstaged); f.Added != 2 || f.Removed != 1 {
+		t.Fatalf("a.txt: %+v", f)
+	}
+	if f, _ := find(s, "new file.txt", Untracked); f.Added != 2 {
+		t.Fatalf("new file.txt: %+v", f)
+	}
+	if f, _ := find(s, "blob.bin", Untracked); f.Added != 0 {
+		t.Fatalf("blob.bin: %+v", f)
+	}
+	if len(s.Commits) != 1 || s.Commits[0].Subject != "first" {
+		t.Fatalf("commits: %+v", s.Commits)
+	}
+}

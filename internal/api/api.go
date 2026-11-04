@@ -370,9 +370,11 @@ type Box struct {
 	Branch     string    `json:"branch,omitempty"`
 	Base       string    `json:"base,omitempty"`
 	// Changes and Unpushed are uncommitted files and commits on no remote, from the
-	// box's latest report.
+	// box's latest report; Added and Removed are that work's lines.
 	Changes  int `json:"changes,omitempty"`
 	Unpushed int `json:"unpushed,omitempty"`
+	Added    int `json:"added,omitempty"`
+	Removed  int `json:"removed,omitempty"`
 	// Path is the laptop directory /workspace also appears at; threads start there.
 	Path string `json:"path,omitempty"`
 	// UID names a project box in the bucket, kept through moves and restores

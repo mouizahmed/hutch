@@ -1,6 +1,6 @@
 # The TUI
 
-`hutch` with no command opens the TUI: project tabs on top, the open project's boxes and their terminals on the left, and the selected terminal or a view on the right. Everything the CLI does is reachable from it; what asks questions (logins, editing config, `hutch local` and `hutch cloud`, adding or upgrading machines) gets the whole terminal and comes back when it ends.
+`hutch` with no command opens the TUI: project tabs on top, the open project's boxes and their terminals on the left, and the selected terminal or a view on the right. A box with work no remote has, committed or not, shows its lines as `+17 −1`. Everything the CLI does is reachable from it; what asks questions (logins, editing config, `hutch local` and `hutch cloud`, adding or upgrading machines) gets the whole terminal and comes back when it ends.
 
 ## Finding things
 
@@ -20,7 +20,7 @@ Each opens in the workspace pane in place of the terminal; **esc** goes back to 
 
 | Key | View | What it does |
 |---|---|---|
-| `g` | Git | The box's checkout as the agent sees it: staged, unstaged, untracked, and conflicted files; each file's diff, with line numbers; staging and unstaging whole files (`a`/`u`) or single hunks (`A`/`U`, refused if the file changed since it was shown); a commit of what's staged (`c`, refused if that changed since it was shown); fetch (`f`); fast-forward-only pull and push (`p`, `P`), each asked first (pull needs an upstream; push sets one); and the task diff against the base branch (Tab). Looking changes nothing and contacts no remote. |
+| `g` | Git | The box's checkout as the agent sees it: staged, unstaged, untracked, and conflicted files with their lines, and the commits not yet pushed; each file's diff, with line numbers; staging and unstaging whole files (`a`/`u`) or single hunks (`A`/`U`, refused if the file changed since it was shown); a commit of what's staged (`c`, refused if that changed since it was shown); fetch (`f`); fast-forward-only pull and push (`p`, `P`), each asked first (pull needs an upstream; push sets one); and the task diff against the base branch (Tab). Looking changes nothing and contacts no remote. |
 | `o` | Ports | What the box listens on, and forwarding a port to this computer's loopback (Enter), choosing another local port, or any free one, when it's taken. Forwards stay while you look elsewhere and close when you stop them or quit; a forward to a sleeping box wakes it on its first connection. |
 | `m` | Machines | Each machine's role, state, version, room, and boxes; adding, removing, removing as lost, making another the lead, and upgrading every machine. |
 

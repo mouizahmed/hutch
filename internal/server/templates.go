@@ -24,6 +24,8 @@ import (
 // The repository lives at /workspace in every box; the recipe is .hutch/ in it.
 const workspace = "/workspace"
 
+var errNoTemplate = errors.New("this project has no template yet: hutch template snapshot, or hutch new --image base for a bare box without the checkout")
+
 func (s *Server) projectInit(ctx context.Context, params json.RawMessage, _ *rpc.Out) (any, error) {
 	var p api.ProjectParams
 	if err := rpc.Decode(params, &p); err != nil {
@@ -503,7 +505,7 @@ func (s *Server) forkProject(ctx context.Context, p api.ForkParams, stdout, stde
 		return api.Box{}, err
 	}
 	if len(versions) == 0 {
-		return api.Box{}, errors.New("this project has no template yet: hutch template snapshot (or hutch new --from base)")
+		return api.Box{}, errNoTemplate
 	}
 	v := versions[0]
 	if err := s.forkLogins(v.Box, p.Credentials); err != nil {

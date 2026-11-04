@@ -16,7 +16,7 @@ hosts       = ["anthropic.com", "claude.com", "claude.ai"]
 token_url   = "https://platform.claude.com/v1/oauth/token"
 config = [
   "~/.claude/CLAUDE.md",
-  "~/.claude/settings.json",
+  { file = "~/.claude/settings.json", gateway = ["env.ANTHROPIC_BASE_URL", "env.ANTHROPIC_AUTH_TOKEN", "env.ANTHROPIC_API_KEY", "env.ANTHROPIC_CUSTOM_HEADERS", "env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] },
   "~/.claude/skills/",
   "~/.claude/agents/",
   "~/.claude/commands/",

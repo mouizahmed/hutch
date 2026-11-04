@@ -342,7 +342,7 @@ type gitRefreshMsg struct{ box string }
 func (m *tui) gitView(w, h int) string {
 	v := m.gitv
 	b := v.box
-	head := styleBold.Render("Git") + styleDim.Render("  "+b.ID+" · /workspace")
+	lines := []string{styleBold.Render("Git") + styleDim.Render("  "+b.ID+" · /workspace")}
 	s := v.status
 	if v.loaded && v.err == "" {
 		branch := s.Branch
@@ -352,59 +352,144 @@ func (m *tui) gitView(w, h int) string {
 		if s.Unborn {
 			branch += " (no commits yet)"
 		}
-		up := "no upstream"
+		up := " → no upstream yet"
 		if s.Upstream != "" {
-			up = fmt.Sprintf("%s · %d ahead, %d behind as of the last fetch", s.Upstream, s.Ahead, s.Behind)
+			up = " → " + s.Upstream
+			switch {
+			case s.Ahead == 0 && s.Behind == 0:
+				up += " · in step as of the last fetch"
+			default:
+				var ab []string
+				if s.Ahead > 0 {
+					ab = append(ab, fmt.Sprintf("%d ahead", s.Ahead))
+				}
+				if s.Behind > 0 {
+					ab = append(ab, fmt.Sprintf("%d behind", s.Behind))
+				}
+				up += " · " + strings.Join(ab, ", ") + " as of the last fetch"
+			}
 		}
-		head += "\n" + styleWorking.Render(branch) + styleDim.Render(" → "+up)
+		lines = append(lines, truncate(styleWorking.Render(branch)+styleDim.Render(up), w-1))
 	}
-	lines := []string{head}
 	switch {
 	case v.err != "":
 		lines = append(lines, "", styleError.Render(truncate(v.err, w-1)), "", styleDim.Render("r tries again · esc back"))
 		return strings.Join(lines, "\n")
 	case !v.loaded:
-		return head + "\n\n" + styleDim.Render("reading the repository…")
+		return strings.Join(append(lines, "", styleDim.Render("reading the repository…")), "\n")
 	}
 	if v.diff != nil {
 		return strings.Join(append(lines, m.gitDiffView(w, h-len(lines))...), "\n")
 	}
+	lines = append(lines, workSummary(s))
+	hd := len(lines)
 	if v.busy != "" {
 		lines = append(lines, styleDim.Render(v.busy+"…"))
 	}
-	lines = append(lines, "")
-	if len(s.Files) == 0 {
-		lines = append(lines, styleDim.Render("  Nothing changed: the worktree and index match HEAD."))
-	}
 	selLine := 0
 	kind := boxgit.Kind(-1)
-	for pos, i := range v.ordered() {
+	ordered := v.ordered()
+	for pos, i := range ordered {
 		f := s.Files[i]
 		if f.Kind != kind {
 			kind = f.Kind
-			lines = append(lines, styleLabel.Render(strings.ToUpper(kind.String()[:1])+kind.String()[1:]))
+			n := 0
+			for _, g := range s.Files {
+				if g.Kind == kind {
+					n++
+				}
+			}
+			title := strings.ToUpper(kind.String()[:1]) + kind.String()[1:]
+			lines = append(lines, "", styleLabel.Render(title)+styleDim.Render(fmt.Sprintf(" %d", n)))
 		}
 		name := f.Path
 		if f.Orig != "" {
 			name = f.Orig + " → " + f.Path
 		}
-		line := truncate(fmt.Sprintf("  %c %s", f.Code, name), w-1)
+		right := lineCounts(f.Added, f.Removed)
+		if f.Binary {
+			right = styleDim.Render("binary")
+		}
+		line := spread(fmt.Sprintf("  %s %s", gitCode(f), name), right, w-1)
 		if pos == v.pos {
 			line, selLine = highlight(line, w-1, colorCursor), len(lines)
 		}
 		lines = append(lines, line)
 	}
-	lines = append(lines, "", styleDim.Render(truncate("enter diff · a/u stage/unstage file · c commit · tab task diff · f fetch · p pull · P push · r refresh · esc", w-1)))
+	if len(ordered) == 0 {
+		msg := "  Clean: nothing uncommitted, and nothing waiting to be pushed."
+		if len(s.Commits) > 0 {
+			msg = "  Nothing uncommitted."
+		}
+		lines = append(lines, "", styleDim.Render(msg))
+	}
+	if len(s.Commits) > 0 {
+		lines = append(lines, "", spread(styleLabel.Render("Not pushed")+styleDim.Render(fmt.Sprintf(" %d", len(s.Commits))), styleDim.Render("tab shows the task diff"), w-1))
+		for _, c := range s.Commits {
+			lines = append(lines, truncate("  "+styleUnread.Render(c.Hash)+" "+c.Subject, w-1))
+		}
+	}
+	lines = append(lines, "", styleDim.Render(truncate("enter diff · a/u stage/unstage · c commit · tab task diff · f fetch · p pull · P push · r refresh · esc back", w-1)))
 	// Keep the selected file on screen, under the header.
 	if len(lines) > h {
 		cut := min(len(lines)-h, max(selLine-(h-4), 0))
-		hd := min(3, len(lines))
 		lines = append(lines[:hd], lines[hd+cut:]...)
 		if len(lines) > h {
 			lines = append(lines[:h-1], lines[len(lines)-1])
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// workSummary is one line on the box's work: files and lines not yet committed,
+// and commits not yet pushed.
+func workSummary(s boxgit.Status) string {
+	files := map[string]bool{}
+	added, removed := 0, 0
+	for _, f := range s.Files {
+		files[f.Path] = true
+		added += f.Added
+		removed += f.Removed
+	}
+	var parts []string
+	if len(files) > 0 {
+		parts = append(parts, styleDim.Render(plural(fmt.Sprint(len(files)), "file")+" changed")+" "+lineCounts(added, removed))
+	}
+	if n := len(s.Commits); n > 0 {
+		more := ""
+		if n == boxgit.MaxCommits {
+			more = "+"
+		}
+		parts = append(parts, styleWorking.Render(plural(fmt.Sprint(n)+more, "commit")+" not pushed"))
+	}
+	if len(parts) == 0 {
+		return styleDim.Render("no changes")
+	}
+	return strings.Join(parts, styleDim.Render(" · "))
+}
+
+// gitCode is a file's status letter, colored by what it does.
+func gitCode(f boxgit.File) string {
+	c := string(f.Code)
+	switch f.Code {
+	case 'A', '?':
+		return styleRead.Render(c)
+	case 'D':
+		return styleError.Render(c)
+	case 'U':
+		return styleError.Render("U")
+	}
+	return styleWorking.Render(c)
+}
+
+// gitMeta reports whether a diff line is Git's bookkeeping rather than content.
+func gitMeta(l string) bool {
+	for _, p := range []string{"index ", "--- ", "+++ ", "new file mode", "deleted file mode", "old mode", "new mode", "similarity index", "rename from", "rename to", "Binary files"} {
+		if strings.HasPrefix(l, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // selected is the file under the cursor.
@@ -432,18 +517,27 @@ func (v *gitView) ordered() []int {
 func (m *tui) gitDiffView(w, h int) []string {
 	v := m.gitv
 	d := v.diff
-	title := "Task diff since the merge base with origin/" + v.box.Base + " (committed and not)"
-	if !v.branch {
-		title = fmt.Sprintf("%s · %s", v.diffFor.Path, v.diffFor.Kind)
-		if n := len(d.Hunks); n > 0 {
-			title += fmt.Sprintf(" · hunk %d of %d", v.hunk+1, n)
+	lines := d.Lines()
+	added, removed := 0, 0
+	for _, l := range lines {
+		switch {
+		case strings.HasPrefix(l, "+") && !strings.HasPrefix(l, "+++"):
+			added++
+		case strings.HasPrefix(l, "-") && !strings.HasPrefix(l, "---"):
+			removed++
 		}
 	}
-	out := []string{styleBold.Render(truncate(title, w-1))}
+	title := styleBold.Render("Task diff") + styleDim.Render(" since origin/"+v.box.Base+", committed and not")
+	if !v.branch {
+		title = styleBold.Render(v.diffFor.Path) + styleDim.Render(" · "+v.diffFor.Kind.String())
+		if n := len(d.Hunks); n > 0 {
+			title += styleDim.Render(fmt.Sprintf(" · hunk %d of %d", v.hunk+1, n))
+		}
+	}
+	out := []string{spread(title, lineCounts(added, removed), w-1)}
 	if d.Cut {
 		out = append(out, styleError.Render("Longer than tui.diff_limit: the rest isn't shown, and hunks past the cut can't be staged here."))
 	}
-	lines := d.Lines()
 	rows := max(h-len(out)-2, 1)
 	v.scroll = max(min(v.scroll, len(lines)-rows), 0)
 	var cur boxgit.Hunk
@@ -451,7 +545,8 @@ func (m *tui) gitDiffView(w, h int) []string {
 		cur = d.Hunks[v.hunk]
 	}
 	for i := v.scroll; i < len(lines) && len(out) < rows+1; i++ {
-		l := truncate(fmt.Sprintf("%4d %s", i+1, lines[i]), w-1)
+		// A tab is one rune but several columns: expand it, so the line fits.
+		l := truncate(fmt.Sprintf("%4d %s", i+1, strings.ReplaceAll(lines[i], "\t", "    ")), w-1)
 		switch {
 		case strings.HasPrefix(lines[i], "+") && !strings.HasPrefix(lines[i], "+++"):
 			l = styleRead.Render(l)
@@ -459,6 +554,12 @@ func (m *tui) gitDiffView(w, h int) []string {
 			l = styleError.Render(l)
 		case strings.HasPrefix(lines[i], "@@"):
 			l = styleUnread.Render(l)
+		case strings.HasPrefix(lines[i], "diff --git "):
+			// A file's start in the task diff: its name, set off.
+			name := lines[i][strings.LastIndex(lines[i], " b/")+3:]
+			l = styleLabel.Render(truncate(fmt.Sprintf("%4s ── %s ", "", name), w-1))
+		case gitMeta(lines[i]):
+			l = styleDim.Render(l)
 		}
 		if i >= cur.Start && i < cur.End && cur.End > 0 {
 			l = "▌" + l

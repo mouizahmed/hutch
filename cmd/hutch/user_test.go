@@ -11,6 +11,27 @@ import (
 	"github.com/mouizahmed/hutch/internal/guestproto"
 )
 
+// A gateway on this computer's loopback can't be reached from a box: the
+// built-in Claude adapter's gateway fields go, the rest of the file stays, and a
+// remote gateway is synced as it is.
+func TestDropLocalGateway(t *testing.T) {
+	var fields []string
+	for _, src := range agents.Builtin()["claude"].Config {
+		if src.File == "~/.claude/settings.json" {
+			fields = src.Gateway
+		}
+	}
+	local := guestproto.File{Path: "~/.claude/settings.json", Data: []byte(`{"model": "opus", "env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8317", "ANTHROPIC_AUTH_TOKEN": "tok"}}`)}
+	f, note, err := dropLocalGateway(local, fields)
+	if err != nil || note == "" || strings.Contains(string(f.Data), "ANTHROPIC") || strings.Contains(string(f.Data), `"env"`) || !strings.Contains(string(f.Data), `"opus"`) {
+		t.Fatalf("local gateway: %s, %q, %v", f.Data, note, err)
+	}
+	remote := guestproto.File{Path: local.Path, Data: []byte(`{"env": {"ANTHROPIC_BASE_URL": "https://gateway.example", "ANTHROPIC_AUTH_TOKEN": "tok"}}`)}
+	if f, note, err := dropLocalGateway(remote, fields); err != nil || note != "" || string(f.Data) != string(remote.Data) {
+		t.Fatalf("remote gateway changed: %s, %q, %v", f.Data, note, err)
+	}
+}
+
 // MCP env values and auth headers are secrets: with the built-in adapters'
 // declarations they must leave the config part entirely.
 func TestSplitSecrets(t *testing.T) {

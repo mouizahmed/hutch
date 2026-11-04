@@ -96,7 +96,7 @@ func (s *Server) boxList(ctx context.Context, _ json.RawMessage, _ *rpc.Out) (an
 			}
 		}
 		g := s.gitStates[boxes[i].ID]
-		boxes[i].Changes, boxes[i].Unpushed = g.Changes, g.Unpushed
+		boxes[i].Changes, boxes[i].Unpushed, boxes[i].Added, boxes[i].Removed = g.Changes, g.Unpushed, g.Added, g.Removed
 	}
 	return boxes, nil
 }
