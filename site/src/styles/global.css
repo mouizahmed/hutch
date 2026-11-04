@@ -74,7 +74,7 @@ p { max-width: 37rem; }
 .site-footer .rule { flex: 1; height: 1px; background: #e5e5e5; }
 @media (max-width: 800px) {
   .page { grid-template-columns: minmax(0, 1fr); gap: 0; }
-  .page aside { position: relative; top: 0; height: 60vh; order: -1; }
+  .page aside { position: relative; top: 0; height: 60vh; }
   .intro { padding: 2rem 16px 3rem; }
   .page h1 { margin: 4rem 0 2rem; }
   .lede { margin-top: 3rem; }

@@ -1,0 +1,16 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "hutch-site",
+  "account_id": "241c9caf4e47bf221e81d01f36e35be7",
+  "compatibility_date": "2026-11-04",
+  "workers_dev": false,
+  "routes": [{ "pattern": "usehutch.dev", "custom_domain": true }],
+  "assets": {
+    "directory": "./dist",
+    "html_handling": "force-trailing-slash"
+  },
+  "observability": {
+    "enabled": true,
+    "traces": { "enabled": true }
+  }
+}
