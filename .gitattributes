@@ -1,0 +1,3 @@
+# Generated references are compared byte for byte by their tests.
+/docs/reference/cli.md text eol=lf
+/docs/reference/settings.md text eol=lf
