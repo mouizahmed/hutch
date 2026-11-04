@@ -2,6 +2,8 @@
 
 # Hutch
 
+[Website](https://usehutch.dev) · [Documentation](https://usehutch.dev/docs/)
+
 Every coding agent gets its own computer, on a Linux machine you rent or own. Hutch clones boxes from snapshots of your project's environment, keeps terminals running when you disconnect, and sleeps idle boxes. Machines with KVM run boxes as Firecracker microVMs; others use gVisor sandboxes.
 
 <p align="center"><img src="docs/assets/tui.png" alt="The Hutch TUI: three boxes across two machines, with an agent's summary of its work open on the right." width="100%"></p>
